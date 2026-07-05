@@ -2,7 +2,7 @@ FROM nodeops/sandbox:debian
 
 # Runner + docker + git + the launch script. Pin the runner version; bump to
 # rebuild. Verify the download checksum from the runner release page.
-ARG RUNNER_VERSION=2.330.0
+ARG RUNNER_VERSION=2.335.1
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl git jq sudo docker.io libicu-dev \
@@ -15,12 +15,10 @@ RUN apt-get update -qq \
  && ./bin/installdependencies.sh \
  && chown -R runner:runner /opt/actions-runner
 
-# start-runner.sh via RUN heredoc (COPY is not permitted by the template builder).
-RUN cat > /opt/start-runner.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-cd /opt/actions-runner
-RUNNER_ALLOW_RUNASROOT=1 ./run.sh --jitconfig "${JIT_CONFIG}" || true
-sudo halt -f
-EOF
-RUN chmod +x /opt/start-runner.sh
+# start-runner.sh via single-line printf. COPY is not permitted by the template
+# builder, and heredocs are not either: the builder parses each physical line as a
+# Dockerfile instruction (no heredoc awareness), so a `set -euo pipefail` body line
+# is read as a `SET` instruction and rejected. Single-quoted printf args keep
+# ${JIT_CONFIG} literal so it expands at runtime, not build time.
+RUN printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'cd /opt/actions-runner' 'RUNNER_ALLOW_RUNASROOT=1 ./run.sh --jitconfig "${JIT_CONFIG}" || true' 'halt -f 2>/dev/null || poweroff -f 2>/dev/null || echo o > /proc/sysrq-trigger' > /opt/start-runner.sh \
+ && chmod +x /opt/start-runner.sh
