@@ -1,0 +1,62 @@
+name: bump-runner
+
+# Daily: rebuild the ghar-runner template when a newer actions/runner ships,
+# so runners never hit GitHub's "version deprecated" rejection. No-op on the
+# days the version is unchanged. Runs off-peak to minimise the brief window
+# where the template is absent during rm + rebuild.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve versions
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          latest=$(gh api repos/actions/runner/releases/latest --jq .tag_name | sed 's/^v//')
+          current=$(sed -n 's/^ARG RUNNER_VERSION=//p' template/Dockerfile)
+          # Guard against anything unexpected in the tag before it reaches a shell/sed.
+          case "$latest" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "unexpected runner version: '$latest'" >&2; exit 1 ;;
+          esac
+          echo "latest=$latest"   >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "runner: current=$current latest=$latest"
+
+      - name: Install createos CLI
+        if: steps.v.outputs.latest != steps.v.outputs.current
+        run: curl -sfL https://raw.githubusercontent.com/NodeOps-app/createos-cli/main/install.sh | sh -
+
+      - name: Rebuild template with latest runner
+        if: steps.v.outputs.latest != steps.v.outputs.current
+        env:
+          CREATEOS_API_KEY: ${{ secrets.CREATEOS_API_KEY }}
+          LATEST: ${{ steps.v.outputs.latest }}
+        run: |
+          set -euo pipefail
+          sed -i "s/^ARG RUNNER_VERSION=.*/ARG RUNNER_VERSION=${LATEST}/" template/Dockerfile
+          createos sb template rm ghar-runner --yes || true
+          createos sb template submit ghar-runner -f template/Dockerfile
+
+      - name: Commit the version bump
+        if: steps.v.outputs.latest != steps.v.outputs.current
+        env:
+          LATEST: ${{ steps.v.outputs.latest }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add template/Dockerfile
+          git commit -m "chore: bump actions/runner to ${LATEST}"
+          git push
