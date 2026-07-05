@@ -5,7 +5,7 @@ on:
 
 jobs:
   smoke:
-    runs-on: [createos-sandbox-ghar]
+    runs-on: [createos]
     steps:
       - name: Identify the runner
         run: |

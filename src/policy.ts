@@ -11,7 +11,8 @@ export async function shouldProvision(
   isFork: () => Promise<boolean>,
 ): Promise<boolean> {
   const [org] = job.repoFullName.split("/");
-  if (org !== config.githubOrg) return false; // never serve other orgs
+  // GitHub org logins are case-insensitive; the webhook casing may differ from config.
+  if (org?.toLowerCase() !== config.githubOrg.toLowerCase()) return false; // never serve other orgs
 
   switch (config.provisionPolicy) {
     case "org-wide":
