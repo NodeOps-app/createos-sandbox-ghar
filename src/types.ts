@@ -1,0 +1,53 @@
+export type ProvisionPolicy = "org-wide" | "repo-allowlist" | "fork-gated";
+
+/** Parsed, validated env — produced by loadConfig(), consumed everywhere. */
+export interface Config {
+  githubOrg: string;
+  githubAppId: string;
+  githubAppPrivateKeyPkcs8: string; // PEM "-----BEGIN PRIVATE KEY-----"
+  githubInstallationId: string;
+  githubWebhookSecret: string;
+  createosBaseUrl: string;
+  createosApiKey: string;
+  runnerLabel: string;              // "createos"
+  runnerTemplate: string;           // template id/name
+  runnerShape: string;              // "s-4vcpu-4gb"
+  runnerDiskMib: number;            // 30720
+  maxConcurrent: number;            // 0 = unlimited
+  provisionPolicy: ProvisionPolicy;
+  repoAllowlist: string[];          // full names, e.g. "nodeops-app/api"
+  reaperMaxAgeMs: number;           // orphan cutoff, e.g. 3_600_000
+}
+
+/** The subset of a workflow_job webhook the controller acts on. */
+export interface WorkflowJob {
+  action: "queued" | "in_progress" | "completed" | "waiting";
+  jobId: number;        // workflow_job.id — the idempotency key
+  runId: number;        // workflow_job.run_id — for fork lookup
+  repoFullName: string; // repository.full_name, "nodeops-app/api"
+  labels: string[];     // workflow_job.labels
+}
+
+/** DO → Worker decision for a queued job. */
+export interface QueuedDecision {
+  action: "provision" | "queued" | "ignore";
+  jobId: number;
+}
+
+/** DO → Worker: a job to boot (returned by onCompleted/sweep when a slot frees). */
+export interface PendingJob {
+  jobId: number;
+  runId: number;
+  repoFullName: string;
+}
+
+/** DO → Worker on completion: which VM to destroy + what to boot next. */
+export interface CompletedResult {
+  sandboxIdToDestroy: string | null;
+  nextPending: PendingJob | null;
+}
+
+/** DO → Worker on sweep: orphan VMs to destroy. */
+export interface ReapResult {
+  sandboxIdsToDestroy: string[];
+}
