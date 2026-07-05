@@ -30,6 +30,7 @@ export function loadConfig(env: Record<string, unknown>): Config {
 
   return {
     githubOrg: req(env, "GITHUB_ORG"),
+    githubApiUrl: ((env.GITHUB_API_URL as string) || "https://api.github.com").replace(/\/+$/, ""),
     githubAppId: req(env, "GITHUB_APP_ID"),
     githubAppPrivateKeyPkcs8: req(env, "GITHUB_APP_PRIVATE_KEY"),
     githubInstallationId: req(env, "GITHUB_INSTALLATION_ID"),

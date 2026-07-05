@@ -19,7 +19,7 @@ describe("TokenCache", () => {
   it("fetches then caches within expiry", async () => {
     const spy = vi.fn(githubRoutes()["POST /access_tokens"]!);
     const fetchImpl = mockFetch({ "POST /access_tokens": spy });
-    const c = new TokenCache("1", await pem(), "2", fetchImpl);
+    const c = new TokenCache("1", await pem(), "2", "https://api.github.com", fetchImpl);
     expect(await c.token()).toBe(jitToken);
     expect(await c.token()).toBe(jitToken);
     expect(spy).toHaveBeenCalledTimes(1); // second call served from cache
@@ -27,7 +27,7 @@ describe("TokenCache", () => {
 
   it("throws on non-ok", async () => {
     const fetchImpl = mockFetch({ "POST /access_tokens": () => new Response("nope", { status: 403 }) });
-    const c = new TokenCache("1", await pem(), "2", fetchImpl);
+    const c = new TokenCache("1", await pem(), "2", "https://api.github.com", fetchImpl);
     await expect(c.token()).rejects.toThrow(/403/);
   });
 });

@@ -48,7 +48,9 @@ export async function handleWebhook(
 
   if (job.action === "queued") {
     const github = new GitHubClient(config);
-    const eligible = await shouldProvision(config, job, () => github.isForkJob(job.runId));
+    const eligible = await shouldProvision(config, job, () =>
+      github.isForkJob(job.repoFullName, job.runId),
+    );
     if (!eligible) return new Response("policy-skip", { status: 202 });
 
     const decision = await co.onQueued(pending, delivery);

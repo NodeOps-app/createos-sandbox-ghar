@@ -2,7 +2,6 @@ import type { Config } from "../types";
 import { TokenCache } from "./auth";
 
 type FetchLike = typeof fetch;
-const API = "https://api.github.com";
 const UA = "createos-sandbox-ghar";
 
 export class GitHubClient {
@@ -17,6 +16,7 @@ export class GitHubClient {
       config.githubAppId,
       config.githubAppPrivateKeyPkcs8,
       config.githubInstallationId,
+      config.githubApiUrl,
       fetchImpl,
     );
   }
@@ -34,7 +34,7 @@ export class GitHubClient {
   /** Creates a JIT ephemeral org runner config; returns encoded_jit_config. */
   async generateJitConfig(runnerName: string): Promise<string> {
     const res = await this.fetchImpl(
-      `${API}/orgs/${this.config.githubOrg}/actions/runners/generate-jitconfig`,
+      `${this.config.githubApiUrl}/orgs/${this.config.githubOrg}/actions/runners/generate-jitconfig`,
       {
         method: "POST",
         headers: await this.#headers(),
@@ -57,9 +57,9 @@ export class GitHubClient {
    * Resolves whether a workflow run originates from a fork. Only called under
    * the fork-gated policy. Uses the run's head_repository vs the base repo.
    */
-  async isForkJob(runId: number): Promise<boolean> {
+  async isForkJob(repoFullName: string, runId: number): Promise<boolean> {
     const res = await this.fetchImpl(
-      `${API}/repos/${this.config.githubOrg}/actions/runs/${runId}`,
+      `${this.config.githubApiUrl}/repos/${repoFullName}/actions/runs/${runId}`,
       { method: "GET", headers: await this.#headers() },
     ).catch(() => null);
     if (!res || !res.ok) return true; // fail closed: treat unknown as fork
@@ -69,6 +69,7 @@ export class GitHubClient {
     const head = body.head_repository;
     if (!head) return true;
     if (head.fork === true) return true;
-    return head.owner?.login !== undefined && head.owner.login !== this.config.githubOrg;
+    const login = head.owner?.login;
+    return login !== undefined && login.toLowerCase() !== this.config.githubOrg.toLowerCase();
   }
 }

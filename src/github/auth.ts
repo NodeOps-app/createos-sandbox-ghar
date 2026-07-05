@@ -2,7 +2,6 @@ import { appJwt } from "./jwt";
 
 type FetchLike = typeof fetch;
 
-const API = "https://api.github.com";
 const UA = "createos-sandbox-ghar";
 
 interface Cached {
@@ -17,6 +16,7 @@ export class TokenCache {
     private appId: string,
     private pkcs8Pem: string,
     private installationId: string,
+    private apiUrl: string = "https://api.github.com",
     // Bound to globalThis: calling via `this.fetchImpl(...)` would otherwise
     // rebind `this` to the instance, which Workers rejects (Illegal invocation).
     private fetchImpl: FetchLike = fetch.bind(globalThis),
@@ -29,7 +29,7 @@ export class TokenCache {
     }
     const jwt = await appJwt(this.appId, this.pkcs8Pem);
     const res = await this.fetchImpl(
-      `${API}/app/installations/${this.installationId}/access_tokens`,
+      `${this.apiUrl}/app/installations/${this.installationId}/access_tokens`,
       {
         method: "POST",
         headers: {

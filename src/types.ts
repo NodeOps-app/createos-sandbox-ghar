@@ -3,6 +3,7 @@ export type ProvisionPolicy = "org-wide" | "repo-allowlist" | "fork-gated";
 /** Parsed, validated env — produced by loadConfig(), consumed everywhere. */
 export interface Config {
   githubOrg: string;
+  githubApiUrl: string;             // "https://api.github.com" (override for GHES)
   githubAppId: string;
   githubAppPrivateKeyPkcs8: string; // PEM "-----BEGIN PRIVATE KEY-----"
   githubInstallationId: string;
