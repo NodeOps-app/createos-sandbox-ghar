@@ -1,0 +1,27 @@
+name = "createos-sandbox-ghar"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "COORDINATOR"
+class_name = "Coordinator"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Coordinator"]
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+GITHUB_ORG = "nodeops-app"
+CREATEOS_BASE_URL = "https://api.createos.example"
+RUNNER_LABEL = "createos"
+RUNNER_TEMPLATE = "ghar-runner"
+RUNNER_SHAPE = "s-4vcpu-4gb"
+RUNNER_DISK_MIB = "30720"
+MAX_CONCURRENT = "0"
+PROVISION_POLICY = "org-wide"
+REPO_ALLOWLIST = ""
+REAPER_MAX_AGE_MS = "3600000"

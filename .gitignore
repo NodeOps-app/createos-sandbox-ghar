@@ -1,0 +1,10 @@
+.agents
+.claude
+.super*
+
+node_modules/
+.dev.vars
+.wrangler/
+dist/
+*.pkcs8.pem
+app.pem
