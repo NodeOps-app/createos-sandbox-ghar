@@ -12,6 +12,8 @@ function client(config: Config, deps: SandboxDeps): CreateosSandboxClient {
   return new CreateosSandboxClient({
     baseUrl: config.createosBaseUrl,
     apiKey: config.createosApiKey,
+    // Workers rejects an unbound fetch called off the SDK's config object.
+    fetch: globalThis.fetch.bind(globalThis),
   });
 }
 

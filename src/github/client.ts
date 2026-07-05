@@ -9,7 +9,9 @@ export class GitHubClient {
   #tokens: TokenCache;
   constructor(
     private config: Config,
-    private fetchImpl: FetchLike = fetch,
+    // Bound to globalThis so `this.fetchImpl(...)` keeps fetch's own `this`
+    // (Workers throws Illegal invocation otherwise).
+    private fetchImpl: FetchLike = fetch.bind(globalThis),
   ) {
     this.#tokens = new TokenCache(
       config.githubAppId,

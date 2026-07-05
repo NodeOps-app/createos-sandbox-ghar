@@ -17,7 +17,9 @@ export class TokenCache {
     private appId: string,
     private pkcs8Pem: string,
     private installationId: string,
-    private fetchImpl: FetchLike = fetch,
+    // Bound to globalThis: calling via `this.fetchImpl(...)` would otherwise
+    // rebind `this` to the instance, which Workers rejects (Illegal invocation).
+    private fetchImpl: FetchLike = fetch.bind(globalThis),
   ) {}
 
   async token(): Promise<string> {
