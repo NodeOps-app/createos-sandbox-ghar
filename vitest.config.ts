@@ -8,6 +8,7 @@ export default defineWorkersConfig({
         miniflare: {
           compatibilityFlags: ["nodejs_compat"],
           bindings: {
+            MAX_CONCURRENT: "2",
             GITHUB_APP_ID: "1",
             GITHUB_INSTALLATION_ID: "2",
             GITHUB_WEBHOOK_SECRET: "test-secret",
