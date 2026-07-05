@@ -24,7 +24,7 @@ RUNNER_DISK_MIB = "10240"
 MAX_CONCURRENT = "0"
 PROVISION_POLICY = "org-wide"
 REPO_ALLOWLIST = ""
-REAPER_MAX_AGE_MS = "3600000"
+REAPER_MAX_AGE_MS = "1800000"
 
 # Secrets are set via `wrangler secret put` (never commit values here):
 # wrangler secret put GITHUB_APP_ID
