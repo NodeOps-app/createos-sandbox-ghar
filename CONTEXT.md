@@ -20,7 +20,7 @@ Glossary for the GitHub Actions runner controller. Terms only, no implementation
 
 - **Self-destruct** — a Sandbox tearing down its own VM from inside the guest, triggered when its Runner exits. Proposed fc feature (NodeOps-app/fc#520), not yet shipped. When available, it makes the Controller near-stateless: the Sandbox reaps itself, so no `completed` webhook or Job→Sandbox map is needed for the happy path.
 
-- **Reaper** — safety-net teardown for orphan Sandboxes: a Job that queued and booted a Sandbox but whose Runner never took work (crash, bad JIT config), so no completion/self-destruct signal ever fires. Worker cron trigger queries the DO, destroys orphans in the Worker.
+- **Reaper** — safety-net teardown for orphan Sandboxes: a Job that queued and booted a Sandbox but whose Runner never took work (crash, bad JIT config), so no completion/self-destruct signal ever fires. Cron or auto-pause + destroy.
 
 - **Provisioning policy** — configurable switch deciding which Jobs get a Sandbox: `org-wide` (any repo, default), `repo-allowlist` (only listed repos), or `fork-gated` (skip fork-PR jobs). Set via env/config. Under `org-wide`, fork-PR safety rests solely on VM isolation + ephemerality.
 
