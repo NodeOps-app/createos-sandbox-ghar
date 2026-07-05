@@ -11,6 +11,6 @@ describe("scaffold", () => {
   it("coordinator DO responds", async () => {
     const id = env.COORDINATOR.idFromName("singleton");
     const stub = env.COORDINATOR.get(id);
-    expect(await stub.ping()).toBe("pong");
+    expect(await stub.activeCount()).toBe(0);
   });
 });
