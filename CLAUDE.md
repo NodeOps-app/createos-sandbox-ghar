@@ -50,6 +50,7 @@ node_modules/.bin/wrangler dev     # or: bun run dev
 
 ## Conventions
 - **bun only** — never npm/npx/node. Pin exact (`bun add -E`).
+- **Deploy with `bunx wrangler@latest deploy`** — always this exact command (not `node_modules/.bin/wrangler`), so deploys use the latest wrangler.
 - **Tests: implement-then-test (NO TDD).** Write the code, then comprehensive tests, then commit. Two layers: plain `vitest` for pure logic (jwt/hmac/policy/config), `@cloudflare/vitest-pool-workers` for real-DO integration (webhook flow, cap, idempotency, reaper). Mock GitHub + createos at the `fetch` boundary; never hit the network in tests.
 - **oxlint + oxfmt** on every `.ts` change.
 - **Conventional Commits**, imperative subject ≤ 50 chars, atomic.
