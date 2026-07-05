@@ -1,0 +1,19 @@
+name: ghar-test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: [createos-sandbox-ghar]
+    steps:
+      - name: Identify the runner
+        run: |
+          echo "hello from createos microVM"
+          echo "host: $(hostname)"
+          echo "user: $(whoami)"
+          echo "kernel: $(uname -a)"
+          echo "cpus: $(nproc)   mem: $(free -h | awk '/Mem:/{print $2}')"
+      - name: Prove network egress
+        run: |
+          curl -fsS https://api.github.com/zen && echo
