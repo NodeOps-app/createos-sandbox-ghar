@@ -15,13 +15,20 @@ new_sqlite_classes = ["Coordinator"]
 crons = ["*/5 * * * *"]
 
 [vars]
-GITHUB_ORG = "nodeops-app"
-CREATEOS_BASE_URL = "https://api.createos.example"
+GITHUB_ORG = "NodeOps-app"
+CREATEOS_BASE_URL = "https://api.sb.createos.sh"
 RUNNER_LABEL = "createos"
 RUNNER_TEMPLATE = "ghar-runner"
 RUNNER_SHAPE = "s-4vcpu-4gb"
-RUNNER_DISK_MIB = "30720"
+RUNNER_DISK_MIB = "10240"
 MAX_CONCURRENT = "0"
 PROVISION_POLICY = "org-wide"
 REPO_ALLOWLIST = ""
 REAPER_MAX_AGE_MS = "3600000"
+
+# Secrets are set via `wrangler secret put` (never commit values here):
+# wrangler secret put GITHUB_APP_ID
+# wrangler secret put GITHUB_INSTALLATION_ID
+# wrangler secret put GITHUB_APP_PRIVATE_KEY   # paste full PKCS#8 PEM
+# wrangler secret put GITHUB_WEBHOOK_SECRET
+# wrangler secret put CREATEOS_API_KEY
