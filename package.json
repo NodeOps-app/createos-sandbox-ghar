@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "bunx wrangler@latest deploy",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "oxlint src test",
