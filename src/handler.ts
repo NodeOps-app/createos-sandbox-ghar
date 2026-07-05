@@ -4,6 +4,7 @@ import { verifySignature, parseWorkflowJob, matchesLabel } from "./webhook";
 import { shouldProvision } from "./policy";
 import { GitHubClient } from "./github/client";
 import { provisionSandbox, teardownSandbox, type SandboxDeps } from "./sandbox";
+import { notify } from "./notify";
 import type { PendingJob } from "./types";
 
 function coordinator(env: Bindings) {
@@ -23,6 +24,7 @@ async function provisionAndRecord(
     await coordinator(env).markRunning(job.jobId, sandboxId);
   } catch (err) {
     console.error(`provision failed job=${job.jobId}: ${String(err)}`);
+    await notify(config, `ghar provision failed — job ${job.jobId} (${job.repoFullName}): ${String(err)}`);
   }
 }
 

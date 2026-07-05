@@ -18,6 +18,7 @@ export interface Config {
   provisionPolicy: ProvisionPolicy;
   repoAllowlist: string[];          // full names, e.g. "nodeops-app/api"
   reaperMaxAgeMs: number;           // orphan cutoff, e.g. 3_600_000
+  alertWebhookUrl?: string;         // optional Slack-style webhook for failure alerts
 }
 
 /** The subset of a workflow_job webhook the controller acts on. */
