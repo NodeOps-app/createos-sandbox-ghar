@@ -1,4 +1,4 @@
-import { CreateosSandboxClient } from "@nodeops-createos/sandbox";
+import { CreateosSandboxClient, CreateosSandboxNotFoundError } from "@nodeops-createos/sandbox";
 import type { Config, PendingJob } from "./types";
 import type { GitHubClient } from "./github/client";
 
@@ -48,4 +48,23 @@ export async function provisionSandbox(
   ]);
 
   return { sandboxId: sandbox.id };
+}
+
+/**
+ * Destroys a sandbox. Idempotent: an already-gone VM (NotFound) is treated as
+ * success, so a redelivered `completed` webhook or a double reaper pass is safe.
+ */
+export async function teardownSandbox(
+  config: Config,
+  sandboxId: string,
+  deps: SandboxDeps = {},
+): Promise<void> {
+  const c = client(config, deps);
+  try {
+    const handle = await c.getSandbox(sandboxId);
+    await handle.destroy();
+  } catch (err) {
+    if (err instanceof CreateosSandboxNotFoundError) return;
+    throw err;
+  }
 }

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { provisionSandbox } from "../../src/sandbox";
+import { provisionSandbox, teardownSandbox } from "../../src/sandbox";
+import { CreateosSandboxNotFoundError } from "@nodeops-createos/sandbox";
 import type { Config, PendingJob } from "../../src/types";
 
 const config = { runnerShape: "s-4vcpu-4gb", runnerTemplate: "ghar-runner", runnerDiskMib: 30720 } as Config;
@@ -22,5 +23,30 @@ describe("provisionSandbox", () => {
     expect(runCommand.mock.calls[0]![0]).toBe("bash");
     expect(runCommand.mock.calls[0]![1][1]).toContain("setsid");
     expect(res).toEqual({ sandboxId: "sb_1" });
+  });
+});
+
+describe("teardownSandbox", () => {
+  it("destroys an existing sandbox", async () => {
+    const destroy = vi.fn().mockResolvedValue({ id: "sb_1", status: "destroying" });
+    const getSandbox = vi.fn().mockResolvedValue({ destroy });
+    await teardownSandbox(config, "sb_1", { makeClient: () => ({ getSandbox }) as any });
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it("swallows NotFound (idempotent)", async () => {
+    const getSandbox = vi
+      .fn()
+      .mockRejectedValue(new CreateosSandboxNotFoundError("gone", new Response(null, { status: 404 })));
+    await expect(
+      teardownSandbox(config, "sb_x", { makeClient: () => ({ getSandbox }) as any }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rethrows other errors", async () => {
+    const getSandbox = vi.fn().mockRejectedValue(new Error("boom"));
+    await expect(
+      teardownSandbox(config, "sb_x", { makeClient: () => ({ getSandbox }) as any }),
+    ).rejects.toThrow(/boom/);
   });
 });
