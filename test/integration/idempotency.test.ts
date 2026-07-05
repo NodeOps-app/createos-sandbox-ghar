@@ -31,3 +31,28 @@ describe("Coordinator idempotency", () => {
     expect(res.sandboxIdToDestroy).toBeNull();
   });
 });
+
+describe("Coordinator cancellation + redelivery", () => {
+  const job = (jobId: number) => ({ jobId, runId: jobId, repoFullName: "nodeops-app/api" });
+  function stub() {
+    return env.COORDINATOR.get(env.COORDINATOR.idFromName("cancel-" + Math.random()));
+  }
+
+  it("cancelled-before-boot: completed drops the pending row, no VM", async () => {
+    const s = stub();
+    await s.onQueued(job(10), "d1"); // provisioning (never booted)
+    const res = await s.onCompleted(10); // cancelled arrives before markRunning
+    expect(res.sandboxIdToDestroy).toBeNull();
+    expect(await s.activeCount()).toBe(0);
+  });
+
+  it("redelivered completed is a safe no-op", async () => {
+    const s = stub();
+    await s.onQueued(job(11), "d1");
+    await s.markRunning(11, "sb11");
+    const first = await s.onCompleted(11);
+    expect(first.sandboxIdToDestroy).toBe("sb11");
+    const second = await s.onCompleted(11); // redelivery
+    expect(second.sandboxIdToDestroy).toBeNull(); // row already gone
+  });
+});
