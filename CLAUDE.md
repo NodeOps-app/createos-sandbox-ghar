@@ -31,8 +31,9 @@ cron (*/5) → src/index.ts scheduled → handler.runReaper → DO.sweep → des
 - `src/policy.ts` — `shouldProvision` switch (org-wide / repo-allowlist / fork-gated). Pure; fork check injected.
 - `src/sandbox.ts` — `provisionSandbox` (JIT → createSandbox → detached runner) + `teardownSandbox` (idempotent). Wraps the createos SDK. `SandboxDeps.makeClient` is the test injection seam.
 - `src/coordinator.ts` — the `Coordinator` **Durable Object**. ALL state (SQLite): Job→Sandbox map, concurrency counter, pending queue, delivery-dedup, `sweep`. RPC methods: `onQueued`, `markRunning`, `onCompleted`, `sweep`, `activeCount`.
-- `src/github/{jwt,auth,client}.ts` — zero-dep GitHub App auth: RS256 JWT (Web Crypto) → installation-token cache → `GitHubClient` (`generateJitConfig`, `isForkJob`).
-- `template/` — pre-baked runner rootfs (`Dockerfile` RUN-only, `start-runner.sh`, `build.ts`). Built manually against a real createos control plane; not part of the Worker bundle.
+- `src/github/{jwt,auth,client}.ts` — zero-dep GitHub App auth: RS256 JWT (Web Crypto) → installation-token cache → `GitHubClient` (`generateJitConfig`, `isForkJob(repoFullName, runId)`). API base is `config.githubApiUrl` (`GITHUB_API_URL`, default api.github.com).
+- `src/notify.ts` — `notify(config, text)`: optional Slack-style failure webhook (`ALERT_WEBHOOK_URL`). No-op if unset; never throws. Called from the `provision failed` path in `handler.ts`.
+- `template/` — pre-baked runner rootfs (`Dockerfile` RUN-only, `start-runner.sh`, `build.ts`). `bun run build:template` auto-pulls the latest `actions/runner`, deletes the old template, and rebuilds. `.github/workflows/bump-runner.yml` does this daily (needs repo secret `CREATEOS_API_KEY`). Not part of the Worker bundle.
 
 ## Dev commands (deps already installed; run via local bins)
 ```
@@ -47,6 +48,9 @@ node_modules/.bin/wrangler dev     # or: bun run dev
 - **The SDK `@nodeops-createos/sandbox` is `bun link`'d** to sibling `../fc-sdk` (`link:` in package.json), NOT `file:`. It is unpublished. If it goes missing: `cd ../fc-sdk && bun link` then `bun link @nodeops-createos/sandbox`.
 - **Do not casually reinstall deps.** If `node_modules` breaks, do ONE clean pass: `rm -rf node_modules bun.lock && /Users/ctos/.bun/bin/bun install`, no competing process, then verify `node_modules/.bin` is populated. (A `safe-chain` npm MITM scanner previously corrupted installs; it has been removed.)
 - `vitest.config.ts` `miniflare.bindings` holds a **throwaway test-only PKCS#8 key** + test env — not a secret. Real secrets go in `.dev.vars` (gitignored) / `wrangler secret`.
+- **Never call `fetch` as a method** (`this.x.fetch(...)`, `obj.fetch(...)`) — Workers throws `Illegal invocation` when fetch's `this` isn't `globalThis`. Bind at the injection seam (`fetch.bind(globalThis)`) or call through a local var. Tests mock fetch so they will NOT catch this; only a real run does. (Bit us via the SDK + GitHub client.)
+- **`RUNNER_DISK_MIB` must be ≤ your createos plan's disk cap** (10240 MiB on the current plan) or `createSandbox` 403s. The code default (30720) exceeds it.
+- **`GITHUB_INSTALLATION_ID` is the numeric installation id**, not the App client id (`Iv23…`) — the wrong one makes token minting 404.
 
 ## Conventions
 - **bun only** — never npm/npx/node. Pin exact (`bun add -E`).
@@ -63,5 +67,11 @@ If you rename/add a domain concept, update `CONTEXT.md` in the same change. If y
 ## Adding a feature
 Brainstorm → (if multi-step) write a plan under `docs/superpowers/plans/` → implement-then-test → keep `CONTEXT.md`/ADRs in sync. Prefer the `superpowers:brainstorming` and `writing-plans` skills for non-trivial work.
 
-## Not done yet
-Deploy is not done (needs GitHub App creds + a real template build + `RUNNER_TEMPLATE`/`CREATEOS_BASE_URL`). See `README.md`. Optional future teardown upgrade tracked at NodeOps-app/fc#520 (guest self-destruct) — not a dependency.
+## Status
+**Deployed + verified end-to-end** (2026-07-05/06): a `runs-on: [createos]` job boots a microVM runner and runs green; `completed` webhook tears it down. `MAX_CONCURRENT=50`, `PROVISION_POLICY=org-wide`.
+
+Known gaps / follow-ups:
+- **In-guest self-halt is a no-op** on the minimal base image (no `halt`/`poweroff`, sysrq ignored) — teardown relies on the `completed` webhook + reaper cron. Proper fix tracked at NodeOps-app/fc#520 (guest self-destruct).
+- `fc-sdk` carries the same Workers fetch-bind fix on branch `fix/workers-fetch-bind` — needs push + republish there.
+- `org-wide` policy serves fork PRs (safety = VM isolation + `MAX_CONCURRENT`); tighten to `repo-allowlist`/`fork-gated` for public repos.
+- Alerting is live but dormant until `ALERT_WEBHOOK_URL` secret is set.
