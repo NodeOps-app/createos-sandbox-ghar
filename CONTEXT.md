@@ -4,7 +4,7 @@ Glossary for the GitHub Actions runner controller. Terms only, no implementation
 
 ## Glossary
 
-- **Controller** — the Cloudflare Worker. Receives GitHub webhooks, provisions a Sandbox per pending Job, tears it down when the Job completes. Stateless request handler; state lives in the Job→Sandbox map.
+- **Controller** — the Cloudflare Worker. Receives GitHub webhooks, provisions a Sandbox per pending Job, tears it down when the Job completes. Stateless request handler; state lives in the DO's job rows, which own their Sandbox by **runner identity** (see Runner name).
 
 - **Sandbox** — one createos microVM (real KVM VM), booted from a Template. Hosts exactly one Runner. Created on demand, destroyed after its Job finishes. (createos-sandbox-sdk term.)
 
@@ -12,18 +12,22 @@ Glossary for the GitHub Actions runner controller. Terms only, no implementation
 
 - **Runner** — the GitHub Actions self-hosted runner process inside a Sandbox. Ephemeral: takes exactly one Job then exits. Registered via JIT config, outbound-only (long-polls GitHub, no inbound).
 
-- **Job** — a GitHub Actions `workflow_job`. `queued` action = provision trigger; `completed` action = teardown trigger. One Job maps to one Sandbox for its whole life.
+- **Job** — a GitHub Actions `workflow_job`. `queued` action = provision trigger; `completed` action = teardown trigger. One `queued` Job provisions one Sandbox; but because Runners carry only the shared label, under a backlog GitHub may run a *different* queued Job on that Sandbox — so teardown is keyed on Runner name, not the provisioning Job id (see `docs/adr/0003`).
 
 - **JIT config** — single-use encoded runner config from `POST /orgs/{org}/actions/runners/generate-jitconfig`. Passed to `run.sh --jitconfig`. Ephemeral by construction; token never persisted to disk.
 
 - **Org** — `nodeops-app` GitHub org. Runners register at org scope, not per-repo.
 
-- **Self-destruct** — a Sandbox tearing down its own VM from inside the guest, triggered when its Runner exits. Proposed fc feature (NodeOps-app/fc#520), not yet shipped. When available, it makes the Controller near-stateless: the Sandbox reaps itself, so no `completed` webhook or Job→Sandbox map is needed for the happy path.
+- **Self-destruct** (a.k.a. **self-delete**) — a Sandbox tearing down its own VM from inside the guest, triggered when its Runner exits. Shipped in fc (NodeOps-app/fc#520, commit `a56978b`): the guest agent exposes a loopback-only endpoint `POST 127.0.0.1:1029/self/delete` and the host destroys the VM by its UDS identity. In this controller it is the **fast teardown path** — it reclaims the host VM in seconds but does **not** free the DO concurrency slot, so the `completed` webhook + Job→Sandbox map are still needed to free the slot and as a backstop. Sibling endpoint `/self/pause` exists but is unused (runners are one-shot ephemeral).
 
-- **Reaper** — safety-net teardown for orphan Sandboxes: a Job that queued and booted a Sandbox but whose Runner never took work (crash, bad JIT config), so no completion/self-destruct signal ever fires. Cron or auto-pause + destroy.
+- **Reaper** — safety-net teardown, a cron sweep: destroys orphan Sandboxes (a Job that booted a Sandbox but whose completion was never recorded — crash, dropped webhook) and retries any **Destroying** row whose teardown was never confirmed.
 
 - **Provisioning policy** — configurable switch deciding which Jobs get a Sandbox: `org-wide` (any repo, default), `repo-allowlist` (only listed repos), or `fork-gated` (skip fork-PR jobs). Set via env/config. Under `org-wide`, fork-PR safety rests solely on VM isolation + ephemerality.
 
 - **Runner label** — `createos`. Workflows opt in with `runs-on: [createos]`; the Controller ignores any `workflow_job` whose labels omit it; the JIT config registers the Runner with it.
+
+- **Runner name** — `ghar-<provisioningJobId>`, the unique name the JIT config registers per Runner (distinct from the shared Runner label). The `completed` webhook echoes it as `runner_name`, letting the Controller tear down the Sandbox that *actually* ran the Job even when it differs from the provisioning Job.
+
+- **Destroying** — a job-row state: the Job is done and its slot is freed, but the Sandbox `destroy()` is not yet confirmed. The row is held (not deleted) so a failed/dropped destroy is retried by the Reaper; it clears once the Worker confirms teardown.
 
 - **Concurrency cap** — max simultaneous Sandboxes the Controller will run (protects createos account quota + CF free tier + cost). Off by default (`MAX_CONCURRENT` unset/0 = unlimited, boot every Job); when set to N>0, Jobs beyond N wait in a pending queue in the DO until a slot frees.

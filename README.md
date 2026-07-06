@@ -4,7 +4,7 @@ Ephemeral GitHub Actions runner autoscaler for the `nodeops-app` org, on createo
 
 ## How it works
 
-`workflow_job` webhook → Worker verifies HMAC, filters `runs-on: [createos]` + policy → Coordinator Durable Object (SQLite) tracks state → Worker mints a JIT runner config, boots a sandbox from the `ghar-runner` template, launches the runner detached. Teardown: the `completed` webhook destroys the VM (primary); a 5-minute cron reaps any orphan older than `REAPER_MAX_AGE_MS`. The in-guest self-halt is best-effort — see [Teardown](#teardown).
+`workflow_job` webhook → Worker verifies HMAC, filters `runs-on: [createos]` + policy → Coordinator Durable Object (SQLite) tracks state → Worker mints a JIT runner config, boots a sandbox from the `ghar-runner` template, launches the runner detached. Teardown: when the runner exits the guest self-deletes its VM (fast path); the `completed` webhook frees the slot and confirms teardown (authoritative); a 5-minute cron reaps any orphan older than `REAPER_MAX_AGE_MS`. See [Teardown](#teardown).
 
 ```
 GitHub ──webhook──▶ Worker (/webhook) ──▶ Coordinator DO (SQLite state)
@@ -147,7 +147,7 @@ jobs:
 ## Development
 
 ```bash
-bun run test        # vitest (unit + real-DO integration, 47 tests)
+bun run test        # vitest (unit + real-DO integration, 55 tests)
 bun run typecheck   # tsc --noEmit
 bun run lint        # oxlint
 bun run dev         # wrangler dev (needs .dev.vars)
@@ -157,13 +157,13 @@ See `CLAUDE.md` for architecture, file responsibilities, testing approach, and t
 
 ## Teardown
 
-A VM is destroyed by, in order of reliability:
+A VM is destroyed by three layers, each a backstop for the one before:
 
-1. **`completed` webhook (primary).** When the job finishes, GitHub sends `workflow_job.completed`; the Worker looks up the sandbox recorded for that job and destroys it. This is the normal path and fires within seconds.
-2. **Reaper cron (safety net).** Every 5 minutes a cron trigger sweeps sandboxes older than `REAPER_MAX_AGE_MS` whose completion was never recorded (e.g. a dropped webhook). The cutoff **must stay above your longest job** — the reaper can't distinguish a busy VM from an orphan, it only sees age.
-3. **In-guest self-halt (best-effort, currently a no-op).** `start-runner.sh` attempts `halt`/`poweroff`/sysrq after the runner exits, but the minimal `nodeops/sandbox:debian` base has no `halt`/`poweroff` binary and firecracker ignores the sysrq poweroff, so this does **not** currently shut the VM down. Teardown therefore relies on layers 1–2. A proper in-guest self-destruct is tracked upstream at [`NodeOps-app/fc#520`](https://github.com/NodeOps-app/fc/issues/520).
+0. **In-guest self-delete (fast path).** When the runner exits, the baked-in `/opt/start-runner.sh` POSTs to the guest agent's loopback-only self-signal endpoint (`127.0.0.1:1029/self/delete`); the host destroys the VM by its UDS identity, reclaiming host memory/disk within seconds and independent of GitHub webhook latency. Best-effort (`|| true`): if the createos host predates self-signal (the agent ships in the host `initrd`, not the base rootfs) or the call fails, layers 1–2 still tear the VM down. This layer reclaims the **host VM only** — the DO concurrency slot is still freed by layer 1.
+1. **`completed` webhook (authoritative).** When the job finishes, GitHub sends `workflow_job.completed` carrying `runner_name`; the Worker frees the concurrency slot and destroys the VM whose runner actually ran the job (keyed on runner identity, not the provisioning job — see the backlog note below). If layer 0 already deleted the VM, this destroy hits `NotFound` and is treated as success. The VM's row is held in a `destroying` state until the destroy is confirmed, so a destroy that throws is not lost.
+2. **Reaper cron (safety net).** Every 5 minutes a cron trigger (a) re-destroys any `destroying` VM whose teardown was never confirmed (destroy failed/dropped), and (b) sweeps `running` VMs older than `REAPER_MAX_AGE_MS` whose completion was never recorded (e.g. a dropped webhook). The cutoff **must stay above your longest job** — the reaper can't distinguish a busy VM from an orphan, it only sees age.
 
-> Edge case: an ephemeral runner takes the **first** matching queued job, which may differ from the job that provisioned its VM if a backlog exists. The `completed` webhook keys teardown on the provisioning job, so under a backlog a VM can be missed by layer 1 — the reaper (layer 2) still collects it. At steady state (one queued job → one VM) this doesn't arise.
+> Backlog note: an ephemeral runner takes the **first** matching queued job, which may differ from the job that provisioned its VM if a backlog exists. Teardown keys on the `runner_name` in the `completed` payload — i.e. the VM that actually ran the job — so layer 1 stays correct under a backlog (every VM is torn down by whichever job ran on it). See `docs/adr/0003`.
 
 ## Keeping the runner current
 
@@ -180,7 +180,7 @@ Provision failures are logged (`console.error`, visible via `wrangler tail`). To
 bun run wrangler secret put ALERT_WEBHOOK_URL   # https://hooks.slack.com/services/...
 ```
 
-When set, the Worker POSTs `{ "text": "ghar provision failed — job <id> (<repo>): <error>" }` on every failed provision. Unset = no-op. The same `notify()` helper (`src/notify.ts`) can be dropped into other paths (e.g. reaper teardown failures) if you want broader coverage. For infra-level signals (Worker exceptions, cron failures), also wire Cloudflare's built-in **Workers → Observability/Notifications** or Logpush.
+When set, the Worker POSTs `{ "text": "ghar provision failed — job <id> (<repo>): <error>" }` on every failed provision, and `ghar teardown failed — sandbox <id> (job <id>): <error>` on a destroy that throws (webhook or reaper path). Unset = no-op. For infra-level signals (Worker exceptions, cron failures), also wire Cloudflare's built-in **Workers → Observability/Notifications** or Logpush.
 
 ## Security notes
 

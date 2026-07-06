@@ -23,9 +23,14 @@ function patchGitHub() {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const req = new Request(input, init);
     if (req.url.includes("/access_tokens"))
-      return new Response(JSON.stringify({ token: "t", expires_at: new Date(Date.now() + 3.6e6).toISOString() }), { status: 201 });
+      return new Response(
+        JSON.stringify({ token: "t", expires_at: new Date(Date.now() + 3.6e6).toISOString() }),
+        { status: 201 },
+      );
     if (req.url.includes("/generate-jitconfig"))
-      return new Response(JSON.stringify({ encoded_jit_config: "BLOB", runner: { id: 1 } }), { status: 201 });
+      return new Response(JSON.stringify({ encoded_jit_config: "BLOB", runner: { id: 1 } }), {
+        status: 201,
+      });
     return realFetch(input, init);
   }) as typeof fetch;
 }
@@ -35,14 +40,19 @@ describe("full provision flow", () => {
     patchGitHub();
     const createSandbox = vi.fn().mockResolvedValue({
       id: "sb_1",
-      runCommand: vi.fn().mockResolvedValue({ result: { stdout: "started", stderr: "", exit_code: 0 }, exec_ms: 1 }),
+      runCommand: vi
+        .fn()
+        .mockResolvedValue({ result: { stdout: "started", stderr: "", exit_code: 0 }, exec_ms: 1 }),
     });
     const deps = { makeClient: () => ({ createSandbox }) as any };
 
     const body = workflowJobPayload({ action: "queued", jobId: 500 });
     const req = new Request("https://ctrl.local/webhook", {
       method: "POST",
-      headers: { "X-Hub-Signature-256": await sign(env.GITHUB_WEBHOOK_SECRET as string, body), "X-GitHub-Delivery": "dlv-1" },
+      headers: {
+        "X-Hub-Signature-256": await sign(env.GITHUB_WEBHOOK_SECRET as string, body),
+        "X-GitHub-Delivery": "dlv-1",
+      },
       body,
     });
     const ctx = createExecutionContext();

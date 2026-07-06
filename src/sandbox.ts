@@ -2,6 +2,9 @@ import { CreateosSandboxClient, CreateosSandboxNotFoundError } from "@nodeops-cr
 import type { Config, PendingJob } from "./types";
 import type { GitHubClient } from "./github/client";
 
+/** A booted sandbox handle — the subset createRunnerSandbox returns to launchRunner. */
+export type SandboxHandle = Awaited<ReturnType<CreateosSandboxClient["createSandbox"]>>;
+
 export interface SandboxDeps {
   /** Injection seam for tests. Defaults to a real client from config. */
   makeClient?: (config: Config) => CreateosSandboxClient;
@@ -18,19 +21,19 @@ function client(config: Config, deps: SandboxDeps): CreateosSandboxClient {
 }
 
 /**
- * Boots one microVM for a job: mint JIT config, create the sandbox with the
- * pre-baked runner template, then launch the runner DETACHED so this call
- * returns immediately (runCommand blocks until its command exits, so we
- * background the long-lived runner with setsid). The runner's env carries the
- * JIT config; start-runner.sh (baked into the template) consumes $JIT_CONFIG
- * and halts the VM on exit.
+ * Step 1 of provisioning: mint JIT config and create the microVM from the
+ * pre-baked runner template. Returns the handle + runner name so the caller can
+ * record ownership in the Coordinator BEFORE launching the runner — closing the
+ * window where a `completed` webhook arriving mid-boot would leak the VM. The
+ * runner is named `ghar-<jobId>`; that name is how a later `completed` webhook
+ * (`runner_name`) maps back to the VM that ran the job.
  */
-export async function provisionSandbox(
+export async function createRunnerSandbox(
   config: Config,
   github: GitHubClient,
   job: PendingJob,
   deps: SandboxDeps = {},
-): Promise<{ sandboxId: string }> {
+): Promise<{ sandboxId: string; runnerName: string; sandbox: SandboxHandle }> {
   const runnerName = `ghar-${job.jobId}`;
   const jitConfig = await github.generateJitConfig(runnerName);
 
@@ -43,13 +46,21 @@ export async function provisionSandbox(
     envs: { JIT_CONFIG: jitConfig },
   });
 
+  return { sandboxId: sandbox.id, runnerName, sandbox };
+}
+
+/**
+ * Step 2 of provisioning: launch the runner DETACHED so this call returns
+ * immediately (runCommand blocks until its command exits, so we background the
+ * long-lived runner with setsid). The runner's env carries the JIT config; the
+ * baked-in /opt/start-runner.sh consumes $JIT_CONFIG and halts the VM on exit.
+ */
+export async function launchRunner(sandbox: SandboxHandle): Promise<void> {
   // Detached launch: setsid + background so the outer exec returns at once.
   await sandbox.runCommand("bash", [
     "-c",
     "setsid bash /opt/start-runner.sh >/var/log/runner.log 2>&1 </dev/null & echo started",
   ]);
-
-  return { sandboxId: sandbox.id };
 }
 
 /**

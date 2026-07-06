@@ -20,6 +20,7 @@ export function workflowJobPayload(overrides: {
   runId?: number;
   repo?: string;
   labels?: string[];
+  runnerName?: string;
 }): string {
   return JSON.stringify({
     action: overrides.action ?? "queued",
@@ -27,6 +28,7 @@ export function workflowJobPayload(overrides: {
       id: overrides.jobId ?? 100,
       run_id: overrides.runId ?? 200,
       labels: overrides.labels ?? ["createos"],
+      runner_name: overrides.runnerName ?? "",
     },
     repository: { full_name: overrides.repo ?? "nodeops-app/api" },
   });

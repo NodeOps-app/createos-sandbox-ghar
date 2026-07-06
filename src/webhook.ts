@@ -42,7 +42,16 @@ export async function verifySignature(
   return timingSafeEqual(mac, provided.buffer as ArrayBuffer);
 }
 
-/** Extracts the fields the controller acts on. Returns null if not a workflow_job. */
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+const isPosInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
+const isNonEmptyString = (v: unknown): v is string => typeof v === "string" && v.length > 0;
+
+/**
+ * Extracts the fields the controller acts on. This is the trust boundary that
+ * mints DO keys and GitHub API paths, so every field is validated: bad types
+ * (missing id, non-numeric run_id, empty repo name) yield null, not a
+ * malformed key. Returns null if not an actionable workflow_job.
+ */
 export function parseWorkflowJob(body: string): WorkflowJob | null {
   let p: unknown;
   try {
@@ -50,17 +59,38 @@ export function parseWorkflowJob(body: string): WorkflowJob | null {
   } catch {
     return null;
   }
-  const o = p as Record<string, any>;
-  const wj = o.workflow_job;
-  if (!wj || !o.repository) return null;
-  const action = o.action;
-  if (!["queued", "in_progress", "completed", "waiting"].includes(action)) return null;
+  if (!isObject(p)) return null;
+  const wj = p.workflow_job;
+  const repository = p.repository;
+  if (!isObject(wj) || !isObject(repository)) return null;
+
+  const action = p.action;
+  if (
+    action !== "queued" &&
+    action !== "in_progress" &&
+    action !== "completed" &&
+    action !== "waiting"
+  ) {
+    return null;
+  }
+
+  if (!isPosInt(wj.id) || !isPosInt(wj.run_id)) return null;
+  if (!isNonEmptyString(repository.full_name)) return null;
+
+  const labels = Array.isArray(wj.labels)
+    ? wj.labels.filter((l): l is string => typeof l === "string")
+    : [];
+  // runner_name is "" (or absent) until a runner picks up the job; only carry a
+  // real name. On completed it identifies the sandbox that actually ran the job.
+  const runnerName = isNonEmptyString(wj.runner_name) ? wj.runner_name : undefined;
+
   return {
     action,
     jobId: wj.id,
     runId: wj.run_id,
-    repoFullName: o.repository.full_name,
-    labels: Array.isArray(wj.labels) ? wj.labels : [],
+    repoFullName: repository.full_name,
+    labels,
+    runnerName,
   };
 }
 

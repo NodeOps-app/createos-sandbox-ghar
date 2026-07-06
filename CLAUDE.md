@@ -18,9 +18,14 @@ workflow_job webhook → src/index.ts (POST /webhook) → src/handler.ts
   verify HMAC (webhook.ts) → parse + label filter (webhook.ts)
   → policy check (policy.ts) → Coordinator DO (coordinator.ts): onQueued
   → if provision: mint JIT config (github/client.ts → auth.ts → jwt.ts)
-       → createSandbox + detached runner launch (sandbox.ts) → DO.markRunning
-completed webhook → DO.onCompleted → destroy VM + dequeue next pending
-cron (*/5) → src/index.ts scheduled → handler.runReaper → DO.sweep → destroy orphans
+       → createSandbox (sandbox.ts) → DO.recordSandboxCreated (records VM+runner
+         name BEFORE launch; says destroy if job already completed)
+       → launchRunner detached → DO.markRunning   (any failure → DO.markProvisionFailed → frees slot)
+runner exits → start-runner.sh POSTs 127.0.0.1:1029/self/delete → host destroys the
+  VM in seconds (fast path; reclaims host VM only, not the DO slot; best-effort)
+completed webhook → DO.onCompleted(jobId, runner_name) → destroy the VM that ran
+  the job (by runner identity; NotFound if self-delete beat it) → DO.markDestroyed on confirm → dequeue next pending
+cron (*/5) → src/index.ts scheduled → handler.runReaper → DO.sweep → destroy orphans + retry unconfirmed destroys
 ```
 
 ## File responsibilities (each one thing; keep files < 1100 lines)
@@ -29,11 +34,11 @@ cron (*/5) → src/index.ts scheduled → handler.runReaper → DO.sweep → des
 - `src/types.ts` — shared domain types. The interface contract between modules.
 - `src/webhook.ts` — `verifySignature` (HMAC), `parseWorkflowJob`, `matchesLabel`. Pure.
 - `src/policy.ts` — `shouldProvision` switch (org-wide / repo-allowlist / fork-gated). Pure; fork check injected.
-- `src/sandbox.ts` — `provisionSandbox` (JIT → createSandbox → detached runner) + `teardownSandbox` (idempotent). Wraps the createos SDK. `SandboxDeps.makeClient` is the test injection seam.
-- `src/coordinator.ts` — the `Coordinator` **Durable Object**. ALL state (SQLite): Job→Sandbox map, concurrency counter, pending queue, delivery-dedup, `sweep`. RPC methods: `onQueued`, `markRunning`, `onCompleted`, `sweep`, `activeCount`.
+- `src/sandbox.ts` — `createRunnerSandbox` (JIT → createSandbox, returns the handle + runner name) and `launchRunner` (detached runner) as **two steps** so the Worker can record ownership in the DO between them; plus `teardownSandbox` (idempotent). Wraps the createos SDK. `SandboxDeps.makeClient` is the test injection seam.
+- `src/coordinator.ts` — the `Coordinator` **Durable Object**. ALL state (SQLite): job rows (owning their Sandbox by `runner_name`), concurrency counter, pending queue, delivery-dedup, `sweep`. Row states: `pending`→`provisioning`→`running`→`destroying`. RPC: `onQueued`, `recordSandboxCreated` (launch|destroy), `markRunning`, `markProvisionFailed` (frees slot on failure), `onCompleted(jobId, runnerName?)`, `markDestroyed` (confirm teardown), `sweep`, `activeCount`.
 - `src/github/{jwt,auth,client}.ts` — zero-dep GitHub App auth: RS256 JWT (Web Crypto) → installation-token cache → `GitHubClient` (`generateJitConfig`, `isForkJob(repoFullName, runId)`). API base is `config.githubApiUrl` (`GITHUB_API_URL`, default api.github.com).
 - `src/notify.ts` — `notify(config, text)`: optional Slack-style failure webhook (`ALERT_WEBHOOK_URL`). No-op if unset; never throws. Called from the `provision failed` path in `handler.ts`.
-- `template/` — pre-baked runner rootfs (`Dockerfile` RUN-only, `start-runner.sh`, `build.ts`). `bun run build:template` auto-pulls the latest `actions/runner`, deletes the old template, and rebuilds. `.github/workflows/bump-runner.yml` does this daily (needs repo secret `CREATEOS_API_KEY`). Not part of the Worker bundle.
+- `template/` — pre-baked runner rootfs (`Dockerfile` RUN-only, `build.ts`). The runner launch script is embedded in the Dockerfile via `printf` (COPY/heredoc are not permitted by the template builder) and that is its single source of truth. `bun run build:template` auto-pulls the latest `actions/runner`, deletes the old template, and rebuilds. `.github/workflows/bump-runner.yml` does this daily (needs repo secret `CREATEOS_API_KEY`). Not part of the Worker bundle.
 
 ## Dev commands (deps already installed; run via local bins)
 ```
@@ -70,8 +75,11 @@ Brainstorm → (if multi-step) write a plan under `docs/superpowers/plans/` → 
 ## Status
 **Deployed + verified end-to-end** (2026-07-05/06): a `runs-on: [createos]` job boots a microVM runner and runs green; `completed` webhook tears it down. `MAX_CONCURRENT=50`, `PROVISION_POLICY=org-wide`.
 
+**Coordinator hardening (2026-07-06, not yet deployed):** ownership recorded between createSandbox and launch (no VM leak if `completed` races the boot); teardown keyed on runner identity so a backlog can't tear down the wrong VM (ADR-0003); failed provisions free their slot immediately (`markProvisionFailed`); teardown held in a `destroying` row until `destroy()` is confirmed (`markDestroyed`), with the reaper retrying unconfirmed ones. **Adds a `runner_name` column — migrated in via `ALTER TABLE` in the DO constructor.**
+
+**In-guest self-delete — LIVE + verified (2026-07-06).** fc#520 (`a56978b`) self-signal is live on the createos host fleet, and the `ghar-runner` template was rebuilt so `start-runner.sh` POSTs `127.0.0.1:1029/self/delete` on runner exit → the host destroys the VM by UDS identity in seconds (fast teardown layer 0). Verified end-to-end on prod: `GET /self/pause`→405, `POST /self/delete`→202→VM gone <2s, and the deployed template bakes the curl line. Best-effort (`|| true`); reclaims the **host VM only** — the DO concurrency slot is still freed by the `completed` webhook, which stays authoritative. Fleet requirement: fc ≥ `a56978b` (agent baked into host `initrd.gz` via `fc-spawn initrd --agent` + host UDS listener `internal/hosts/service/self_signal.go`; NOT a property of the `sandbox:debian` base rootfs — don't `skopeo` the base image, probe instead: `curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:1029/self/pause` → `405` present / refused absent). Trailing `halt`/`poweroff`/sysrq stays as a no-op fallback.
+
 Known gaps / follow-ups:
-- **In-guest self-halt is a no-op** on the minimal base image (no `halt`/`poweroff`, sysrq ignored) — teardown relies on the `completed` webhook + reaper cron. Proper fix tracked at NodeOps-app/fc#520 (guest self-destruct).
 - `fc-sdk` carries the same Workers fetch-bind fix on branch `fix/workers-fetch-bind` — needs push + republish there.
 - `org-wide` policy serves fork PRs (safety = VM isolation + `MAX_CONCURRENT`); tighten to `repo-allowlist`/`fork-gated` for public repos.
-- Alerting is live but dormant until `ALERT_WEBHOOK_URL` secret is set.
+- Alerting is live (provision + teardown failures) but dormant until `ALERT_WEBHOOK_URL` secret is set.

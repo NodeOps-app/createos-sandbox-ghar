@@ -15,10 +15,19 @@ RUN apt-get update -qq \
  && ./bin/installdependencies.sh \
  && chown -R runner:runner /opt/actions-runner
 
-# start-runner.sh via single-line printf. COPY is not permitted by the template
-# builder, and heredocs are not either: the builder parses each physical line as a
-# Dockerfile instruction (no heredoc awareness), so a `set -euo pipefail` body line
-# is read as a `SET` instruction and rejected. Single-quoted printf args keep
-# ${JIT_CONFIG} literal so it expands at runtime, not build time.
-RUN printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'cd /opt/actions-runner' 'RUNNER_ALLOW_RUNASROOT=1 ./run.sh --jitconfig "${JIT_CONFIG}" || true' 'halt -f 2>/dev/null || poweroff -f 2>/dev/null || echo o > /proc/sysrq-trigger' > /opt/start-runner.sh \
+# The runner launch script, and its ONLY source of truth. COPY is not permitted
+# by the template builder, and heredocs are not either: the builder parses each
+# physical line as a Dockerfile instruction (no heredoc awareness), so a
+# `set -euo pipefail` body line is read as a `SET` instruction and rejected —
+# hence this single-line printf. Single-quoted printf args keep ${JIT_CONFIG}
+# literal so it expands at runtime, not build time.
+#
+# Teardown: when the ephemeral runner exits (job done, already deregistered from
+# GitHub), the script self-deletes the VM via the guest agent's loopback-only
+# self-signal endpoint (127.0.0.1:1029, POST /self/delete) — the fast path that
+# reclaims the host VM in seconds without waiting on the `completed` webhook. It
+# is best-effort (`|| true`): if the agent predates self-signal or the call
+# fails, the `completed` webhook + reaper cron still tear the VM down. The trailing
+# halt/poweroff/sysrq is a last-ditch fallback and a no-op on the minimal base.
+RUN printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'cd /opt/actions-runner' 'RUNNER_ALLOW_RUNASROOT=1 ./run.sh --jitconfig "${JIT_CONFIG}" || true' 'curl -fsS -m 5 -X POST "http://127.0.0.1:1029/self/delete?reason=job-done" || true' 'halt -f 2>/dev/null || poweroff -f 2>/dev/null || echo o > /proc/sysrq-trigger' > /opt/start-runner.sh \
  && chmod +x /opt/start-runner.sh
