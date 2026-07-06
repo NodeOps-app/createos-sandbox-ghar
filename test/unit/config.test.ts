@@ -21,6 +21,8 @@ describe("loadConfig", () => {
     expect(c.maxConcurrent).toBe(0);
     expect(c.provisionPolicy).toBe("org-wide");
     expect(c.repoAllowlist).toEqual([]);
+    expect(c.reaperMaxAgeMs).toBe(3_600_000);
+    expect(c.reconcileGraceMs).toBe(180_000);
   });
 
   it("parses allowlist csv", () => {

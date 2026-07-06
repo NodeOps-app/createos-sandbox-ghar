@@ -4,7 +4,7 @@ Ephemeral GitHub Actions runner autoscaler for the `nodeops-app` org, on createo
 
 ## How it works
 
-`workflow_job` webhook → Worker verifies HMAC, filters `runs-on: [createos]` + policy → Coordinator Durable Object (SQLite) tracks state → Worker mints a JIT runner config, boots a sandbox from the `ghar-runner` template, launches the runner detached. Teardown: when the runner exits the guest self-deletes its VM (fast path); the `completed` webhook frees the slot and confirms teardown (authoritative); a 5-minute cron reaps any orphan older than `REAPER_MAX_AGE_MS`. See [Teardown](#teardown).
+`workflow_job` webhook → Worker verifies HMAC, filters `runs-on: [createos]` + policy → Coordinator Durable Object (SQLite) tracks state → Worker mints a JIT runner config, boots a sandbox from the `ghar-runner` template, launches the runner detached. Teardown: when the runner exits the guest self-deletes its VM (fast path); the `completed` webhook frees the slot and confirms teardown (authoritative); a 5-minute cron reconciles against GitHub (re-drives stuck-`queued` jobs, reaps runner-less VMs) and reaps any orphan older than `REAPER_MAX_AGE_MS`. See [Teardown](#teardown) + [Reconciler](#reconciler).
 
 ```
 GitHub ──webhook──▶ Worker (/webhook) ──▶ Coordinator DO (SQLite state)
@@ -43,7 +43,7 @@ bun install
 Verify the toolchain is healthy:
 
 ```bash
-bun run lint && bun run typecheck && bun run test    # expect: 47 tests pass
+bun run lint && bun run typecheck && bun run test    # expect: 63 tests pass
 ```
 
 > If installs misbehave, see the "Toolchain gotchas" section in `CLAUDE.md` (pinned versions are deliberate — do not upgrade `vitest`/`vitest-pool-workers`).
@@ -142,12 +142,13 @@ jobs:
 | PROVISION_POLICY | no | org-wide | org-wide / repo-allowlist / fork-gated |
 | REPO_ALLOWLIST | no | — | csv of `owner/repo`, used when policy=repo-allowlist |
 | REAPER_MAX_AGE_MS | no | 3600000 | orphan sandbox cutoff — keep **above your longest job** |
+| RECONCILE_GRACE_MS | no | 180000 | reconciler boot grace before a runner-less VM is reaped — keep **above your VM boot + runner-register time** |
 | ALERT_WEBHOOK_URL | yes | — | optional Slack-style webhook; posts on provision failure |
 
 ## Development
 
 ```bash
-bun run test        # vitest (unit + real-DO integration, 55 tests)
+bun run test        # vitest (unit + real-DO integration, 63 tests)
 bun run typecheck   # tsc --noEmit
 bun run lint        # oxlint
 bun run dev         # wrangler dev (needs .dev.vars)
@@ -164,6 +165,17 @@ A VM is destroyed by three layers, each a backstop for the one before:
 2. **Reaper cron (safety net).** Every 5 minutes a cron trigger (a) re-destroys any `destroying` VM whose teardown was never confirmed (destroy failed/dropped), and (b) sweeps `running` VMs older than `REAPER_MAX_AGE_MS` whose completion was never recorded (e.g. a dropped webhook). The cutoff **must stay above your longest job** — the reaper can't distinguish a busy VM from an orphan, it only sees age.
 
 > Backlog note: an ephemeral runner takes the **first** matching queued job, which may differ from the job that provisioned its VM if a backlog exists. Teardown keys on the `runner_name` in the `completed` payload — i.e. the VM that actually ran the job — so layer 1 stays correct under a backlog (every VM is torn down by whichever job ran on it). See `docs/adr/0003`.
+
+## Reconciler
+
+The webhook path is edge-triggered: GitHub sends a job's `queued` event **exactly once**. If provisioning that job throws (its DO row is dropped) or the `queued` webhook is lost, nothing re-drives it — the job sits `queued` with no runner until GitHub's 24 h wait-for-runner limit. Symmetrically, a VM that boots but whose runner never registers (bad JIT config, guest crash) looks `running` to the controller while GitHub sees no runner, and the age-only reaper won't touch it until `REAPER_MAX_AGE_MS`.
+
+The same 5-minute cron runs a **reconciler** that closes both gaps by reconciling against GitHub as the source of truth, before the reaper's coarse age sweep:
+
+1. **Runner-liveness reap.** Lists the org's `online` runners; any tracked `running`/`provisioning` VM older than `RECONCILE_GRACE_MS` whose `ghar-<jobId>` runner is **not** online is torn down (it never registered, or already exited). Unlike the reaper this keys on live runner identity, so a long job is spared while its runner is online. Fails safe: if the runner list can't be fetched, nothing is reaped.
+2. **Queued-job re-drive.** Lists every `createos`-labelled `workflow_job` GitHub still reports `queued` across the app's installed repos and replays each through the normal `onQueued` path — so the concurrency cap and dedup are reused verbatim and only genuinely unserved jobs boot a fresh sandbox. A job we're already provisioning (fresh row) is ignored.
+
+`RECONCILE_GRACE_MS` **must stay above your VM boot + runner-registration time** (registration lags VM create by seconds), or a normally-booting runner gets reaped mid-boot.
 
 ## Keeping the runner current
 

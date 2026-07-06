@@ -223,6 +223,60 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   /**
+   * Promotes as many pending jobs as freed capacity allows (oldest-first)
+   * through the same canonical #dequeuePending path a completion uses. Slot
+   * release is spread across several methods (completion, provision-failure,
+   * reaper, reconciler); the single-slot events promote one, but a bulk reap
+   * can vacate several at once, so those drain to the cap. Returns the jobs the
+   * Worker must boot — without this, reaping a runner-less VM would free a slot
+   * that no pending job is ever pulled into (its `queued` webhook already fired
+   * once), stranding it until the age reaper.
+   */
+  #drainPending(): PendingJob[] {
+    const promoted: PendingJob[] = [];
+    for (let next = this.#dequeuePending(); next; next = this.#dequeuePending()) {
+      promoted.push(next);
+    }
+    return promoted;
+  }
+
+  /**
+   * Reconciler teardown: VMs whose runner never came online. `onlineRunners` is
+   * the set of runner names GitHub reports as registered right now; an
+   * `provisioning`/`running` row older than graceMs whose `ghar-<jobId>` name is
+   * absent booted a VM that never registered a runner (bad JIT config, guest
+   * crash) or a `running` VM whose `completed` webhook we missed. Unlike `sweep`
+   * (age-only, can't tell a busy VM from an orphan) this keys on live runner
+   * identity, so a long-running job is spared as long as its runner is online.
+   * Rows with a VM flip to `destroying` (the Worker tears them down + confirms
+   * via markDestroyed, freeing the row so a still-queued job can be
+   * re-provisioned next reconcile); rows without a VM are dropped outright. The
+   * grace window keeps a normally-booting runner — registration lags VM create
+   * by seconds — from being reaped mid-boot.
+   */
+  async reapUnregistered(
+    nowMs: number,
+    onlineRunners: string[],
+    graceMs: number,
+  ): Promise<ReapResult> {
+    const cutoff = nowMs - graceMs;
+    const online = new Set(onlineRunners);
+    const toDestroy: TeardownTask[] = [];
+    for (const r of this.#sql
+      .exec<Row>(`SELECT * FROM jobs WHERE state IN ${ACTIVE_STATES} AND created_at < ?`, cutoff)
+      .toArray()) {
+      if (r.runner_name && online.has(r.runner_name)) continue; // runner live → healthy
+      if (r.sandbox_id) {
+        this.#sql.exec(`UPDATE jobs SET state = 'destroying' WHERE job_id = ?`, r.job_id);
+        toDestroy.push({ jobId: r.job_id, sandboxId: r.sandbox_id });
+      } else {
+        this.#sql.exec(`DELETE FROM jobs WHERE job_id = ?`, r.job_id); // never booted a VM
+      }
+    }
+    return { toDestroy, nextPending: this.#drainPending() };
+  }
+
+  /**
    * Reaper: returns every VM the Worker should (re)destroy —
    *   1. `destroying` rows whose teardown was never confirmed (destroy
    *      failed/pending); destroy is idempotent + NotFound-safe so re-issuing
@@ -258,6 +312,7 @@ export class Coordinator extends DurableObject<Env> {
 
     this.#sql.exec(`DELETE FROM jobs WHERE state = 'pending' AND created_at < ?`, cutoff);
     this.#sql.exec(`DELETE FROM deliveries WHERE seen_at < ?`, cutoff);
-    return { toDestroy };
+    // Stale-orphan teardowns above vacated slots; pull surviving pending jobs in.
+    return { toDestroy, nextPending: this.#drainPending() };
   }
 }

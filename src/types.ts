@@ -18,6 +18,7 @@ export interface Config {
   provisionPolicy: ProvisionPolicy;
   repoAllowlist: string[]; // full names, e.g. "nodeops-app/api"
   reaperMaxAgeMs: number; // orphan cutoff, e.g. 3_600_000
+  reconcileGraceMs: number; // reconciler boot grace before a runner-less VM is reaped, e.g. 180_000
   alertWebhookUrl?: string; // optional Slack-style webhook for failure alerts
 }
 
@@ -74,7 +75,12 @@ export interface CompletedResult {
   nextPending: PendingJob | null;
 }
 
-/** DO → Worker on sweep: orphan / retry VMs to destroy. */
+/**
+ * DO → Worker on sweep/reap: orphan / retry VMs to destroy, plus any pending
+ * jobs promoted into the slots those teardowns freed (the reaper/reconciler can
+ * vacate several slots at once, so this is a list, not a single job).
+ */
 export interface ReapResult {
   toDestroy: TeardownTask[];
+  nextPending: PendingJob[];
 }

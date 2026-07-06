@@ -3,6 +3,9 @@ main = "src/index.ts"
 compatibility_date = "2026-07-01"
 compatibility_flags = ["nodejs_compat"]
 
+[observability]
+enabled = true
+
 [[durable_objects.bindings]]
 name = "COORDINATOR"
 class_name = "Coordinator"
@@ -25,6 +28,7 @@ MAX_CONCURRENT = "50"
 PROVISION_POLICY = "org-wide"
 REPO_ALLOWLIST = ""
 REAPER_MAX_AGE_MS = "1800000"
+RECONCILE_GRACE_MS = "180000"
 
 # Secrets are set via `wrangler secret put` (never commit values here):
 # wrangler secret put GITHUB_APP_ID

@@ -45,6 +45,7 @@ export function loadConfig(env: Record<string, unknown>): Config {
     provisionPolicy: policy as ProvisionPolicy,
     repoAllowlist: allowlist,
     reaperMaxAgeMs: num(env, "REAPER_MAX_AGE_MS", 3_600_000),
+    reconcileGraceMs: num(env, "RECONCILE_GRACE_MS", 180_000),
     alertWebhookUrl: (env.ALERT_WEBHOOK_URL as string) || undefined,
   };
 }

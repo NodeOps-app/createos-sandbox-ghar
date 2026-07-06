@@ -154,6 +154,77 @@ async function destroyAndConfirm(
 export async function runReaper(env: Bindings, deps: SandboxDeps = {}): Promise<void> {
   const config = loadConfig(env as Record<string, unknown>);
   const co = coordinator(env);
-  const { toDestroy } = await co.sweep(Date.now(), config.reaperMaxAgeMs);
-  await Promise.allSettled(toDestroy.map((task) => destroyAndConfirm(env, config, task, deps)));
+  const { toDestroy, nextPending } = await co.sweep(Date.now(), config.reaperMaxAgeMs);
+  await Promise.allSettled([
+    ...toDestroy.map((task) => destroyAndConfirm(env, config, task, deps)),
+    ...nextPending.map((job) => provisionAndRecord(env, job, deps)),
+  ]);
+}
+
+/**
+ * Reconciler (cron): closes the two gaps a webhook-only controller can't —
+ *   1. a job whose provision failed (row dropped) or whose `queued` webhook was
+ *      never delivered: GitHub still shows it `queued`, but nothing re-drives it.
+ *   2. a VM that booted but whose runner never registered: we think it's
+ *      `running`, GitHub never got a runner, and the age-only reaper won't touch
+ *      it until REAPER_MAX_AGE_MS.
+ * Step A tears down runner-less VMs (freeing their rows); step B replays every
+ * still-`queued` job through the normal `onQueued` path so the cap/dedup logic
+ * is reused verbatim and only genuinely unserved jobs boot a fresh sandbox.
+ * Both GitHub reads fail safe: an outage skips the affected step rather than
+ * reaping healthy VMs or provisioning blindly.
+ */
+export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Promise<void> {
+  const config = loadConfig(env as Record<string, unknown>);
+  const github = new GitHubClient(config);
+  const co = coordinator(env);
+
+  // A. Reap VMs whose runner is not live. Skipped entirely if the runner list is
+  //    unavailable — never reap on a partial/failed view.
+  try {
+    const online = await github.listOnlineRunners();
+    const { toDestroy, nextPending } = await co.reapUnregistered(
+      Date.now(),
+      online,
+      config.reconcileGraceMs,
+    );
+    // Reaping a runner-less VM frees its slot; pull any pending job into it now
+    // rather than waiting for that job's (already-fired) queued webhook to recur.
+    await Promise.allSettled([
+      ...toDestroy.map((task) => destroyAndConfirm(env, config, task, deps)),
+      ...nextPending.map((jobToBoot) => provisionAndRecord(env, jobToBoot, deps)),
+    ]);
+  } catch (err) {
+    console.error(`reconcile: runner sweep skipped: ${String(err)}`);
+  }
+
+  // B. Re-drive every still-queued label job GitHub knows about.
+  let queued: PendingJob[];
+  try {
+    queued = await github.listQueuedJobs();
+  } catch (err) {
+    console.error(`reconcile: queued-job poll failed: ${String(err)}`);
+    return;
+  }
+
+  const toProvision: PendingJob[] = [];
+  for (const job of queued) {
+    const eligible = await shouldProvision(
+      config,
+      {
+        action: "queued",
+        jobId: job.jobId,
+        runId: job.runId,
+        repoFullName: job.repoFullName,
+        labels: [config.runnerLabel],
+      },
+      () => github.isForkJob(job.repoFullName, job.runId),
+    );
+    if (!eligible) continue;
+    // Same job_id → onQueued returns `ignore` for anything we're already
+    // tracking (fresh boot / at-cap pending); only untracked jobs provision.
+    const decision = await co.onQueued(job, `reconcile-${job.jobId}`);
+    if (decision.action === "provision") toProvision.push(job);
+  }
+  await Promise.allSettled(toProvision.map((job) => provisionAndRecord(env, job, deps)));
 }

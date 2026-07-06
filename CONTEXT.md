@@ -22,6 +22,8 @@ Glossary for the GitHub Actions runner controller. Terms only, no implementation
 
 - **Reaper** — safety-net teardown, a cron sweep: destroys orphan Sandboxes (a Job that booted a Sandbox but whose completion was never recorded — crash, dropped webhook) and retries any **Destroying** row whose teardown was never confirmed.
 
+- **Reconciler** — cron self-heal (same 5-min trigger, runs before the Reaper) that reconciles against GitHub as source of truth, closing the gaps the once-only `queued` webhook leaves. Two steps: (1) tears down tracked VMs older than `RECONCILE_GRACE_MS` whose `ghar-<jobId>` runner is not in GitHub's `online` runner list (booted-but-never-registered, or a missed `completed`) — keyed on live runner identity, so it spares a busy long-running VM the age-only Reaper can't; (2) re-drives every still-`queued` `createos` Job GitHub reports (across installed repos) through the normal `onQueued` path, recovering Jobs whose provision failed or whose `queued` webhook was lost. Both GitHub reads fail safe — an API error skips that step rather than reaping healthy VMs or provisioning blindly.
+
 - **Provisioning policy** — configurable switch deciding which Jobs get a Sandbox: `org-wide` (any repo, default), `repo-allowlist` (only listed repos), or `fork-gated` (skip fork-PR jobs). Set via env/config. Under `org-wide`, fork-PR safety rests solely on VM isolation + ephemerality.
 
 - **Runner label** — `createos`. Workflows opt in with `runs-on: [createos]`; the Controller ignores any `workflow_job` whose labels omit it; the JIT config registers the Runner with it.

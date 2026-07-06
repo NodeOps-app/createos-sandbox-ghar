@@ -64,6 +64,7 @@ node_modules/.bin/wrangler dev     # or: bun run dev
 - **oxlint + oxfmt** on every `.ts` change.
 - **Conventional Commits**, imperative subject ≤ 50 chars, atomic.
 - Self-documenting code over comments; comment the *why* / design decisions.
+- **No silent bounds.** Any cap, limit, truncation, or guard you add (page cap, max-retries, batch size, top-N, sampling, early-exit) MUST `console.warn` when it actually binds — i.e. when the bound is what stopped the work, not the data. A silent cap reads as "covered everything" when it didn't. Log the bound, the identifier, and how much was collected/dropped (e.g. `#getPaged` warns on `MAX_PAGES`). Never truncate coverage without a trace.
 - **CF Free plan is a hard constraint** (`docs/adr/0002`): DO must stay `new_sqlite_classes`; keep the DO passive (state only) so it hibernates; do all blocking network I/O (createSandbox poll, GitHub API, destroy) in the Worker, not the DO; reaper is a **cron trigger**, not DO alarms.
 
 ## Changing the domain model

@@ -29,6 +29,7 @@ async function cfg(): Promise<Config> {
     provisionPolicy: "org-wide",
     repoAllowlist: [],
     reaperMaxAgeMs: 3_600_000,
+    reconcileGraceMs: 180_000,
   };
 }
 

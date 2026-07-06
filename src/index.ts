@@ -1,5 +1,5 @@
 import { Coordinator } from "./coordinator";
-import { handleWebhook, runReaper } from "./handler";
+import { handleWebhook, runReaper, runReconciler } from "./handler";
 
 export { Coordinator };
 
@@ -21,6 +21,14 @@ export default {
   },
 
   async scheduled(_event: ScheduledController, env: Bindings, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runReaper(env));
+    // Reconcile first (re-drive stuck jobs, reap runner-less VMs), then the
+    // age-only reaper as a coarse backstop. Sequential: both mutate the one
+    // singleton Coordinator, so running them concurrently would race its rows.
+    ctx.waitUntil(
+      (async () => {
+        await runReconciler(env);
+        await runReaper(env);
+      })(),
+    );
   },
 } satisfies ExportedHandler<Bindings>;
