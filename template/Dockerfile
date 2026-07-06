@@ -5,7 +5,7 @@ FROM nodeops/sandbox:debian
 ARG RUNNER_VERSION=2.335.1
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl git jq sudo docker.io libicu-dev \
+      ca-certificates curl git jq sudo unzip docker.io libicu-dev \
  && rm -rf /var/lib/apt/lists/* \
  && useradd -m runner && usermod -aG docker runner \
  && mkdir -p /opt/actions-runner && cd /opt/actions-runner \
