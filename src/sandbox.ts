@@ -73,6 +73,9 @@ export async function createRunnerSandbox(
     // CI jobs pull from arbitrary hosts (npm/pip/apt/git/ghcr/…); the createos
     // default egress allowlist blocks them. `["*"]` = allow all egress.
     egress: ["*"],
+    // Do NOT set auto_pause_after_seconds: a paused runner goes offline to
+    // GitHub (missed dispatch, 1-day deregistration). Omitting it disables
+    // idle auto-pause; these VMs self-delete per job anyway.
     envs: { JIT_CONFIG: jitConfig },
   });
 
