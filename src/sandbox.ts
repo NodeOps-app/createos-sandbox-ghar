@@ -8,8 +8,8 @@ export type SandboxHandle = Awaited<ReturnType<CreateosSandboxClient["createSand
 export interface SandboxDeps {
   /** Injection seam for tests. Defaults to a real client from config. */
   makeClient?: (config: Config) => CreateosSandboxClient;
-  /** Injection seam for tests. Unix seconds; discriminates provision attempts. */
-  now?: () => number;
+  /** Injection seam for tests. 2-char token discriminating provision attempts. */
+  attemptId?: () => string;
 }
 
 function client(config: Config, deps: SandboxDeps): CreateosSandboxClient {
@@ -40,11 +40,13 @@ function clampSandboxName(name: string): string {
  * pre-baked runner template. Returns the handle + runner name so the caller can
  * record ownership in the Coordinator BEFORE launching the runner — closing the
  * window where a `completed` webhook arriving mid-boot would leak the VM. The
- * runner is named `ghar-<jobId>-<unixSec>`; the unix-seconds suffix makes every
- * provision attempt a fresh name so re-driving a job whose earlier attempt
- * orphaned its JIT registration can't collide (409 "already exists"). That name
- * is recorded in the DO and is how a later `completed` webhook (`runner_name`)
- * maps back to the VM that ran the job.
+ * runner is named `ghar-<jobId>-<xx>` where `xx` is a 2-char random token that
+ * makes every provision attempt a fresh name, so re-driving a job whose earlier
+ * attempt orphaned its JIT registration can't collide (409 "already exists").
+ * Kept to 2 chars: the JIT blob is injected via the createos `envs` value which
+ * caps at 4096 bytes, and the blob (base64-nested) is already ~4084 for the base
+ * name — a longer suffix overruns it. That name is recorded in the DO and is how
+ * a later `completed` webhook (`runner_name`) maps back to the VM that ran it.
  */
 export async function createRunnerSandbox(
   config: Config,
@@ -52,8 +54,9 @@ export async function createRunnerSandbox(
   job: PendingJob,
   deps: SandboxDeps = {},
 ): Promise<{ sandboxId: string; runnerName: string; sandbox: SandboxHandle }> {
-  const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
-  const runnerName = `ghar-${job.jobId}-${now()}`;
+  const attemptId =
+    deps.attemptId ?? (() => Math.floor(Math.random() * 1296).toString(36).padStart(2, "0"));
+  const runnerName = `ghar-${job.jobId}-${attemptId()}`;
   const jitConfig = await github.generateJitConfig(runnerName);
 
   // The createos VM name is cosmetic (teardown keys on sandbox_id + runner

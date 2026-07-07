@@ -19,11 +19,11 @@ describe("createRunnerSandbox", () => {
 
     const res = await createRunnerSandbox(config, github, job, {
       makeClient: () => ({ createSandbox }) as any,
-      now: () => 1751872800,
+      attemptId: () => "k3",
     });
 
-    // Runner name carries a unix-seconds suffix so a re-driven job can't collide.
-    expect(github.generateJitConfig).toHaveBeenCalledWith("ghar-100-1751872800");
+    // Runner name carries a 2-char attempt token so a re-driven job can't collide.
+    expect(github.generateJitConfig).toHaveBeenCalledWith("ghar-100-k3");
     expect(createSandbox).toHaveBeenCalledWith(
       expect.objectContaining({
         shape: "s-4vcpu-4gb",
@@ -36,7 +36,7 @@ describe("createRunnerSandbox", () => {
     // Does NOT launch the runner — that is a separate step, after ownership is recorded.
     expect(runCommand).not.toHaveBeenCalled();
     expect(res.sandboxId).toBe("sb_1");
-    expect(res.runnerName).toBe("ghar-100-1751872800");
+    expect(res.runnerName).toBe("ghar-100-k3");
   });
 
   it("gives each provision attempt of the same job a distinct runner name", async () => {
@@ -45,14 +45,26 @@ describe("createRunnerSandbox", () => {
 
     const a = await createRunnerSandbox(config, github, job, {
       makeClient: () => ({ createSandbox }) as any,
-      now: () => 1751872800,
+      attemptId: () => "k3",
     });
     const b = await createRunnerSandbox(config, github, job, {
       makeClient: () => ({ createSandbox }) as any,
-      now: () => 1751873100,
+      attemptId: () => "z9",
     });
 
     expect(a.runnerName).not.toBe(b.runnerName);
+  });
+
+  it("default attempt token is 2 chars (keeps JIT blob under the 4096 env cap)", async () => {
+    const createSandbox = vi.fn().mockResolvedValue({ id: "sb_1", runCommand: vi.fn() });
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+
+    await createRunnerSandbox(config, github, job, {
+      makeClient: () => ({ createSandbox }) as any,
+    });
+
+    const name = github.generateJitConfig.mock.calls[0]![0] as string;
+    expect(name).toMatch(/^ghar-100-[0-9a-z]{2}$/);
   });
 
   it("clamps the VM name to the createos 22-char cap", async () => {
