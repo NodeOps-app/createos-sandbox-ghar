@@ -5,7 +5,12 @@ import type { Config } from "../../src/types";
 
 async function cfg(): Promise<Config> {
   const pair = (await crypto.subtle.generateKey(
-    { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256",
+    },
     true,
     ["sign", "verify"],
   )) as CryptoKeyPair;
@@ -23,6 +28,7 @@ async function cfg(): Promise<Config> {
     createosApiKey: "k",
     runnerLabel: "createos",
     runnerTemplate: "ghar-runner",
+    sandboxNamePrefix: "gha-ci",
     runnerShape: "s-4vcpu-4gb",
     runnerDiskMib: 30720,
     maxConcurrent: 0,
@@ -39,15 +45,19 @@ describe("GitHubClient.generateJitConfig", () => {
     expect(await client.generateJitConfig("ghar-100")).toBe("ENCODED_JIT_BLOB");
   });
   it("throws on failure", async () => {
-    const routes = githubRoutes({ "POST /generate-jitconfig": () => new Response("bad", { status: 422 }) });
+    const routes = githubRoutes({
+      "POST /generate-jitconfig": () => new Response("bad", { status: 422 }),
+    });
     const client = new GitHubClient(await cfg(), mockFetch(routes));
     await expect(client.generateJitConfig("x")).rejects.toThrow(/422/);
   });
 });
 
 describe("GitHubClient.isForkJob", () => {
-  const run = (body: unknown, status = 200) => () =>
-    new Response(JSON.stringify(body), { status });
+  const run =
+    (body: unknown, status = 200) =>
+    () =>
+      new Response(JSON.stringify(body), { status });
 
   it("queries the repo-qualified run URL and clears a same-org, non-fork run", async () => {
     let seen = "";
@@ -70,7 +80,9 @@ describe("GitHubClient.isForkJob", () => {
 
   it("flags a head repo owned outside the org", async () => {
     const routes = githubRoutes({
-      "GET /actions/runs/": run({ head_repository: { fork: false, owner: { login: "someforker" } } }),
+      "GET /actions/runs/": run({
+        head_repository: { fork: false, owner: { login: "someforker" } },
+      }),
     });
     const client = new GitHubClient(await cfg(), mockFetch(routes));
     expect(await client.isForkJob("nodeops-app/api", 1)).toBe(true);

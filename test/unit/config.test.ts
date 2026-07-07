@@ -23,10 +23,19 @@ describe("loadConfig", () => {
     expect(c.repoAllowlist).toEqual([]);
     expect(c.reaperMaxAgeMs).toBe(3_600_000);
     expect(c.reconcileGraceMs).toBe(180_000);
+    expect(c.sandboxNamePrefix).toBe(""); // no prefix unless SANDBOX_NAME_PREFIX set
+  });
+
+  it("prefixes sandbox name when SANDBOX_NAME_PREFIX set", () => {
+    expect(loadConfig({ ...base, SANDBOX_NAME_PREFIX: "gha-ci" }).sandboxNamePrefix).toBe("gha-ci");
   });
 
   it("parses allowlist csv", () => {
-    const c = loadConfig({ ...base, PROVISION_POLICY: "repo-allowlist", REPO_ALLOWLIST: "a/b, c/d" });
+    const c = loadConfig({
+      ...base,
+      PROVISION_POLICY: "repo-allowlist",
+      REPO_ALLOWLIST: "a/b, c/d",
+    });
     expect(c.repoAllowlist).toEqual(["a/b", "c/d"]);
   });
 

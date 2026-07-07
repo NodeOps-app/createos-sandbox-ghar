@@ -12,6 +12,7 @@ export interface Config {
   createosApiKey: string;
   runnerLabel: string; // "createos"
   runnerTemplate: string; // template id/name
+  sandboxNamePrefix: string; // createos VM name prefix (cosmetic, e.g. "gha-ci"); "" = none
   runnerShape: string; // "s-4vcpu-4gb"
   runnerDiskMib: number; // 30720
   maxConcurrent: number; // 0 = unlimited

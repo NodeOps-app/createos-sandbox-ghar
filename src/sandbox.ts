@@ -37,12 +37,19 @@ export async function createRunnerSandbox(
   const runnerName = `ghar-${job.jobId}`;
   const jitConfig = await github.generateJitConfig(runnerName);
 
+  // The createos VM name is cosmetic (teardown keys on sandbox_id + runner
+  // identity, not this). Prefix it so CI VMs are identifiable in the createos
+  // dashboard; the GitHub runner name stays `ghar-<jobId>` for ownership.
+  const sandboxName = config.sandboxNamePrefix
+    ? `${config.sandboxNamePrefix}-${runnerName}`
+    : runnerName;
+
   const c = client(config, deps);
   const sandbox = await c.createSandbox({
     shape: config.runnerShape,
     rootfs: config.runnerTemplate,
     disk_mib: config.runnerDiskMib,
-    name: runnerName,
+    name: sandboxName,
     envs: { JIT_CONFIG: jitConfig },
   });
 

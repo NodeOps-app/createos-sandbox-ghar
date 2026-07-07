@@ -136,6 +136,7 @@ jobs:
 | CREATEOS_API_KEY | yes | — | createos key |
 | RUNNER_LABEL | no | createos | opt-in `runs-on` label |
 | RUNNER_TEMPLATE | no | ghar-runner | rootfs template id/name |
+| SANDBOX_NAME_PREFIX | no | (unset in code; `gha-ci` in wrangler.toml) | prefix for the createos VM name (cosmetic; VM becomes `<prefix>-ghar-<jobId>`, runner name stays `ghar-<jobId>`) |
 | RUNNER_SHAPE | no | s-4vcpu-4gb | VM size |
 | RUNNER_DISK_MIB | no | 30720 | overlay disk (MiB) — must be ≤ your createos plan's cap |
 | MAX_CONCURRENT | no | 0 | 0 = unlimited; N = cap + pending queue |

@@ -7,6 +7,7 @@ const config = {
   runnerShape: "s-4vcpu-4gb",
   runnerTemplate: "ghar-runner",
   runnerDiskMib: 30720,
+  sandboxNamePrefix: "gha-ci",
 } as Config;
 const job: PendingJob = { jobId: 100, runId: 200, repoFullName: "nodeops-app/api" };
 
@@ -25,7 +26,7 @@ describe("createRunnerSandbox", () => {
       expect.objectContaining({
         shape: "s-4vcpu-4gb",
         rootfs: "ghar-runner",
-        name: "ghar-100",
+        name: "gha-ci-ghar-100", // prefixed VM name; runner name stays ghar-100
         envs: { JIT_CONFIG: "BLOB" },
       }),
     );

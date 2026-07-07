@@ -39,6 +39,7 @@ export function loadConfig(env: Record<string, unknown>): Config {
     createosApiKey: req(env, "CREATEOS_API_KEY"),
     runnerLabel: (env.RUNNER_LABEL as string) || "createos",
     runnerTemplate: req(env, "RUNNER_TEMPLATE"),
+    sandboxNamePrefix: (env.SANDBOX_NAME_PREFIX as string) || "",
     runnerShape: (env.RUNNER_SHAPE as string) || "s-4vcpu-4gb",
     runnerDiskMib: num(env, "RUNNER_DISK_MIB", 30720),
     maxConcurrent: num(env, "MAX_CONCURRENT", 0),
