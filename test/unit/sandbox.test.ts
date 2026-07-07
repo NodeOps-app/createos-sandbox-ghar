@@ -29,6 +29,7 @@ describe("createRunnerSandbox", () => {
         shape: "s-4vcpu-4gb",
         rootfs: "ghar-runner",
         name: "gha-ci-100", // cosmetic VM name stays short + suffix-free
+        egress: ["*"], // CI needs unrestricted egress
         envs: { JIT_CONFIG: "BLOB" },
       }),
     );

@@ -70,6 +70,9 @@ export async function createRunnerSandbox(
     rootfs: config.runnerTemplate,
     disk_mib: config.runnerDiskMib,
     name: sandboxName,
+    // CI jobs pull from arbitrary hosts (npm/pip/apt/git/ghcr/…); the createos
+    // default egress allowlist blocks them. `["*"]` = allow all egress.
+    egress: ["*"],
     envs: { JIT_CONFIG: jitConfig },
   });
 
