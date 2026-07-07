@@ -8,6 +8,8 @@ export type SandboxHandle = Awaited<ReturnType<CreateosSandboxClient["createSand
 export interface SandboxDeps {
   /** Injection seam for tests. Defaults to a real client from config. */
   makeClient?: (config: Config) => CreateosSandboxClient;
+  /** Injection seam for tests. Unix seconds; discriminates provision attempts. */
+  now?: () => number;
 }
 
 function client(config: Config, deps: SandboxDeps): CreateosSandboxClient {
@@ -20,13 +22,29 @@ function client(config: Config, deps: SandboxDeps): CreateosSandboxClient {
   });
 }
 
+/** createos-sandbox rejects names longer than this (API returns 400). */
+const MAX_SANDBOX_NAME = 22;
+
+/** Clamp the cosmetic VM name to the createos cap; warn when it actually binds. */
+function clampSandboxName(name: string): string {
+  if (name.length <= MAX_SANDBOX_NAME) return name;
+  const clamped = name.slice(0, MAX_SANDBOX_NAME);
+  console.warn(
+    `sandbox name "${name}" (${name.length}) exceeds ${MAX_SANDBOX_NAME}; clamped to "${clamped}"`,
+  );
+  return clamped;
+}
+
 /**
  * Step 1 of provisioning: mint JIT config and create the microVM from the
  * pre-baked runner template. Returns the handle + runner name so the caller can
  * record ownership in the Coordinator BEFORE launching the runner — closing the
  * window where a `completed` webhook arriving mid-boot would leak the VM. The
- * runner is named `ghar-<jobId>`; that name is how a later `completed` webhook
- * (`runner_name`) maps back to the VM that ran the job.
+ * runner is named `ghar-<jobId>-<unixSec>`; the unix-seconds suffix makes every
+ * provision attempt a fresh name so re-driving a job whose earlier attempt
+ * orphaned its JIT registration can't collide (409 "already exists"). That name
+ * is recorded in the DO and is how a later `completed` webhook (`runner_name`)
+ * maps back to the VM that ran the job.
  */
 export async function createRunnerSandbox(
   config: Config,
@@ -34,15 +52,17 @@ export async function createRunnerSandbox(
   job: PendingJob,
   deps: SandboxDeps = {},
 ): Promise<{ sandboxId: string; runnerName: string; sandbox: SandboxHandle }> {
-  const runnerName = `ghar-${job.jobId}`;
+  const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
+  const runnerName = `ghar-${job.jobId}-${now()}`;
   const jitConfig = await github.generateJitConfig(runnerName);
 
   // The createos VM name is cosmetic (teardown keys on sandbox_id + runner
-  // identity, not this). Prefix it so CI VMs are identifiable in the createos
-  // dashboard; the GitHub runner name stays `ghar-<jobId>` for ownership.
-  const sandboxName = config.sandboxNamePrefix
-    ? `${config.sandboxNamePrefix}-${runnerName}`
-    : runnerName;
+  // identity, not this). Keep it short + stable per job (`gha-ci-<jobId>`, no
+  // per-attempt suffix): collisions are harmless here, and dropping the runner's
+  // `ghar-`/timestamp keeps it under the createos name cap for dashboard use.
+  const sandboxName = clampSandboxName(
+    config.sandboxNamePrefix ? `${config.sandboxNamePrefix}-${job.jobId}` : runnerName,
+  );
 
   const c = client(config, deps);
   const sandbox = await c.createSandbox({

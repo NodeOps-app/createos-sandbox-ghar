@@ -118,7 +118,7 @@ export class GitHubClient {
 
   /**
    * Names of org runners GitHub reports as `online` right now — the reconciler's
-   * liveness oracle. A tracked VM whose `ghar-<jobId>` runner is absent here
+   * liveness oracle. A tracked VM whose recorded `ghar-…` runner is absent here
    * booted but never registered (or has already exited), so its slot is dead.
    * Offline (stale) runners are treated as absent.
    */

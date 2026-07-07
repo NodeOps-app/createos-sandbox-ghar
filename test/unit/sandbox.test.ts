@@ -19,21 +19,55 @@ describe("createRunnerSandbox", () => {
 
     const res = await createRunnerSandbox(config, github, job, {
       makeClient: () => ({ createSandbox }) as any,
+      now: () => 1751872800,
     });
 
-    expect(github.generateJitConfig).toHaveBeenCalledWith("ghar-100");
+    // Runner name carries a unix-seconds suffix so a re-driven job can't collide.
+    expect(github.generateJitConfig).toHaveBeenCalledWith("ghar-100-1751872800");
     expect(createSandbox).toHaveBeenCalledWith(
       expect.objectContaining({
         shape: "s-4vcpu-4gb",
         rootfs: "ghar-runner",
-        name: "gha-ci-ghar-100", // prefixed VM name; runner name stays ghar-100
+        name: "gha-ci-100", // cosmetic VM name stays short + suffix-free
         envs: { JIT_CONFIG: "BLOB" },
       }),
     );
     // Does NOT launch the runner — that is a separate step, after ownership is recorded.
     expect(runCommand).not.toHaveBeenCalled();
     expect(res.sandboxId).toBe("sb_1");
-    expect(res.runnerName).toBe("ghar-100");
+    expect(res.runnerName).toBe("ghar-100-1751872800");
+  });
+
+  it("gives each provision attempt of the same job a distinct runner name", async () => {
+    const createSandbox = vi.fn().mockResolvedValue({ id: "sb_1", runCommand: vi.fn() });
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+
+    const a = await createRunnerSandbox(config, github, job, {
+      makeClient: () => ({ createSandbox }) as any,
+      now: () => 1751872800,
+    });
+    const b = await createRunnerSandbox(config, github, job, {
+      makeClient: () => ({ createSandbox }) as any,
+      now: () => 1751873100,
+    });
+
+    expect(a.runnerName).not.toBe(b.runnerName);
+  });
+
+  it("clamps the VM name to the createos 22-char cap", async () => {
+    const createSandbox = vi.fn().mockResolvedValue({ id: "sb_1", runCommand: vi.fn() });
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+    // 11-digit jobId: gha-ci-<11> = 18, fits; force overflow with a long prefix.
+    const cfg = { ...config, sandboxNamePrefix: "gha-ci-nodeops" } as Config;
+    const bigJob: PendingJob = { jobId: 85556234917, runId: 1, repoFullName: "nodeops-app/api" };
+
+    await createRunnerSandbox(cfg, github, bigJob, {
+      makeClient: () => ({ createSandbox }) as any,
+    });
+
+    const name = createSandbox.mock.calls[0]![0].name;
+    expect(name.length).toBeLessThanOrEqual(22);
+    expect(name).toBe("gha-ci-nodeops-8555623");
   });
 });
 

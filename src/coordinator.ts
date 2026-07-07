@@ -243,8 +243,8 @@ export class Coordinator extends DurableObject<Env> {
   /**
    * Reconciler teardown: VMs whose runner never came online. `onlineRunners` is
    * the set of runner names GitHub reports as registered right now; an
-   * `provisioning`/`running` row older than graceMs whose `ghar-<jobId>` name is
-   * absent booted a VM that never registered a runner (bad JIT config, guest
+   * `provisioning`/`running` row older than graceMs whose recorded runner name
+   * is absent booted a VM that never registered a runner (bad JIT config, guest
    * crash) or a `running` VM whose `completed` webhook we missed. Unlike `sweep`
    * (age-only, can't tell a busy VM from an orphan) this keys on live runner
    * identity, so a long-running job is spared as long as its runner is online.
