@@ -40,6 +40,11 @@ pools.
 
 New module `src/shapes.ts`, so `sandbox.ts` stays a thin createos wrapper.
 
+`shapes.ts` needs an SDK client and `sandbox.ts` needs `shapeForLabel`, which
+would be an import cycle. The SDK client factory and the `SandboxDeps` test seam
+move to a new `src/createos.ts` that both import; `sandbox.ts` re-exports
+`SandboxDeps` so its existing consumers are untouched.
+
 ### `usableShapes(config, deps): Promise<Set<string>>`
 
 Calls the SDK's `listShapes()` (unauthenticated, already paginated by the SDK),
@@ -89,45 +94,69 @@ The `console.warn` is mandatory, not decorative: a silent `202` is
 indistinguishable from "this job was never ours", which is exactly the silent
 bound CLAUDE.md forbids. Log the label, the job id, and the underlying error.
 
-### `resolveShape(labels, usable, config): string | null`
+### Label selection
 
-Pure. Returns the createos shape id for the job's label, or `null` when no label
-is ours. Replaces `matchesLabel`.
+`matchesLabel` is replaced by four functions, split so that the catalog is only
+ever consulted where it is actually needed.
 
-A job's `runs-on` is a set that GitHub AND-matches, so non-createos labels in it
-(`self-hosted`, `linux`, `x64`) are irrelevant here — a JIT runner carries those
-implicitly. `resolveShape` ignores them.
+- `createosLabels(labels, config): string[]` — pure. The createos labels in a
+  job's `runs-on`: the bare `config.runnerLabel`, plus anything prefixed
+  `createos-`. A job's `runs-on` is a set that GitHub AND-matches, so its other
+  labels (`self-hosted`, `linux`, `x64`) are irrelevant — a JIT runner carries
+  those implicitly, and this ignores them.
+- `shapeForLabel(label, config): string` — pure. Bare label → `config.runnerShape`;
+  otherwise `s-` + the label's suffix.
+- `isUsableLabel(label, config, deps): Promise<boolean>` — the admission check.
+  A bare label short-circuits `true` without touching the catalog. A shaped
+  label is checked against `usableShapes()`.
+- `pickLabel(labels, usable, config): string | null` — pure. The above, composed,
+  against an already-fetched catalog. Used by the reconciler, which fetches the
+  catalog once per tick rather than once per job.
 
-Exactly one createos label may resolve. Two (`[createos, createos-2vcpu-2gb]`,
-or two shaped labels) is a contradiction with no defensible winner, so it
-returns `null` and `console.warn`s rather than silently picking by array order.
-The job stays `queued` on GitHub and its author sees no runner, which is the
-correct signal that the workflow is wrong.
+**Exactly one createos label may resolve.** Two (`[createos, createos-2vcpu-2gb]`,
+or two shaped labels) is a contradiction with no defensible winner: it returns
+`null` and `console.warn`s rather than silently picking by array order. The job
+stays `queued` on GitHub and its author sees no runner, which is the correct
+signal that the workflow is wrong.
 
-## Shape must persist on the pending row
+**The catalog is consulted only on the `queued` action.** A `completed` webhook
+needs to know a job is ours (one createos label) and nothing more — the DO looks
+up the VM by `runner_name`. Gating teardown on the shapes API would mean a shapes
+outage leaks every shaped VM until the reaper. Admission is the only decision
+that needs to know whether a shape exists.
+
+## The requested label must persist on the pending row
 
 `#dequeuePending()` reconstructs a `PendingJob` from a `jobs` row and hands it
-to `provisionAndRecord`. Without a stored shape, a `createos-8vcpu-16gb` job
+to `provisionAndRecord`. Without a stored label, a `createos-8vcpu-16gb` job
 that queued behind the concurrency cap comes back out of the queue and boots as
 `s-4vcpu-4gb`.
 
+The row stores the **label**, not the shape. Shape does not determine label:
+`createos` and `createos-4vcpu-4gb` both resolve to `s-4vcpu-4gb`, but a runner
+registered under the wrong one of those is offered the wrong pool's jobs. The
+shape is re-derived from the label at provision time via `shapeForLabel`, which
+needs no catalog.
+
 So:
 
-- `PendingJob` gains `shape: string`.
-- `jobs` gains a `shape TEXT` column, migrated in the DO constructor by the same
+- `PendingJob` gains `label: string`.
+- `jobs` gains a `label TEXT` column, migrated in the DO constructor by the same
   `PRAGMA table_info` + `ALTER TABLE` pattern that added `runner_name`.
-- A `NULL` shape (a row written before this migration) reads as
-  `config.runnerShape`.
+- A `NULL` label (a row written before this migration) reads as the DO's
+  `RUNNER_LABEL` binding, i.e. the bare label. The DO gains that binding; it is
+  already a `wrangler.toml` var.
 
 ## Call sites
 
 | Site | Change |
 | --- | --- |
-| `handler.ts:92` | `matchesLabel` → `resolveShape`; carry the shape into `PendingJob` |
-| `handler.ts:219` | the reconciler synthesizes `labels: [config.runnerLabel]`; it must instead resolve the job's real labels, which `listQueuedJobs` already returns |
+| `handler.ts:92` | `matchesLabel` → `createosLabels` (all actions) + `isUsableLabel` (queued only); carry the label into `PendingJob` |
+| `handler.ts:219` | the reconciler synthesizes `labels: [config.runnerLabel]`; it must use `job.label`, which `listQueuedJobs` now resolves |
 | `github/client.ts:50` | `generateJitConfig(runnerName, label)` — register the label the job requested, not `config.runnerLabel` |
-| `github/client.ts:186` | `labels.includes(runnerLabel)` → any label that resolves to a usable shape |
-| `sandbox.ts` | `createSandbox({ shape })` takes the resolved shape, not `config.runnerShape` |
+| `github/client.ts:142` | `listQueuedJobs(usable)` takes the catalog, fetched once per reconcile tick |
+| `github/client.ts:186` | `labels.includes(runnerLabel)` → `pickLabel(j.labels, usable, config)` |
+| `sandbox.ts` | `createSandbox({ shape })` takes `shapeForLabel(job.label, config)`, not `config.runnerShape` |
 
 `RUNNER_DISK_MIB` stays global at `10240` (the plan's disk cap) across every
 shape.
@@ -149,21 +178,25 @@ shape.
 
 Plain `vitest`:
 
-- `resolveShape` — bare label, shaped label, unknown label, non-createos label,
-  a shaped label naming a real-but-floored shape (`createos-1vcpu-1gb` → `null`),
-  incidental labels ignored (`[self-hosted, linux, createos-2vcpu-2gb]`), two
-  createos labels → `null` + warn
+- `createosLabels` / `pickLabel` — bare label, shaped label, unknown label,
+  non-createos label, a shaped label naming a real-but-floored shape
+  (`createos-1vcpu-1gb` → `null`), incidental labels ignored
+  (`[self-hosted, linux, createos-2vcpu-2gb]`), two createos labels → `null` + warn
+- `shapeForLabel` — bare → `config.runnerShape`; `createos-8vcpu-16gb` → `s-8vcpu-16gb`
 - the floor — excludes on `mem_mib`, excludes on `cpu_quota_pct`
 - the cache — a second call inside the TTL does not refetch; a call past it does
-- cold-cache fetch failure — bare label still resolves, shaped label returns
-  `null`, and `console.warn` fired
+- cold-cache fetch failure — `isUsableLabel` is `true` for the bare label without
+  a fetch, `false` for a shaped label, and `console.warn` fired
 
 `@cloudflare/vitest-pool-workers` (createos mocked at the `fetch` boundary):
 
-- a shaped webhook reaches `createSandbox` with the matching shape
+- a shaped webhook reaches `createSandbox` with the matching shape, and
+  `generate-jitconfig` with the matching label
 - an unknown shaped label returns `202` and warns
-- a job queued at the concurrency cap dequeues with its shape intact
-- the migration adds `shape` to a pre-existing `jobs` table
+- a job queued at the concurrency cap dequeues with its label intact
+- a `completed` webhook for a shaped job tears the VM down with the shapes API
+  unreachable
+- the migration adds `label` to a pre-existing `jobs` table
 
 Live, after deploy: add a `runs-on: [createos-2vcpu-2gb]` job to `ghar-test.yml`
 and confirm the VM boots at 2 vCPU.
