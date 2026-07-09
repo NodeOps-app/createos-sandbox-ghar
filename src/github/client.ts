@@ -1,5 +1,6 @@
 import type { Config, PendingJob } from "../types";
 import { TokenCache } from "./auth";
+import { pickLabel } from "../shapes";
 
 type FetchLike = typeof fetch;
 const UA = "createos-sandbox-ghar";
@@ -37,8 +38,16 @@ export class GitHubClient {
     };
   }
 
-  /** Creates a JIT ephemeral org runner config; returns encoded_jit_config. */
-  async generateJitConfig(runnerName: string): Promise<string> {
+  /**
+   * Creates a JIT ephemeral org runner config; returns encoded_jit_config.
+   *
+   * The runner carries exactly the ONE label its job asked for. GitHub
+   * AND-matches `runs-on` against a runner's labels, so a runner registered with
+   * both `createos` and `createos-8vcpu-16gb` would be eligible for bare
+   * `createos` jobs while sitting on an 8 vCPU VM. One label per runner keeps
+   * each shape's pool disjoint (ADR-0004).
+   */
+  async generateJitConfig(runnerName: string, label: string): Promise<string> {
     const res = await this.fetchImpl(
       `${this.config.githubApiUrl}/orgs/${this.config.githubOrg}/actions/runners/generate-jitconfig`,
       {
@@ -47,7 +56,7 @@ export class GitHubClient {
         body: JSON.stringify({
           name: runnerName,
           runner_group_id: 1,
-          labels: [this.config.runnerLabel],
+          labels: [label],
           work_folder: "_work",
         }),
       },
@@ -138,12 +147,15 @@ export class GitHubClient {
    * whether we ever saw (or lost) their `queued` webhook. Scans the app's
    * installed repos; a partly-drained matrix run is `in_progress` with its
    * remaining jobs still `queued`, so both run statuses are inspected.
+   *
+   * `usable` is the shape catalog, fetched once per reconcile tick rather than
+   * once per job.
    */
-  async listQueuedJobs(): Promise<PendingJob[]> {
+  async listQueuedJobs(usable: Set<string>): Promise<PendingJob[]> {
     const out: PendingJob[] = [];
     for (const repo of await this.#installationRepos()) {
       for (const runId of await this.#activeRunIds(repo)) {
-        out.push(...(await this.#queuedLabelJobs(repo, runId)));
+        out.push(...(await this.#queuedLabelJobs(repo, runId, usable)));
       }
     }
     return out;
@@ -173,20 +185,20 @@ export class GitHubClient {
     return [...ids];
   }
 
-  async #queuedLabelJobs(repoFullName: string, runId: number): Promise<PendingJob[]> {
+  async #queuedLabelJobs(
+    repoFullName: string,
+    runId: number,
+    usable: Set<string>,
+  ): Promise<PendingJob[]> {
     const jobs = await this.#getPaged<JobLite>(
       `/repos/${repoFullName}/actions/runs/${runId}/jobs?filter=latest`,
       "jobs",
     );
     const out: PendingJob[] = [];
     for (const j of jobs) {
-      if (
-        j.status === "queued" &&
-        typeof j.id === "number" &&
-        (j.labels ?? []).includes(this.config.runnerLabel)
-      ) {
-        out.push({ jobId: j.id, runId, repoFullName });
-      }
+      if (j.status !== "queued" || typeof j.id !== "number") continue;
+      const label = pickLabel(j.labels ?? [], usable, this.config);
+      if (label) out.push({ jobId: j.id, runId, repoFullName, label });
     }
     return out;
   }

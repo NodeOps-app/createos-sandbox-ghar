@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { verifySignature, parseWorkflowJob, matchesLabel } from "../../src/webhook";
+import { verifySignature, parseWorkflowJob } from "../../src/webhook";
 import { sign, workflowJobPayload } from "../helpers/fixtures";
 
 describe("verifySignature", () => {
@@ -66,13 +66,5 @@ describe("parseWorkflowJob", () => {
       }),
     );
     expect(job?.labels).toEqual(["createos"]);
-  });
-});
-
-describe("matchesLabel", () => {
-  it("matches when label present", () => {
-    const job = parseWorkflowJob(workflowJobPayload({ labels: ["createos", "self-hosted"] }))!;
-    expect(matchesLabel(job, "createos")).toBe(true);
-    expect(matchesLabel(job, "gpu")).toBe(false);
   });
 });

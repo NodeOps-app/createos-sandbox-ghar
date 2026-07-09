@@ -5,7 +5,12 @@ function stub() {
   const id = env.COORDINATOR.idFromName("t-" + Math.random());
   return env.COORDINATOR.get(id);
 }
-const job = (jobId: number) => ({ jobId, runId: jobId * 10, repoFullName: "nodeops-app/api" });
+const job = (jobId: number) => ({
+  jobId,
+  runId: jobId * 10,
+  repoFullName: "nodeops-app/api",
+  label: "createos",
+});
 
 /** Drives a provisioning row to `running`, the way the Worker does post-boot. */
 async function boot(s: ReturnType<typeof stub>, jobId: number, sandboxId: string) {
@@ -65,7 +70,12 @@ describe("Coordinator sandbox ownership (create → record → launch)", () => {
 });
 
 describe("Coordinator cancellation + redelivery", () => {
-  const job = (jobId: number) => ({ jobId, runId: jobId, repoFullName: "nodeops-app/api" });
+  const job = (jobId: number) => ({
+    jobId,
+    runId: jobId,
+    repoFullName: "nodeops-app/api",
+    label: "createos",
+  });
   function stub() {
     return env.COORDINATOR.get(env.COORDINATOR.idFromName("cancel-" + Math.random()));
   }

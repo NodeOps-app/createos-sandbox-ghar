@@ -4,12 +4,18 @@ import { CreateosSandboxNotFoundError } from "@nodeops-createos/sandbox";
 import type { Config, PendingJob } from "../../src/types";
 
 const config = {
+  runnerLabel: "createos",
   runnerShape: "s-4vcpu-4gb",
   runnerTemplate: "ghar-runner",
   runnerDiskMib: 30720,
   sandboxNamePrefix: "gha-ci",
 } as Config;
-const job: PendingJob = { jobId: 100, runId: 200, repoFullName: "nodeops-app/api" };
+const job: PendingJob = {
+  jobId: 100,
+  runId: 200,
+  repoFullName: "nodeops-app/api",
+  label: "createos",
+};
 
 describe("createRunnerSandbox", () => {
   it("mints jit and creates the sandbox, returning the handle + runner name", async () => {
@@ -23,7 +29,7 @@ describe("createRunnerSandbox", () => {
     });
 
     // Runner name carries a 2-char attempt token so a re-driven job can't collide.
-    expect(github.generateJitConfig).toHaveBeenCalledWith("ghar-100-k3");
+    expect(github.generateJitConfig).toHaveBeenCalledWith("ghar-100-k3", "createos");
     expect(createSandbox).toHaveBeenCalledWith(
       expect.objectContaining({
         shape: "s-4vcpu-4gb",
@@ -72,7 +78,12 @@ describe("createRunnerSandbox", () => {
     const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
     // 11-digit jobId: gha-ci-<11> = 18, fits; force overflow with a long prefix.
     const cfg = { ...config, sandboxNamePrefix: "gha-ci-nodeops" } as Config;
-    const bigJob: PendingJob = { jobId: 85556234917, runId: 1, repoFullName: "nodeops-app/api" };
+    const bigJob: PendingJob = {
+      jobId: 85556234917,
+      runId: 1,
+      repoFullName: "nodeops-app/api",
+      label: "createos",
+    };
 
     await createRunnerSandbox(cfg, github, bigJob, {
       makeClient: () => ({ createSandbox }) as any,
@@ -81,6 +92,25 @@ describe("createRunnerSandbox", () => {
     const name = createSandbox.mock.calls[0]![0].name;
     expect(name.length).toBeLessThanOrEqual(22);
     expect(name).toBe("gha-ci-nodeops-8555623");
+  });
+
+  it("derives the VM shape from the job's label", async () => {
+    const createSandbox = vi.fn().mockResolvedValue({ id: "sb_1" });
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+    const shapedJob: PendingJob = {
+      jobId: 7,
+      runId: 1,
+      repoFullName: "o/r",
+      label: "createos-8vcpu-16gb",
+    };
+
+    await createRunnerSandbox(config, github, shapedJob, {
+      makeClient: () => ({ createSandbox }) as any,
+      attemptId: () => "aa",
+    });
+
+    expect(createSandbox.mock.calls[0]![0].shape).toBe("s-8vcpu-16gb");
+    expect(github.generateJitConfig).toHaveBeenCalledWith("ghar-7-aa", "createos-8vcpu-16gb");
   });
 });
 

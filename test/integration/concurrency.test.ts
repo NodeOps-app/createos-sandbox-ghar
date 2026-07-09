@@ -4,7 +4,12 @@ import { describe, it, expect } from "vitest";
 function stub(name: string) {
   return env.COORDINATOR.get(env.COORDINATOR.idFromName(name));
 }
-const job = (id: number) => ({ jobId: id, runId: id, repoFullName: "nodeops-app/api" });
+const job = (id: number) => ({
+  jobId: id,
+  runId: id,
+  repoFullName: "nodeops-app/api",
+  label: "createos",
+});
 
 async function boot(s: ReturnType<typeof stub>, jobId: number, sandboxId: string) {
   await s.recordSandboxCreated(jobId, sandboxId, `ghar-${jobId}`);

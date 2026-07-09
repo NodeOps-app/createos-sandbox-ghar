@@ -4,7 +4,12 @@ import { runReconciler } from "../../src/handler";
 
 type Stub = ReturnType<typeof env.COORDINATOR.get>;
 const stub = (name: string) => env.COORDINATOR.get(env.COORDINATOR.idFromName(name));
-const job = (id: number) => ({ jobId: id, runId: id, repoFullName: "nodeops-app/api" });
+const job = (id: number) => ({
+  jobId: id,
+  runId: id,
+  repoFullName: "nodeops-app/api",
+  label: "createos",
+});
 async function boot(s: Stub, jobId: number, sandboxId: string) {
   await s.recordSandboxCreated(jobId, sandboxId, `ghar-${jobId}`);
   await s.markRunning(jobId);

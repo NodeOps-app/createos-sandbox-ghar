@@ -3,6 +3,7 @@ import type { CreateosSandboxClient } from "@nodeops-createos/sandbox";
 import type { Config, PendingJob } from "./types";
 import type { GitHubClient } from "./github/client";
 import { makeSandboxClient, type SandboxDeps } from "./createos";
+import { shapeForLabel } from "./shapes";
 
 // Re-exported so existing consumers (handler.ts, index.ts, tests) keep importing
 // SandboxDeps from here.
@@ -36,6 +37,10 @@ function clampSandboxName(name: string): string {
  * caps at 4096 bytes, and the blob (base64-nested) is already ~4084 for the base
  * name — a longer suffix overruns it. That name is recorded in the DO and is how
  * a later `completed` webhook (`runner_name`) maps back to the VM that ran it.
+ *
+ * The VM's shape comes from the label the job requested (`shapeForLabel`), and
+ * the runner registers under that same single label — the two must agree or a
+ * job gets a runner of the wrong size.
  */
 export async function createRunnerSandbox(
   config: Config,
@@ -44,9 +49,13 @@ export async function createRunnerSandbox(
   deps: SandboxDeps = {},
 ): Promise<{ sandboxId: string; runnerName: string; sandbox: SandboxHandle }> {
   const attemptId =
-    deps.attemptId ?? (() => Math.floor(Math.random() * 1296).toString(36).padStart(2, "0"));
+    deps.attemptId ??
+    (() =>
+      Math.floor(Math.random() * 1296)
+        .toString(36)
+        .padStart(2, "0"));
   const runnerName = `ghar-${job.jobId}-${attemptId()}`;
-  const jitConfig = await github.generateJitConfig(runnerName);
+  const jitConfig = await github.generateJitConfig(runnerName, job.label);
 
   // The createos VM name is cosmetic (teardown keys on sandbox_id + runner
   // identity, not this). Keep it short + stable per job (`gha-ci-<jobId>`, no
@@ -58,7 +67,7 @@ export async function createRunnerSandbox(
 
   const c = makeSandboxClient(config, deps);
   const sandbox = await c.createSandbox({
-    shape: config.runnerShape,
+    shape: shapeForLabel(job.label, config),
     rootfs: config.runnerTemplate,
     disk_mib: config.runnerDiskMib,
     name: sandboxName,

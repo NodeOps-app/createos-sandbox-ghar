@@ -1,6 +1,7 @@
 import type { Bindings } from "./index";
 import { loadConfig } from "./config";
-import { verifySignature, parseWorkflowJob, matchesLabel } from "./webhook";
+import { verifySignature, parseWorkflowJob } from "./webhook";
+import { createosLabels, isUsableLabel, usableShapes } from "./shapes";
 import { shouldProvision } from "./policy";
 import { GitHubClient } from "./github/client";
 import { createRunnerSandbox, launchRunner, teardownSandbox, type SandboxDeps } from "./sandbox";
@@ -89,16 +90,30 @@ export async function handleWebhook(
   const delivery = req.headers.get("X-GitHub-Delivery") ?? crypto.randomUUID();
   const job = parseWorkflowJob(body);
   if (!job) return new Response("ignored", { status: 202 });
-  if (!matchesLabel(job, config.runnerLabel)) return new Response("no-label", { status: 202 });
+
+  // "Is this ours" is a pure label question for every action — the catalog is
+  // only needed to admit a `queued` job below. Gating teardown on the shapes API
+  // would leak every shaped VM during a shapes outage.
+  const ours = createosLabels(job.labels, config);
+  if (ours.length === 0) return new Response("no-label", { status: 202 });
+  if (ours.length > 1) {
+    console.warn(`job ${job.jobId} names ${ours.length} createos labels (${ours.join(", ")})`);
+    return new Response("ambiguous-label", { status: 202 });
+  }
+  const label = ours[0]!;
 
   const co = coordinator(env);
   const pending: PendingJob = {
     jobId: job.jobId,
     runId: job.runId,
     repoFullName: job.repoFullName,
+    label,
   };
 
   if (job.action === "queued") {
+    if (!(await isUsableLabel(label, config, deps))) {
+      return new Response("unknown-shape", { status: 202 });
+    }
     const github = new GitHubClient(config);
     const eligible = await shouldProvision(config, job, () =>
       github.isForkJob(job.repoFullName, job.runId),
@@ -198,10 +213,20 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
     console.error(`reconcile: runner sweep skipped: ${String(err)}`);
   }
 
-  // B. Re-drive every still-queued label job GitHub knows about.
+  // B. Re-drive every still-queued label job GitHub knows about. The catalog is
+  //    fetched once for the whole tick; if it's unavailable we fall back to an
+  //    empty set, which still re-drives bare-label jobs.
+  let usable: Set<string>;
+  try {
+    usable = await usableShapes(config, deps);
+  } catch (err) {
+    console.warn(`reconcile: shape catalog unavailable, bare-label jobs only: ${String(err)}`);
+    usable = new Set();
+  }
+
   let queued: PendingJob[];
   try {
-    queued = await github.listQueuedJobs();
+    queued = await github.listQueuedJobs(usable);
   } catch (err) {
     console.error(`reconcile: queued-job poll failed: ${String(err)}`);
     return;
@@ -216,7 +241,7 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
         jobId: job.jobId,
         runId: job.runId,
         repoFullName: job.repoFullName,
-        labels: [config.runnerLabel],
+        labels: [job.label],
       },
       () => github.isForkJob(job.repoFullName, job.runId),
     );
