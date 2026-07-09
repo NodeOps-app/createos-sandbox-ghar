@@ -43,6 +43,10 @@ beforeEach(() => {
 });
 
 describe("shape labels end-to-end", () => {
+  // Test 1 (job 700) and test 3 (job 702) each hold one provisioning/running
+  // slot in the shared singleton Coordinator DO for the run of the file — this
+  // file needs at least 2 free concurrency slots. MAX_CONCURRENT is 2 in
+  // vitest.config.ts, so together they exactly saturate it.
   it("a shaped label boots a VM of that shape", async () => {
     const createSandbox = vi.fn().mockResolvedValue({
       id: "sb_shaped",
@@ -97,7 +101,9 @@ describe("shape labels end-to-end", () => {
       runCommand: vi.fn().mockResolvedValue({ result: { exit_code: 0 } }),
     });
     const healthy = {
-      // Pinned so the runner name below is deterministic: ghar-<jobId>-<attemptId>.
+      // Pinned only for a realistic runnerName in the completed payload below;
+      // this file has one row per job, so job_id and runner_name lookups would
+      // resolve identically either way — this test isn't distinguishing them.
       attemptId: () => "aa",
       makeClient: () =>
         ({
@@ -113,7 +119,8 @@ describe("shape labels end-to-end", () => {
     );
 
     // Now the catalog is unreachable. `completed` must still destroy the VM:
-    // teardown keys on runner identity, never on the shapes API.
+    // the teardown path never consults the shape catalog, so a shapes-API
+    // outage can't leak this VM.
     resetShapeCacheForTests();
     const down = {
       makeClient: () =>
