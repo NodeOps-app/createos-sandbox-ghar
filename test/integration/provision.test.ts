@@ -66,6 +66,36 @@ describe("full provision flow", () => {
     globalThis.fetch = realFetch;
   });
 
+  it("refuses a job naming two createos labels — no sandbox, no slot used", async () => {
+    const co = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
+    const before = await co.activeCount();
+
+    const createSandbox = vi.fn();
+    const deps = { makeClient: () => ({ createSandbox }) as any };
+
+    const body = workflowJobPayload({
+      action: "queued",
+      jobId: 501,
+      labels: ["createos", "createos-2vcpu-2gb"],
+    });
+    const req = new Request("https://ctrl.local/webhook", {
+      method: "POST",
+      headers: {
+        "X-Hub-Signature-256": await sign(env.GITHUB_WEBHOOK_SECRET as string, body),
+        "X-GitHub-Delivery": "dlv-ambiguous",
+      },
+      body,
+    });
+    const ctx = createExecutionContext();
+    const res = await handleWebhook(req, env as any, ctx, deps);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(202);
+    expect(await res.text()).toBe("ambiguous-label");
+    expect(createSandbox).not.toHaveBeenCalled();
+    expect(await co.activeCount()).toBe(before); // delta, not absolute — DO is shared across cases
+  });
+
   it("rejects a bad signature", async () => {
     const body = workflowJobPayload({});
     const req = new Request("https://ctrl.local/webhook", {

@@ -1,6 +1,14 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { runReconciler } from "../../src/handler";
+import { resetShapeCacheForTests } from "../../src/shapes";
+
+// The shapes.ts catalog cache is module-level and outlives any single test —
+// without this, whichever suite runs first (bare-label fallback here vs. a
+// real catalog elsewhere) decides what every later case silently exercises.
+beforeEach(() => {
+  resetShapeCacheForTests();
+});
 
 type Stub = ReturnType<typeof env.COORDINATOR.get>;
 const stub = (name: string) => env.COORDINATOR.get(env.COORDINATOR.idFromName(name));
@@ -140,6 +148,30 @@ describe("runReconciler", () => {
     }) as typeof fetch;
     await expect(runReconciler(env as any, {})).resolves.toBeUndefined();
     expect(await singleton.activeCount()).toBe(1); // 9200 not reaped
+    globalThis.fetch = realFetch;
+  });
+
+  it("provisions a shaped-label job, fetching the shape catalog once for the whole tick", async () => {
+    // Two queued jobs (bare + shaped): if the catalog were fetched per job
+    // instead of once for the tick, listShapes would show 2 calls, not 1.
+    patchGitHub({
+      jobs: [
+        { id: 9401, status: "queued", labels: ["createos"] },
+        { id: 9402, status: "queued", labels: ["createos-2vcpu-2gb"] },
+      ],
+    });
+    const listShapes = vi
+      .fn()
+      .mockResolvedValue([{ id: "s-2vcpu-2gb", vcpu: 2, mem_mib: 2048, default_disk_mib: 10240 }]);
+    const createSandbox = vi.fn().mockResolvedValue({
+      id: "sb9402",
+      runCommand: vi.fn().mockResolvedValue({ result: { stdout: "started" }, exec_ms: 1 }),
+    });
+    await runReconciler(env as any, { makeClient: () => ({ listShapes, createSandbox }) as any });
+
+    expect(createSandbox).toHaveBeenCalledTimes(2);
+    expect(createSandbox).toHaveBeenCalledWith(expect.objectContaining({ shape: "s-2vcpu-2gb" }));
+    expect(listShapes).toHaveBeenCalledTimes(1);
     globalThis.fetch = realFetch;
   });
 });
