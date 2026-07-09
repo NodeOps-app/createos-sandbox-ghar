@@ -152,7 +152,7 @@ Use exactly one `createos*` label. Two (`[createos, createos-2vcpu-2gb]`) is ref
 | CREATEOS_API_KEY | yes | — | createos key |
 | RUNNER_LABEL | no | createos | opt-in `runs-on` label |
 | RUNNER_TEMPLATE | no | ghar-runner | rootfs template id/name |
-| SANDBOX_NAME_PREFIX | no | (unset in code; `gha-ci` in wrangler.toml) | prefix for the createos VM name (cosmetic; VM becomes `<prefix>-ghar-<jobId>`, runner name stays `ghar-<jobId>`) |
+| SANDBOX_NAME_PREFIX | no | (unset in code; `gha-ci` in wrangler.toml) | prefix for the createos VM name (cosmetic; VM becomes `<prefix>-<jobId>`, falling back to the runner name if unset — see CONTEXT.md's Runner name entry for that format) |
 | RUNNER_SHAPE | no | s-4vcpu-4gb | VM size for the bare `createos` label |
 | MIN_RUNNER_MEM_MIB | no | 2048 | floor on shapes offered as `createos-<shape>` labels (see [Choosing a runner size](#choosing-a-runner-size)) |
 | RUNNER_DISK_MIB | no | 30720 | overlay disk (MiB) — must be ≤ your createos plan's cap |
@@ -190,7 +190,7 @@ The webhook path is edge-triggered: GitHub sends a job's `queued` event **exactl
 
 The same 5-minute cron runs a **reconciler** that closes both gaps by reconciling against GitHub as the source of truth, before the reaper's coarse age sweep:
 
-1. **Runner-liveness reap.** Lists the org's `online` runners; any tracked `running`/`provisioning` VM older than `RECONCILE_GRACE_MS` whose `ghar-<jobId>` runner is **not** online is torn down (it never registered, or already exited). Unlike the reaper this keys on live runner identity, so a long job is spared while its runner is online. Fails safe: if the runner list can't be fetched, nothing is reaped.
+1. **Runner-liveness reap.** Lists the org's `online` runners; any tracked `running`/`provisioning` VM older than `RECONCILE_GRACE_MS` whose recorded runner name is **not** among them is torn down (it never registered, or already exited). Unlike the reaper this keys on live runner identity, so a long job is spared while its runner is online. Fails safe: if the runner list can't be fetched, nothing is reaped.
 2. **Queued-job re-drive.** Lists every `createos`-labelled `workflow_job` GitHub still reports `queued` across the app's installed repos and replays each through the normal `onQueued` path — so the concurrency cap and dedup are reused verbatim and only genuinely unserved jobs boot a fresh sandbox. A job we're already provisioning (fresh row) is ignored.
 
 `RECONCILE_GRACE_MS` **must stay above your VM boot + runner-registration time** (registration lags VM create by seconds), or a normally-booting runner gets reaped mid-boot.
