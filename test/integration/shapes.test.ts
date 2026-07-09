@@ -1,5 +1,11 @@
-import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import {
+  env,
+  createExecutionContext,
+  waitOnExecutionContext,
+  runInDurableObject,
+} from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { CreateosSandboxValidationError } from "@nodeops-createos/sandbox";
 import { handleWebhook } from "../../src/handler";
 import { resetShapeCacheForTests } from "../../src/shapes";
 import { sign, workflowJobPayload } from "../helpers/fixtures";
@@ -144,5 +150,111 @@ describe("shape labels end-to-end", () => {
 
     expect(await res.text()).toBe("completed");
     expect(destroy).toHaveBeenCalled();
+  });
+
+  // Fix 4: a shaped job admitted while its shape existed can be promoted later
+  // (its shape having since vanished from the platform) with no re-validation
+  // by design — the SDK's createSandbox rejects the unknown shape, and that
+  // must fail the provision safely rather than boot a wrong-size VM.
+  it("a promoted shaped job whose shape vanished fails safely, not with a wrong-size VM", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const co = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
+
+    const fillerCreate = vi.fn().mockResolvedValue({
+      id: "sb_filler",
+      runCommand: vi.fn().mockResolvedValue({ result: { exit_code: 0 } }),
+    });
+    const fillerDeps = {
+      makeClient: () =>
+        ({ createSandbox: fillerCreate, listShapes: async () => shapeCatalog() }) as never,
+    };
+
+    // Saturate MAX_CONCURRENT (2) with filler bare-label jobs, regardless of
+    // however much capacity earlier cases in this file already left occupied.
+    const fillers: number[] = [];
+    let nextId = 810;
+    while ((await co.activeCount()) < 2) {
+      const id = nextId++;
+      fillers.push(id);
+      await post(
+        workflowJobPayload({ action: "queued", jobId: id, labels: ["createos"] }),
+        `dlv-filler-${id}`,
+        fillerDeps,
+      );
+    }
+    expect(await co.activeCount()).toBe(2);
+
+    // Park our shaped job behind the cap — admitted now (its shape exists),
+    // but no free slot to boot into.
+    const shapedJobId = nextId++;
+    const shapedRes = await post(
+      workflowJobPayload({ action: "queued", jobId: shapedJobId, labels: ["createos-2vcpu-2gb"] }),
+      `dlv-shaped-${shapedJobId}`,
+      fillerDeps,
+    );
+    expect(await shapedRes.text()).toBe("queued");
+
+    // Park a second job behind it, so a successful promotion after the shaped
+    // job's failure is observable.
+    const behindJobId = nextId++;
+    await post(
+      workflowJobPayload({ action: "queued", jobId: behindJobId, labels: ["createos"] }),
+      `dlv-behind-${behindJobId}`,
+      fillerDeps,
+    );
+
+    // Free one slot by completing the first filler (job_id lookup — the
+    // completed payload carries no runner_name, same as a job that never
+    // registered a runner). The DO promotes the oldest pending row — our
+    // shaped job — into the freed slot.
+    const destroy = vi.fn().mockResolvedValue(undefined);
+    const promoteCreate = vi.fn(async (opts: { shape: string }) => {
+      if (opts.shape === "s-2vcpu-2gb") {
+        throw new CreateosSandboxValidationError(
+          "unknown shape",
+          new Response(null, { status: 422 }),
+        );
+      }
+      return {
+        id: "sb_promoted",
+        runCommand: vi.fn().mockResolvedValue({ result: { exit_code: 0 } }),
+      };
+    });
+    const completeDeps = {
+      makeClient: () =>
+        ({
+          getSandbox: async () => ({ destroy }),
+          createSandbox: promoteCreate,
+          listShapes: async () => shapeCatalog(),
+        }) as never,
+    };
+    const completedRes = await post(
+      workflowJobPayload({ action: "completed", jobId: fillers[0]! }),
+      `dlv-complete-${fillers[0]}`,
+      completeDeps,
+    );
+    expect(await completedRes.text()).toBe("completed");
+
+    // The shaped job's createSandbox rejected (shape gone) → provisionAndRecord
+    // caught it → failProvision ran: logged + alerted, freed the slot, and
+    // promoted the job behind it with ITS OWN shape — never falling back to a
+    // default-size VM for the job whose shape vanished.
+    expect(promoteCreate).toHaveBeenCalledWith(expect.objectContaining({ shape: "s-2vcpu-2gb" }));
+    expect(promoteCreate).toHaveBeenCalledWith(expect.objectContaining({ shape: "s-4vcpu-4gb" }));
+    expect(
+      error.mock.calls.some((c) => String(c[0]).includes(`provision failed job=${shapedJobId}`)),
+    ).toBe(true);
+
+    const rows = await runInDurableObject(co, (_instance, state) =>
+      state.storage.sql
+        .exec<{ job_id: number; state: string }>(
+          `SELECT job_id, state FROM jobs WHERE job_id IN (?, ?)`,
+          shapedJobId,
+          behindJobId,
+        )
+        .toArray(),
+    );
+    expect(rows.find((r) => r.job_id === shapedJobId)).toBeUndefined(); // slot freed, row gone
+    expect(rows.find((r) => r.job_id === behindJobId)?.state).toBe("running"); // promoted + booted
   });
 });
