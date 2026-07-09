@@ -1,26 +1,15 @@
-import { CreateosSandboxClient, CreateosSandboxNotFoundError } from "@nodeops-createos/sandbox";
+import { CreateosSandboxNotFoundError } from "@nodeops-createos/sandbox";
+import type { CreateosSandboxClient } from "@nodeops-createos/sandbox";
 import type { Config, PendingJob } from "./types";
 import type { GitHubClient } from "./github/client";
+import { makeSandboxClient, type SandboxDeps } from "./createos";
+
+// Re-exported so existing consumers (handler.ts, index.ts, tests) keep importing
+// SandboxDeps from here.
+export type { SandboxDeps };
 
 /** A booted sandbox handle — the subset createRunnerSandbox returns to launchRunner. */
 export type SandboxHandle = Awaited<ReturnType<CreateosSandboxClient["createSandbox"]>>;
-
-export interface SandboxDeps {
-  /** Injection seam for tests. Defaults to a real client from config. */
-  makeClient?: (config: Config) => CreateosSandboxClient;
-  /** Injection seam for tests. 2-char token discriminating provision attempts. */
-  attemptId?: () => string;
-}
-
-function client(config: Config, deps: SandboxDeps): CreateosSandboxClient {
-  if (deps.makeClient) return deps.makeClient(config);
-  return new CreateosSandboxClient({
-    baseUrl: config.createosBaseUrl,
-    apiKey: config.createosApiKey,
-    // Workers rejects an unbound fetch called off the SDK's config object.
-    fetch: globalThis.fetch.bind(globalThis),
-  });
-}
 
 /** createos-sandbox rejects names longer than this (API returns 400). */
 const MAX_SANDBOX_NAME = 22;
@@ -67,7 +56,7 @@ export async function createRunnerSandbox(
     config.sandboxNamePrefix ? `${config.sandboxNamePrefix}-${job.jobId}` : runnerName,
   );
 
-  const c = client(config, deps);
+  const c = makeSandboxClient(config, deps);
   const sandbox = await c.createSandbox({
     shape: config.runnerShape,
     rootfs: config.runnerTemplate,
@@ -108,7 +97,7 @@ export async function teardownSandbox(
   sandboxId: string,
   deps: SandboxDeps = {},
 ): Promise<void> {
-  const c = client(config, deps);
+  const c = makeSandboxClient(config, deps);
   try {
     const handle = await c.getSandbox(sandboxId);
     await handle.destroy();
