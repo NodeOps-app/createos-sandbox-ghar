@@ -59,6 +59,19 @@ describe("shapeForLabel", () => {
     expect(shapeForLabel("createos-8vcpu-16gb", config)).toBe("s-8vcpu-16gb");
     expect(shapeForLabel("createos-2vcpu-2gb", config)).toBe("s-2vcpu-2gb");
   });
+
+  // Fix 1: a persisted row's label is validated against a *current*
+  // config.runnerLabel. If an operator renames RUNNER_LABEL while jobs are in
+  // flight, a stale bare label ("createos") no longer equals the new
+  // runnerLabel ("gha") and matches neither the bare label nor its prefix —
+  // that must throw (loud, caught by provisionAndRecord's try/catch), not
+  // silently slice out a garbage shape like "s-eos".
+  it("throws when the label matches neither the bare label nor its prefix", () => {
+    const renamed: Config = { ...config, runnerLabel: "gha" };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(() => shapeForLabel("createos", renamed)).toThrow(/does not match/);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("stale/corrupt"))).toBe(true);
+  });
 });
 
 describe("usableShapes", () => {
@@ -83,6 +96,33 @@ describe("usableShapes", () => {
     await usableShapes(config, depsWith(listShapes), 1_000_000 + 299_999);
     expect(listShapes).toHaveBeenCalledTimes(1);
     await usableShapes(config, depsWith(listShapes), 1_000_000 + 300_000);
+    expect(listShapes).toHaveBeenCalledTimes(2);
+  });
+
+  // Fix 2: an empty catalog is exactly the no-silent-bounds case — it denies
+  // every shaped label, and that must be logged at the fetch site, not left
+  // to be inferred later from a string of "not offered" denials.
+  it("warns when the fetched catalog is empty", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const ids = await usableShapes(
+      config,
+      depsWith(async () => []),
+    );
+    expect(ids.size).toBe(0);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("empty"))).toBe(true);
+  });
+
+  // Fix 3: the cache must not serve an admission decision computed under a
+  // floor that no longer applies. A changed minRunnerMemMib is a miss even
+  // well inside CACHE_TTL_MS.
+  it("treats a changed memory floor as a cache miss inside the TTL", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const listShapes = vi.fn(async () => CATALOG);
+    await usableShapes(config, depsWith(listShapes), 1_000_000);
+    expect(listShapes).toHaveBeenCalledTimes(1);
+
+    const lowerFloor: Config = { ...config, minRunnerMemMib: 256 };
+    await usableShapes(lowerFloor, depsWith(listShapes), 1_000_050); // well inside the TTL
     expect(listShapes).toHaveBeenCalledTimes(2);
   });
 });

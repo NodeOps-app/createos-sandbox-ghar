@@ -4,7 +4,7 @@ import { makeSandboxClient, type SandboxDeps } from "./createos";
 
 const CACHE_TTL_MS = 300_000;
 
-let cache: { fetchedAt: number; ids: Set<string> } | null = null;
+let cache: { fetchedAt: number; minRunnerMemMib: number; ids: Set<string> } | null = null;
 
 /** Test-only: drops the module-level cache so cases don't leak into each other. */
 export function resetShapeCacheForTests(): void {
@@ -26,10 +26,28 @@ export function createosLabels(labels: string[], config: Config): string[] {
  * The createos shape a label names. The bare label means whatever the operator
  * configured; a shaped label carries the id in its suffix. Pure — needs no
  * catalog, so teardown and re-provision never depend on the shapes API.
+ *
+ * Enforces the prefix invariant explicitly rather than inferring "shaped" from
+ * "not equal to the bare label": a persisted `jobs.label` row is validated
+ * against a *current* `config.runnerLabel`, and those can disagree if an
+ * operator changes RUNNER_LABEL while jobs are in flight. Without this check,
+ * a stale bare label (e.g. old label "createos" vs new config "gha") falls
+ * into the shaped branch and slices garbage out of it. A label that is
+ * neither the bare label nor validly prefixed is corrupt/stale input, not a
+ * shape to guess at — throw rather than boot a wrong-size VM.
  */
 export function shapeForLabel(label: string, config: Config): string {
   if (label === config.runnerLabel) return config.runnerShape;
-  return `s-${label.slice(config.runnerLabel.length + 1)}`;
+  const prefix = `${config.runnerLabel}-`;
+  if (!label.startsWith(prefix)) {
+    console.warn(
+      `shapes: label "${label}" is neither "${config.runnerLabel}" nor prefixed with "${prefix}" — stale/corrupt label`,
+    );
+    throw new Error(
+      `shapeForLabel: label "${label}" does not match runner label "${config.runnerLabel}" or its prefix`,
+    );
+  }
+  return `s-${label.slice(prefix.length)}`;
 }
 
 /**
@@ -43,15 +61,29 @@ export function shapeForLabel(label: string, config: Config): string {
  *
  * Blocking network I/O, so this belongs to the Worker; the DO must stay passive
  * to hibernate (ADR-0002).
+ *
+ * The cache entry also pins the floor (`minRunnerMemMib`) it was computed
+ * under: a changed floor is treated as a miss, so an isolate that survives a
+ * mid-rollout config change can't serve an admission decision computed under
+ * the old floor for up to CACHE_TTL_MS.
  */
 export async function usableShapes(
   config: Config,
   deps: SandboxDeps,
   nowMs: number = Date.now(),
 ): Promise<Set<string>> {
-  if (cache && nowMs - cache.fetchedAt < CACHE_TTL_MS) return cache.ids;
+  if (
+    cache &&
+    nowMs - cache.fetchedAt < CACHE_TTL_MS &&
+    cache.minRunnerMemMib === config.minRunnerMemMib
+  ) {
+    return cache.ids;
+  }
 
   const shapes: Shape[] = await makeSandboxClient(config, deps).listShapes();
+  if (shapes.length === 0) {
+    console.warn("shapes: catalog fetch returned an empty list; every shaped label will be denied");
+  }
   const ids = new Set<string>();
   const excluded: string[] = [];
   for (const s of shapes) {
@@ -64,7 +96,7 @@ export async function usableShapes(
         `(mem_mib < ${config.minRunnerMemMib} or cpu_quota_pct set), not offered as labels: ${excluded.join(", ")}`,
     );
   }
-  cache = { fetchedAt: nowMs, ids };
+  cache = { fetchedAt: nowMs, minRunnerMemMib: config.minRunnerMemMib, ids };
   return ids;
 }
 
