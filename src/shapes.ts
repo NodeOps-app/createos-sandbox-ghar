@@ -109,7 +109,9 @@ export function pickLabel(labels: string[], usable: Set<string>, config: Config)
   const ours = createosLabels(labels, config);
   if (ours.length === 0) return null;
   if (ours.length > 1) {
-    console.warn(`shapes: job names ${ours.length} createos labels (${ours.join(", ")}); ignoring it`);
+    console.warn(
+      `shapes: job names ${ours.length} createos labels (${ours.join(", ")}); ignoring it`,
+    );
     return null;
   }
   const label = ours[0]!;

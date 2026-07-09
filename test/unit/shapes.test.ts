@@ -64,7 +64,10 @@ describe("shapeForLabel", () => {
 describe("usableShapes", () => {
   it("excludes shapes under the memory floor and throttled shapes, and warns", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const ids = await usableShapes(config, depsWith(async () => CATALOG));
+    const ids = await usableShapes(
+      config,
+      depsWith(async () => CATALOG),
+    );
     const sortedIds = [...ids];
     sortedIds.sort((a, b) => a.localeCompare(b));
     expect(sortedIds).toEqual(["s-2vcpu-2gb", "s-4vcpu-4gb", "s-8vcpu-16gb"]);
@@ -93,16 +96,24 @@ describe("isUsableLabel", () => {
 
   it("admits a shaped label present in the catalog", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(await isUsableLabel("createos-2vcpu-2gb", config, depsWith(async () => CATALOG))).toBe(
-      true,
-    );
+    expect(
+      await isUsableLabel(
+        "createos-2vcpu-2gb",
+        config,
+        depsWith(async () => CATALOG),
+      ),
+    ).toBe(true);
   });
 
   it("denies a shaped label that exists but is under the floor, and warns", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(await isUsableLabel("createos-1vcpu-1gb", config, depsWith(async () => CATALOG))).toBe(
-      false,
-    );
+    expect(
+      await isUsableLabel(
+        "createos-1vcpu-1gb",
+        config,
+        depsWith(async () => CATALOG),
+      ),
+    ).toBe(false);
     expect(warn.mock.calls.some((c) => String(c[0]).includes("not offered"))).toBe(true);
   });
 
