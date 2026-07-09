@@ -44,4 +44,23 @@ describe("concurrency cap (MAX_CONCURRENT=2)", () => {
     expect(res.nextPending?.jobId).toBe(22); // slot freed → 22 promoted
     expect(await s.activeCount()).toBe(2); // 20 running + 22 provisioning
   });
+
+  it("a job queued at the cap dequeues with its label intact", async () => {
+    const co = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
+
+    // MAX_CONCURRENT is 2 in vitest.config.ts — fill both slots.
+    await co.onQueued({ jobId: 901, runId: 1, repoFullName: "o/r", label: "createos" }, "d-901");
+    await co.onQueued({ jobId: 902, runId: 1, repoFullName: "o/r", label: "createos" }, "d-902");
+
+    const third = await co.onQueued(
+      { jobId: 903, runId: 1, repoFullName: "o/r", label: "createos-8vcpu-16gb" },
+      "d-903",
+    );
+    expect(third.action).toBe("queued");
+
+    // Free a slot; the promoted job must still carry its shaped label.
+    const { nextPending } = await co.onCompleted(901);
+    expect(nextPending?.jobId).toBe(903);
+    expect(nextPending?.label).toBe("createos-8vcpu-16gb");
+  });
 });
