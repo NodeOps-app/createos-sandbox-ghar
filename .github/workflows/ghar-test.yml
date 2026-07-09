@@ -17,3 +17,14 @@ jobs:
       - name: Prove network egress
         run: |
           curl -fsS https://api.github.com/zen && echo
+
+  smoke-shaped:
+    runs-on: [createos-2vcpu-2gb]
+    steps:
+      - name: Identify the runner
+        run: |
+          echo "host: $(hostname)"
+          echo "cpus: $(nproc)   mem: $(free -h | awk '/Mem:/{print $2}')"
+      - name: Assert the requested shape
+        run: |
+          test "$(nproc)" -eq 2 || { echo "expected 2 vCPU, got $(nproc)"; exit 1; }

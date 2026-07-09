@@ -12,7 +12,7 @@ Glossary for the GitHub Actions runner controller. Terms only, no implementation
 
 - **Runner** — the GitHub Actions self-hosted runner process inside a Sandbox. Ephemeral: takes exactly one Job then exits. Registered via JIT config, outbound-only (long-polls GitHub, no inbound).
 
-- **Job** — a GitHub Actions `workflow_job`. `queued` action = provision trigger; `completed` action = teardown trigger. One `queued` Job provisions one Sandbox; but because Runners carry only the shared label, under a backlog GitHub may run a *different* queued Job on that Sandbox — so teardown is keyed on Runner name, not the provisioning Job id (see `docs/adr/0003`).
+- **Job** — a GitHub Actions `workflow_job`. `queued` action = provision trigger; `completed` action = teardown trigger. One `queued` Job provisions one Sandbox; but under a backlog *within the same Shape's pool*, GitHub may run a *different* queued Job on that Sandbox, because every Runner in that pool carries only the one label its Shape uses — so teardown is keyed on Runner name, not the provisioning Job id (see `docs/adr/0003`). Shaped pools are disjoint (see Shape label, `docs/adr/0004`), so this backlog reassignment can only ever happen between Jobs asking for the same Shape.
 
 - **JIT config** — single-use encoded runner config from `POST /orgs/{org}/actions/runners/generate-jitconfig`. Passed to `run.sh --jitconfig`. Ephemeral by construction; token never persisted to disk.
 
@@ -26,9 +26,13 @@ Glossary for the GitHub Actions runner controller. Terms only, no implementation
 
 - **Provisioning policy** — configurable switch deciding which Jobs get a Sandbox: `org-wide` (any repo, default), `repo-allowlist` (only listed repos), or `fork-gated` (skip fork-PR jobs). Set via env/config. Under `org-wide`, fork-PR safety rests solely on VM isolation + ephemerality.
 
-- **Runner label** — `createos`. Workflows opt in with `runs-on: [createos]`; the Controller ignores any `workflow_job` whose labels omit it; the JIT config registers the Runner with it.
+- **Runner label** — a family of labels, not one: bare `createos` (opts into `RUNNER_SHAPE`) plus one `createos-<shape suffix>` per usable Shape (see Shape label). The Controller ignores any `workflow_job` whose labels contain none of them, and refuses (202, logged) any Job naming more than one — there is no defensible way to pick a winner. The JIT config registers the Runner with exactly the one label the Job asked for, never more than one (`docs/adr/0004`).
 
-- **Runner name** — `ghar-<provisioningJobId>`, the unique name the JIT config registers per Runner (distinct from the shared Runner label). The `completed` webhook echoes it as `runner_name`, letting the Controller tear down the Sandbox that *actually* ran the Job even when it differs from the provisioning Job.
+- **Runner name** — `ghar-<jobId>-<xx>`, the unique name the JIT config registers per Runner (distinct from the Runner label). `xx` is a 2-character per-attempt token, so a retried provision for the same Job can never collide with an orphaned JIT registration left by an earlier attempt. The `completed` webhook echoes the full name as `runner_name`, letting the Controller tear down the Sandbox that *actually* ran the Job even when it differs from the provisioning Job.
+
+- **Shape** — a createos VM sizing preset (e.g. `s-2vcpu-2gb`), listed live at `GET /v1/shapes`.
+
+- **Shape label** — the `runs-on` label a workflow uses to pick a Shape (`createos-2vcpu-2gb` → `s-2vcpu-2gb`; strip the `createos-` prefix, prepend `s-`). The bare `createos` label means `RUNNER_SHAPE`. Exactly one Shape label per Runner (`docs/adr/0004`).
 
 - **Destroying** — a job-row state: the Job is done and its slot is freed, but the Sandbox `destroy()` is not yet confirmed. The row is held (not deleted) so a failed/dropped destroy is retried by the Reaper; it clears once the Worker confirms teardown.
 

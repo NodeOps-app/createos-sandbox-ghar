@@ -43,7 +43,7 @@ bun install
 Verify the toolchain is healthy:
 
 ```bash
-bun run lint && bun run typecheck && bun run test    # expect: 63 tests pass
+bun run lint && bun run typecheck && bun run test    # expect: 88 tests pass
 ```
 
 > If installs misbehave, see the "Toolchain gotchas" section in `CLAUDE.md` (pinned versions are deliberate — do not upgrade `vitest`/`vitest-pool-workers`).
@@ -122,6 +122,22 @@ jobs:
 
 ---
 
+## Choosing a runner size
+
+```yaml
+jobs:
+  build:
+    runs-on: [createos]             # RUNNER_SHAPE (default s-4vcpu-4gb)
+  big:
+    runs-on: [createos-8vcpu-16gb]  # a specific createos shape
+```
+
+Available labels are derived live from the createos shape catalog (`GET /v1/shapes`), so a shape added to the platform is usable without redeploying this Worker. Shapes below `MIN_RUNNER_MEM_MIB` (default 2048) or with a fractional-vCPU quota are excluded — an Actions runner cannot work on them.
+
+Use exactly one `createos*` label. Two (`[createos, createos-2vcpu-2gb]`) is refused and the job will never get a runner.
+
+---
+
 ## Config reference
 
 | Var | Secret? | Default | Meaning |
@@ -137,7 +153,8 @@ jobs:
 | RUNNER_LABEL | no | createos | opt-in `runs-on` label |
 | RUNNER_TEMPLATE | no | ghar-runner | rootfs template id/name |
 | SANDBOX_NAME_PREFIX | no | (unset in code; `gha-ci` in wrangler.toml) | prefix for the createos VM name (cosmetic; VM becomes `<prefix>-ghar-<jobId>`, runner name stays `ghar-<jobId>`) |
-| RUNNER_SHAPE | no | s-4vcpu-4gb | VM size |
+| RUNNER_SHAPE | no | s-4vcpu-4gb | VM size for the bare `createos` label |
+| MIN_RUNNER_MEM_MIB | no | 2048 | floor on shapes offered as `createos-<shape>` labels (see [Choosing a runner size](#choosing-a-runner-size)) |
 | RUNNER_DISK_MIB | no | 30720 | overlay disk (MiB) — must be ≤ your createos plan's cap |
 | MAX_CONCURRENT | no | 0 | 0 = unlimited; N = cap + pending queue |
 | PROVISION_POLICY | no | org-wide | org-wide / repo-allowlist / fork-gated |
@@ -149,7 +166,7 @@ jobs:
 ## Development
 
 ```bash
-bun run test        # vitest (unit + real-DO integration, 63 tests)
+bun run test        # vitest (unit + real-DO integration, 88 tests)
 bun run typecheck   # tsc --noEmit
 bun run lint        # oxlint
 bun run dev         # wrangler dev (needs .dev.vars)
