@@ -6,7 +6,7 @@ import {
   usableShapes,
   isUsableLabel,
   pickLabel,
-  __resetShapeCache,
+  resetShapeCacheForTests,
 } from "../../src/shapes";
 import type { Config } from "../../src/types";
 
@@ -36,7 +36,7 @@ function depsWith(listShapes: () => Promise<unknown>) {
 }
 
 beforeEach(() => {
-  __resetShapeCache();
+  resetShapeCacheForTests();
   vi.restoreAllMocks();
 });
 
@@ -65,7 +65,9 @@ describe("usableShapes", () => {
   it("excludes shapes under the memory floor and throttled shapes, and warns", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const ids = await usableShapes(config, depsWith(async () => CATALOG));
-    expect([...ids].sort()).toEqual(["s-2vcpu-2gb", "s-4vcpu-4gb", "s-8vcpu-16gb"]);
+    const sortedIds = [...ids];
+    sortedIds.sort((a, b) => a.localeCompare(b));
+    expect(sortedIds).toEqual(["s-2vcpu-2gb", "s-4vcpu-4gb", "s-8vcpu-16gb"]);
     expect(warn).toHaveBeenCalledOnce();
     expect(warn.mock.calls[0]![0]).toContain("s-1vcpu-1gb");
     expect(warn.mock.calls[0]![0]).toContain("s-0.25vcpu-512mb");

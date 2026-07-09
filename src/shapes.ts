@@ -7,7 +7,7 @@ const CACHE_TTL_MS = 300_000;
 let cache: { fetchedAt: number; ids: Set<string> } | null = null;
 
 /** Test-only: drops the module-level cache so cases don't leak into each other. */
-export function __resetShapeCache(): void {
+export function resetShapeCacheForTests(): void {
   cache = null;
 }
 
