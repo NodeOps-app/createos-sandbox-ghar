@@ -175,7 +175,7 @@ git commit -m "refactor(sandbox): extract createos client factory"
   - `function usableShapes(config: Config, deps: SandboxDeps, nowMs?: number): Promise<Set<string>>`
   - `function isUsableLabel(label: string, config: Config, deps: SandboxDeps): Promise<boolean>`
   - `function pickLabel(labels: string[], usable: Set<string>, config: Config): string | null`
-  - `function __resetShapeCache(): void`
+  - `function resetShapeCacheForTests(): void`
 
 Note `PendingJob.label` is added here (Task 2) but not *populated* until Task 4. Between the two tasks nothing constructs a `PendingJob` — Task 3 changes the DO, Task 4 changes the constructors — so add it as a required field and let `tsc` point at every site Task 3/4 must fix. That is the intent.
 
@@ -237,7 +237,7 @@ const CACHE_TTL_MS = 300_000;
 let cache: { fetchedAt: number; ids: Set<string> } | null = null;
 
 /** Test-only: drops the module-level cache so cases don't leak into each other. */
-export function __resetShapeCache(): void {
+export function resetShapeCacheForTests(): void {
   cache = null;
 }
 
@@ -359,7 +359,7 @@ import {
   usableShapes,
   isUsableLabel,
   pickLabel,
-  __resetShapeCache,
+  resetShapeCacheForTests,
 } from "../../src/shapes";
 import type { Config } from "../../src/types";
 
@@ -389,7 +389,7 @@ function depsWith(listShapes: () => Promise<unknown>) {
 }
 
 beforeEach(() => {
-  __resetShapeCache();
+  resetShapeCacheForTests();
   vi.restoreAllMocks();
 });
 
@@ -924,7 +924,7 @@ In `runReconciler`, replace step B's fetch and its `shouldProvision` call:
 
 `test/unit/client.test.ts` — `generateJitConfig` now takes two args; update its calls to `generateJitConfig("ghar-1-aa", "createos")` and assert the posted body's `labels` is `["createos"]`. Any `listQueuedJobs()` call becomes `listQueuedJobs(new Set(["s-2vcpu-2gb"]))`.
 
-`test/integration/*.test.ts` — every `co.onQueued({...})` fixture needs `label: "createos"`. Every `deps.makeClient` mock used on a **queued** path with a **shaped** label needs `listShapes`; bare-label paths do not (short-circuit). Add `__resetShapeCache()` in a `beforeEach` of any suite that stubs `listShapes`, so the module cache does not leak between cases.
+`test/integration/*.test.ts` — every `co.onQueued({...})` fixture needs `label: "createos"`. Every `deps.makeClient` mock used on a **queued** path with a **shaped** label needs `listShapes`; bare-label paths do not (short-circuit). Add `resetShapeCacheForTests()` in a `beforeEach` of any suite that stubs `listShapes`, so the module cache does not leak between cases.
 
 - [ ] **Step 8: Full verification — the suite must be green here**
 
@@ -974,7 +974,7 @@ export function shapeCatalog(): { id: string; vcpu: number; mem_mib: number; def
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { handleWebhook } from "../../src/handler";
-import { __resetShapeCache } from "../../src/shapes";
+import { resetShapeCacheForTests } from "../../src/shapes";
 import { sign, workflowJobPayload } from "../helpers/fixtures";
 import { shapeCatalog } from "../helpers/mocks";
 
@@ -1011,7 +1011,7 @@ async function post(body: string, delivery: string, deps: object) {
 }
 
 beforeEach(() => {
-  __resetShapeCache();
+  resetShapeCacheForTests();
   patchGitHub();
 });
 
@@ -1087,7 +1087,7 @@ describe("shape labels end-to-end", () => {
 
     // Now the catalog is unreachable. `completed` must still destroy the VM:
     // teardown keys on runner identity, never on the shapes API.
-    __resetShapeCache();
+    resetShapeCacheForTests();
     const down = {
       makeClient: () =>
         ({
@@ -1196,7 +1196,7 @@ Under "Toolchain gotchas":
 
 ```markdown
 - **The shape catalog is only consulted on `queued`.** A `completed` webhook must never depend on `GET /v1/shapes` — teardown keys on runner identity, and gating it on the catalog would leak every shaped VM during a shapes outage.
-- **`src/shapes.ts` holds a module-level cache.** Tests that stub `listShapes` must call `__resetShapeCache()` in `beforeEach` or the first suite's catalog leaks into the next.
+- **`src/shapes.ts` holds a module-level cache.** Tests that stub `listShapes` must call `resetShapeCacheForTests()` in `beforeEach` or the first suite's catalog leaks into the next.
 ```
 
 - [ ] **Step 5: Add a shaped job to `.github/workflows/ghar-test.yml`**
