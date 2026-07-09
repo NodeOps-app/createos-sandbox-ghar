@@ -13,7 +13,8 @@ export interface Config {
   runnerLabel: string; // "createos"
   runnerTemplate: string; // template id/name
   sandboxNamePrefix: string; // createos VM name prefix (cosmetic, e.g. "gha-ci"); "" = none
-  runnerShape: string; // "s-4vcpu-4gb"
+  runnerShape: string; // "s-4vcpu-4gb" — the shape the bare `createos` label means
+  minRunnerMemMib: number; // 2048 — shapes below this are never offered as labels
   runnerDiskMib: number; // 30720
   maxConcurrent: number; // 0 = unlimited
   provisionPolicy: ProvisionPolicy;
@@ -44,6 +45,13 @@ export interface PendingJob {
   jobId: number;
   runId: number;
   repoFullName: string;
+  /**
+   * The single createos label the job asked for ("createos", or a shaped
+   * "createos-2vcpu-2gb"). Persisted on the row: a job that queues behind the
+   * concurrency cap must boot at the size it requested, and its JIT runner must
+   * register under exactly this label (see ADR-0004).
+   */
+  label: string;
 }
 
 /**

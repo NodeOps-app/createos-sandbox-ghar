@@ -24,6 +24,9 @@ RUNNER_LABEL = "createos"
 RUNNER_TEMPLATE = "ghar-runner"
 SANDBOX_NAME_PREFIX = "gha-ci"
 RUNNER_SHAPE = "s-4vcpu-4gb"
+# Shapes below this are discovered from /v1/shapes but never offered as runner
+# labels: an Actions runner needs ~2 GiB to check out and build anything.
+MIN_RUNNER_MEM_MIB = "2048"
 RUNNER_DISK_MIB = "10240"
 MAX_CONCURRENT = "50"
 PROVISION_POLICY = "org-wide"

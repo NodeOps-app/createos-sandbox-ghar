@@ -41,6 +41,7 @@ export function loadConfig(env: Record<string, unknown>): Config {
     runnerTemplate: req(env, "RUNNER_TEMPLATE"),
     sandboxNamePrefix: (env.SANDBOX_NAME_PREFIX as string) || "",
     runnerShape: (env.RUNNER_SHAPE as string) || "s-4vcpu-4gb",
+    minRunnerMemMib: num(env, "MIN_RUNNER_MEM_MIB", 2048),
     runnerDiskMib: num(env, "RUNNER_DISK_MIB", 30720),
     maxConcurrent: num(env, "MAX_CONCURRENT", 0),
     provisionPolicy: policy as ProvisionPolicy,
