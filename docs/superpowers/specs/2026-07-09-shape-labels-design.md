@@ -96,8 +96,15 @@ bound CLAUDE.md forbids. Log the label, the job id, and the underlying error.
 
 ### Label selection
 
-`matchesLabel` is replaced by four functions, split so that the catalog is only
-ever consulted where it is actually needed.
+`matchesLabel` is replaced by a pure decision function plus one fetch, kept
+strictly apart so the catalog is only ever touched where — and when — it is
+actually needed. Earlier drafts of this feature put the fetch and the
+decision in one function (`isUsableLabel`) and let `GitHubClient.listQueuedJobs`
+take the catalog and call a `pickLabel` internally — a transport client
+making an admission decision, which meant the reconciler had to fetch the
+catalog before it even knew whether any queued job needed one, and a job id
+was never available to name in a warning. `selectLabel`/`fetchCatalog` fix
+that:
 
 - `createosLabels(labels, config): string[]` — pure. The createos labels in a
   job's `runs-on`: the bare `config.runnerLabel`, plus anything prefixed
@@ -106,24 +113,47 @@ ever consulted where it is actually needed.
   those implicitly, and this ignores them.
 - `shapeForLabel(label, config): string` — pure. Bare label → `config.runnerShape`;
   otherwise `s-` + the label's suffix.
-- `isUsableLabel(label, config, deps): Promise<boolean>` — the admission check.
-  A bare label short-circuits `true` without touching the catalog. A shaped
-  label is checked against `usableShapes()`.
-- `pickLabel(labels, usable, config): string | null` — pure. The above, composed,
-  against an already-fetched catalog. Used by the reconciler, which fetches the
-  catalog once per tick rather than once per job.
+- `type Catalog = { ok: true; usable: Set<string> } | { ok: false }` — the
+  shape catalog, or the fact it couldn't be fetched. `{ok: false}` is distinct
+  from an empty `Set` on purpose: an outage and an authoritative empty catalog
+  mean different things and must not be conflated.
+- `type LabelSelection = { ok: true; label: string } | { ok: false; reason:
+  "not-ours" | "ambiguous" | "unknown-shape" | "catalog-unavailable" }` — the
+  outcome of admitting one job's labels. Four reasons, not one boolean,
+  because "not ours" and "the shapes API is down" are not the same 202 and a
+  caller building a log line or a response body needs to say which happened.
+- `selectLabel(labels, config, catalog): LabelSelection` — pure **and
+  silent**. It never `console.warn`s: it doesn't have the job id, and the
+  caller does, so the caller is the one who logs. It resolves the bare label
+  and returns *before* even looking at `catalog` — the bare label's shape
+  comes from config, so a shapes-API outage (or a caller that skipped the
+  fetch because nothing needed it) can never stop the jobs that work today.
+  Only a shaped label consults `catalog`.
+- `fetchCatalog(config, deps): Promise<Catalog>` — the one function that
+  actually calls `usableShapes()` (the network fetch), converting a throw into
+  `{ok: false}` instead of propagating it. This is the only impure half of
+  label selection, and the only one worth calling lazily: a caller checks
+  whether any candidate job could possibly need a catalog *before* calling
+  this, so a tick with no shaped jobs, or a caller that only ever sees bare
+  labels, never pays for (or is blocked by) a fetch nothing needs.
 
 **Exactly one createos label may resolve.** Two (`[createos, createos-2vcpu-2gb]`,
-or two shaped labels) is a contradiction with no defensible winner: it returns
-`null` and `console.warn`s rather than silently picking by array order. The job
-stays `queued` on GitHub and its author sees no runner, which is the correct
-signal that the workflow is wrong.
+or two shaped labels) is a contradiction with no defensible winner:
+`selectLabel` returns `{ok: false, reason: "ambiguous"}` rather than silently
+picking by array order, and the caller `console.warn`s, naming the job id. The
+job stays `queued` on GitHub and its author sees no runner, which is the
+correct signal that the workflow is wrong.
 
-**The catalog is consulted only on the `queued` action.** A `completed` webhook
-needs to know a job is ours (one createos label) and nothing more — the DO looks
-up the VM by `runner_name`. Gating teardown on the shapes API would mean a shapes
-outage leaks every shaped VM until the reaper. Admission is the only decision
-that needs to know whether a shape exists.
+**The catalog is consulted only on the `queued` action, and only lazily even
+then.** A `completed` webhook needs to know a job is ours (one createos label)
+and nothing more — the DO looks up the VM by `runner_name`; gating teardown on
+the shapes API would mean a shapes outage leaks every shaped VM until the
+reaper. On `queued`, `handleWebhook` calls `fetchCatalog` only when the job's
+label isn't bare. The cron reconciler fetches one `Catalog` for the whole
+tick, and only when at least one candidate names a shaped (non-bare) label —
+`GitHubClient.listQueuedJobs()` is now dumb transport (no arguments, no
+`pickLabel`, returns every queued job's raw labels), so the reconciler can
+run this check before deciding whether to fetch anything at all.
 
 ## The requested label must persist on the pending row
 
