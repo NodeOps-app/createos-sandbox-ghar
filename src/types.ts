@@ -40,6 +40,19 @@ export interface QueuedDecision {
   jobId: number;
 }
 
+/**
+ * A queued workflow_job as GitHub reports it. Raw labels; no policy applied —
+ * `GitHubClient.listQueuedJobs` is transport, not an admission decision, so it
+ * hands back exactly what GitHub said and lets the caller (label selection)
+ * decide which jobs are ours and what shape they name.
+ */
+export interface QueuedJob {
+  jobId: number;
+  runId: number;
+  repoFullName: string;
+  labels: string[];
+}
+
 /** DO → Worker: a job to boot (returned by onCompleted/sweep when a slot frees). */
 export interface PendingJob {
   jobId: number;

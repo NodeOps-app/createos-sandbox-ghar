@@ -5,9 +5,10 @@ import {
   createosLabels,
   shapeForLabel,
   usableShapes,
-  isUsableLabel,
-  pickLabel,
+  selectLabel,
+  fetchCatalog,
   resetShapeCacheForTests,
+  type Catalog,
 } from "../../src/shapes";
 import type { Config } from "../../src/types";
 
@@ -168,74 +169,78 @@ describe("usableShapes", () => {
   });
 });
 
-describe("isUsableLabel", () => {
-  it("admits the bare label without touching the catalog", async () => {
-    const listShapes = vi.fn(async () => CATALOG);
-    expect(await isUsableLabel("createos", config, depsWith(listShapes))).toBe(true);
-    expect(listShapes).not.toHaveBeenCalled();
-  });
+describe("selectLabel", () => {
+  const usable = new Set(["s-2vcpu-2gb", "s-4vcpu-4gb"]);
+  const healthy: Catalog = { ok: true, usable };
+  const down: Catalog = { ok: false };
 
-  it("admits a shaped label present in the catalog", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(
-      await isUsableLabel(
-        "createos-2vcpu-2gb",
-        config,
-        depsWith(async () => CATALOG),
-      ),
-    ).toBe(true);
-  });
-
-  it("denies a shaped label that exists but is under the floor, and warns", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(
-      await isUsableLabel(
-        "createos-1vcpu-1gb",
-        config,
-        depsWith(async () => CATALOG),
-      ),
-    ).toBe(false);
-    expect(warn.mock.calls.some((c) => String(c[0]).includes("not offered"))).toBe(true);
-  });
-
-  it("denies a shaped label when the catalog fetch fails, and warns", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const boom = depsWith(async () => {
-      throw new Error("503");
+  it("returns not-ours for a job naming no createos label", () => {
+    expect(selectLabel(["ubuntu-latest"], config, healthy)).toEqual({
+      ok: false,
+      reason: "not-ours",
     });
-    expect(await isUsableLabel("createos-2vcpu-2gb", config, boom)).toBe(false);
-    expect(warn.mock.calls.some((c) => String(c[0]).includes("catalog fetch failed"))).toBe(true);
   });
 
-  it("still admits the bare label when the catalog fetch fails", async () => {
-    const boom = depsWith(async () => {
-      throw new Error("503");
+  it("returns ambiguous for two createos labels, catalog healthy or not", () => {
+    expect(selectLabel(["createos", "createos-2vcpu-2gb"], config, healthy)).toEqual({
+      ok: false,
+      reason: "ambiguous",
     });
-    expect(await isUsableLabel("createos", config, boom)).toBe(true);
+    expect(selectLabel(["createos", "createos-2vcpu-2gb"], config, down)).toEqual({
+      ok: false,
+      reason: "ambiguous",
+    });
+  });
+
+  it("returns unknown-shape for a shaped label absent from a healthy catalog", () => {
+    expect(selectLabel(["createos-99vcpu-1tb"], config, healthy)).toEqual({
+      ok: false,
+      reason: "unknown-shape",
+    });
+  });
+
+  it("returns catalog-unavailable for a shaped label when the catalog could not be fetched", () => {
+    expect(selectLabel(["createos-2vcpu-2gb"], config, down)).toEqual({
+      ok: false,
+      reason: "catalog-unavailable",
+    });
+  });
+
+  // Load-bearing: a shapes outage must never stop the jobs that work today.
+  it("admits the bare label even when the catalog is unavailable", () => {
+    expect(selectLabel(["createos"], config, down)).toEqual({ ok: true, label: "createos" });
+  });
+
+  it("admits a shaped label present in a healthy catalog, ignoring incidental labels", () => {
+    expect(selectLabel(["self-hosted", "createos-2vcpu-2gb"], config, healthy)).toEqual({
+      ok: true,
+      label: "createos-2vcpu-2gb",
+    });
+  });
+
+  it("never logs — the caller owns the job id and does the logging", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    selectLabel(["createos", "createos-2vcpu-2gb"], config, healthy);
+    selectLabel(["createos-99vcpu-1tb"], config, healthy);
+    selectLabel(["createos-2vcpu-2gb"], config, down);
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
-describe("pickLabel", () => {
-  const usable = new Set(["s-2vcpu-2gb", "s-4vcpu-4gb"]);
-
-  it("returns null for a job that is not ours", () => {
-    expect(pickLabel(["ubuntu-latest"], usable, config)).toBeNull();
-  });
-
-  it("returns the single createos label, ignoring incidental labels", () => {
-    expect(pickLabel(["self-hosted", "createos-2vcpu-2gb"], usable, config)).toBe(
-      "createos-2vcpu-2gb",
-    );
-  });
-
-  it("refuses two createos labels rather than picking by order, and warns", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(pickLabel(["createos", "createos-2vcpu-2gb"], usable, config)).toBeNull();
-    expect(warn.mock.calls.some((c) => String(c[0]).includes("2 createos labels"))).toBe(true);
-  });
-
-  it("returns null for a shaped label absent from the catalog", () => {
+describe("fetchCatalog", () => {
+  it("resolves ok:true with the usable set on a healthy fetch", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(pickLabel(["createos-99vcpu-1tb"], usable, config)).toBeNull();
+    const result = await fetchCatalog(
+      config,
+      depsWith(async () => CATALOG),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("converts a throwing listShapes into {ok: false} rather than propagating", async () => {
+    const boom = depsWith(async () => {
+      throw new Error("503");
+    });
+    await expect(fetchCatalog(config, boom)).resolves.toEqual({ ok: false });
   });
 });

@@ -1,12 +1,12 @@
 import type { Bindings } from "./index";
 import { loadConfig } from "./config";
 import { verifySignature, parseWorkflowJob } from "./webhook";
-import { createosLabels, isUsableLabel, usableShapes } from "./shapes";
+import { createosLabels, selectLabel, fetchCatalog, shapeForLabel, type Catalog } from "./shapes";
 import { shouldProvision } from "./policy";
 import { GitHubClient } from "./github/client";
 import { createRunnerSandbox, launchRunner, teardownSandbox, type SandboxDeps } from "./sandbox";
 import { notify } from "./notify";
-import type { PendingJob, Config } from "./types";
+import type { PendingJob, Config, QueuedJob } from "./types";
 
 function coordinator(env: Bindings) {
   return env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
@@ -111,8 +111,23 @@ export async function handleWebhook(
   };
 
   if (job.action === "queued") {
-    if (!(await isUsableLabel(label, config, deps))) {
-      return new Response("unknown-shape", { status: 202 });
+    // A bare label needs no catalog: selectLabel short-circuits before
+    // consulting it. Fetching one anyway would mean a shapes-API outage could
+    // stop bare-label jobs, which is exactly what must never happen.
+    const catalog: Catalog =
+      label === config.runnerLabel
+        ? { ok: true, usable: new Set() }
+        : await fetchCatalog(config, deps);
+    const sel = selectLabel(job.labels, config, catalog);
+    if (!sel.ok) {
+      if (sel.reason === "unknown-shape") {
+        console.warn(
+          `job ${job.jobId}: label "${label}" names shape "${shapeForLabel(label, config)}", which is not offered`,
+        );
+      } else {
+        console.warn(`job ${job.jobId}: ${sel.reason}`);
+      }
+      return new Response(sel.reason, { status: 202 });
     }
     const github = new GitHubClient(config);
     const eligible = await shouldProvision(config, job, () =>
@@ -213,27 +228,48 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
     console.error(`reconcile: runner sweep skipped: ${String(err)}`);
   }
 
-  // B. Re-drive every still-queued label job GitHub knows about. The catalog is
-  //    fetched once for the whole tick; if it's unavailable we fall back to an
-  //    empty set, which still re-drives bare-label jobs.
-  let usable: Set<string>;
+  // B. Re-drive every still-queued label job GitHub knows about.
+  let queued: QueuedJob[];
   try {
-    usable = await usableShapes(config, deps);
-  } catch (err) {
-    console.warn(`reconcile: shape catalog unavailable, bare-label jobs only: ${String(err)}`);
-    usable = new Set();
-  }
-
-  let queued: PendingJob[];
-  try {
-    queued = await github.listQueuedJobs(usable);
+    queued = await github.listQueuedJobs();
   } catch (err) {
     console.error(`reconcile: queued-job poll failed: ${String(err)}`);
     return;
   }
 
+  // Pure prefilter — no network. Jobs that aren't ours are skipped silently:
+  // "not ours" isn't a bound binding, it's just someone else's job.
+  const candidates = queued.filter((j) => createosLabels(j.labels, config).length > 0);
+
+  // Only pay for the catalog if some candidate actually names a shaped label
+  // (exactly one createos label, and it isn't the bare one) — a tick where
+  // every candidate is bare-label must never touch the shapes API.
+  const needsCatalog = candidates.some((j) => {
+    const ours = createosLabels(j.labels, config);
+    return ours.length === 1 && ours[0] !== config.runnerLabel;
+  });
+  // `{ ok: true, usable: new Set() }` here is safe ONLY because selectLabel
+  // short-circuits the bare label before ever touching `usable` — every
+  // candidate that reaches selectLabel in this branch is bare by construction
+  // (needsCatalog is false). Do not "fix" this into a real fetch without
+  // checking why needsCatalog exists.
+  const catalog: Catalog = needsCatalog
+    ? await fetchCatalog(config, deps)
+    : { ok: true, usable: new Set() };
+
   const toProvision: PendingJob[] = [];
-  for (const job of queued) {
+  for (const j of candidates) {
+    const sel = selectLabel(j.labels, config, catalog);
+    if (!sel.ok) {
+      console.warn(`reconcile: job ${j.jobId} (${j.repoFullName}) skipped: ${sel.reason}`);
+      continue;
+    }
+    const job: PendingJob = {
+      jobId: j.jobId,
+      runId: j.runId,
+      repoFullName: j.repoFullName,
+      label: sel.label,
+    };
     const eligible = await shouldProvision(
       config,
       {

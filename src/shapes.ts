@@ -133,52 +133,58 @@ export async function usableShapes(
 }
 
 /**
- * Admission check for one createos label. The bare label short-circuits: its
- * shape comes from config, so a shapes-API outage can never stop the jobs that
- * work today. A shaped label is checked against the live catalog; a fetch
- * failure denies it, and the cron reconciler re-drives the still-`queued` job
- * on its next tick.
+ * The shape catalog, or the fact that it couldn't be fetched. A distinct
+ * `{ok: false}` rather than an empty `Set` — an outage and an authoritative
+ * empty catalog are different situations and must not be conflated: the
+ * former means "unknown, retry later", the latter means "no shape is usable
+ * right now" (see the `usableShapes` empty-catalog warning above).
  */
-export async function isUsableLabel(
-  label: string,
-  config: Config,
-  deps: SandboxDeps,
-): Promise<boolean> {
-  if (label === config.runnerLabel) return true;
-  let usable: Set<string>;
-  try {
-    usable = await usableShapes(config, deps);
-  } catch (err) {
-    console.warn(`shapes: catalog fetch failed, denying shaped label ${label}: ${String(err)}`);
-    return false;
-  }
-  return usableLabel(label, usable, config);
-}
+export type Catalog = { ok: true; usable: Set<string> } | { ok: false };
 
-function usableLabel(label: string, usable: Set<string>, config: Config): boolean {
-  const shape = shapeForLabel(label, config);
-  if (usable.has(shape)) return true;
-  console.warn(`shapes: label ${label} names shape ${shape}, which is not offered`);
-  return false;
+/**
+ * The outcome of admitting one job's `runs-on` labels: the single createos
+ * label it may boot under, or the reason it can't. Four distinct reasons
+ * rather than one boolean because a caller building an alert or a log line
+ * needs to say *which* of these happened — "not ours" and "the shapes API is
+ * down" are not the same 202.
+ */
+export type LabelSelection =
+  | { ok: true; label: string }
+  | { ok: false; reason: "not-ours" | "ambiguous" | "unknown-shape" | "catalog-unavailable" };
+
+/**
+ * Admission decision for a job's `runs-on` labels. Pure and silent — it never
+ * logs, because it doesn't know the job id; the caller does, and the caller is
+ * the one who should name it in a warning.
+ *
+ * The bare label is checked and returned *before* the catalog is even looked
+ * at: its shape comes from config, so a shapes-API outage (or a caller that
+ * skipped fetching one because it wasn't needed) can never stop the jobs that
+ * work today. Only a shaped label consults `catalog`.
+ */
+export function selectLabel(labels: string[], config: Config, catalog: Catalog): LabelSelection {
+  const ours = createosLabels(labels, config);
+  if (ours.length === 0) return { ok: false, reason: "not-ours" };
+  if (ours.length > 1) return { ok: false, reason: "ambiguous" };
+  const label = ours[0]!;
+  if (label === config.runnerLabel) return { ok: true, label };
+  if (!catalog.ok) return { ok: false, reason: "catalog-unavailable" };
+  if (!catalog.usable.has(shapeForLabel(label, config))) {
+    return { ok: false, reason: "unknown-shape" };
+  }
+  return { ok: true, label };
 }
 
 /**
- * The one createos label a job requested, validated against an already-fetched
- * catalog. Used where the catalog is fetched once for many jobs (the
- * reconciler). Returns null when the job is not ours, or when it names more
- * than one createos label — a contradiction with no defensible winner, which we
- * refuse rather than resolve by array order.
+ * Fetches the live shape catalog for `selectLabel`, converting a failed fetch
+ * into `{ok: false}` rather than throwing — the caller (webhook handler,
+ * reconciler) decides what an unavailable catalog means for the job in front
+ * of it (202 + retry via the cron reconciler), not this function.
  */
-export function pickLabel(labels: string[], usable: Set<string>, config: Config): string | null {
-  const ours = createosLabels(labels, config);
-  if (ours.length === 0) return null;
-  if (ours.length > 1) {
-    console.warn(
-      `shapes: job names ${ours.length} createos labels (${ours.join(", ")}); ignoring it`,
-    );
-    return null;
+export async function fetchCatalog(config: Config, deps: SandboxDeps): Promise<Catalog> {
+  try {
+    return { ok: true, usable: await usableShapes(config, deps) };
+  } catch {
+    return { ok: false };
   }
-  const label = ours[0]!;
-  if (label === config.runnerLabel) return label;
-  return usableLabel(label, usable, config) ? label : null;
 }

@@ -111,18 +111,19 @@ describe("runReconciler", () => {
       runCommand: vi.fn().mockResolvedValue({ result: { stdout: "started" }, exec_ms: 1 }),
     });
     const ctx = createExecutionContext();
-    // runReconciler unconditionally reaches usableShapes (listShapes) and the
-    // teardown path (getSandbox) too, even though this bare-label job and the
-    // empty runner-sweep never call either at runtime.
+    // Every candidate this tick is the bare `createos` label, so runReconciler
+    // must never fetch the shape catalog for it (selectLabel short-circuits
+    // the bare label before touching it) — the assertion below is the proof.
+    // listShapes/getSandbox are still supplied so the makeClient factory
+    // typechecks against CreateosClient's full surface, even though neither is
+    // called at runtime here.
+    const listShapes = vi.fn().mockResolvedValue(shapeCatalog());
     await runReconciler(env as any, {
-      makeClient: () => ({
-        createSandbox,
-        listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
-        getSandbox: vi.fn(),
-      }),
+      makeClient: () => ({ createSandbox, listShapes, getSandbox: vi.fn() }),
     });
     await waitOnExecutionContext(ctx);
     expect(createSandbox).toHaveBeenCalledOnce();
+    expect(listShapes).not.toHaveBeenCalled();
     globalThis.fetch = realFetch;
   });
 
@@ -132,14 +133,12 @@ describe("runReconciler", () => {
     await boot(singleton, 9102, "sb9102"); // fresh running row
     patchGitHub({ jobs: [{ id: 9102, status: "queued", labels: ["createos"] }] });
     const createSandbox = vi.fn();
+    const listShapes = vi.fn().mockResolvedValue(shapeCatalog());
     await runReconciler(env as any, {
-      makeClient: () => ({
-        createSandbox,
-        listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
-        getSandbox: vi.fn(),
-      }),
+      makeClient: () => ({ createSandbox, listShapes, getSandbox: vi.fn() }),
     });
     expect(createSandbox).not.toHaveBeenCalled();
+    expect(listShapes).not.toHaveBeenCalled();
     globalThis.fetch = realFetch;
   });
 
