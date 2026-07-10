@@ -253,4 +253,32 @@ describe("shape labels end-to-end", () => {
     expect(rows.find((r) => r.job_id === shapedJobId)).toBeUndefined(); // slot freed, row gone
     expect(rows.find((r) => r.job_id === behindJobId)?.state).toBe("running"); // promoted + booted
   });
+
+  it("a shaped label is refused with catalog-unavailable when the shapes API is down, burning no slot", async () => {
+    const createSandbox = vi.fn();
+    const deps = {
+      makeClient: () => ({
+        createSandbox,
+        listShapes: async () => {
+          throw new Error("503");
+        },
+      }),
+    };
+
+    // Delta, not absolute — see the note on test 2 above.
+    const co = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
+    const before = await co.activeCount();
+
+    const body = workflowJobPayload({
+      action: "queued",
+      jobId: 703,
+      labels: ["createos-2vcpu-2gb"],
+    });
+    const res = await post(body, "dlv-catalog-down", deps);
+
+    expect(res.status).toBe(202);
+    expect(await res.text()).toBe("catalog-unavailable");
+    expect(createSandbox).not.toHaveBeenCalled();
+    expect(await co.activeCount()).toBe(before);
+  });
 });
