@@ -59,7 +59,7 @@ describe("shape labels end-to-end", () => {
       runCommand: vi.fn().mockResolvedValue({ result: { exit_code: 0 } }),
     });
     const deps = {
-      makeClient: () => ({ createSandbox, listShapes: async () => shapeCatalog() }) as never,
+      makeClient: () => ({ createSandbox, listShapes: async () => shapeCatalog() }),
     };
 
     const body = workflowJobPayload({
@@ -78,7 +78,7 @@ describe("shape labels end-to-end", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const createSandbox = vi.fn();
     const deps = {
-      makeClient: () => ({ createSandbox, listShapes: async () => shapeCatalog() }) as never,
+      makeClient: () => ({ createSandbox, listShapes: async () => shapeCatalog() }),
     };
 
     // The DO is a singleton shared across every case in this file, so assert on
@@ -111,12 +111,11 @@ describe("shape labels end-to-end", () => {
       // this file has one row per job, so job_id and runner_name lookups would
       // resolve identically either way — this test isn't distinguishing them.
       attemptId: () => "aa",
-      makeClient: () =>
-        ({
-          createSandbox,
-          listShapes: async () => shapeCatalog(),
-          getSandbox: async () => ({ destroy }),
-        }) as never,
+      makeClient: () => ({
+        createSandbox,
+        listShapes: async () => shapeCatalog(),
+        getSandbox: async () => ({ destroy }),
+      }),
     };
     await post(
       workflowJobPayload({ action: "queued", jobId: 702, labels: ["createos-2vcpu-2gb"] }),
@@ -129,13 +128,12 @@ describe("shape labels end-to-end", () => {
     // outage can't leak this VM.
     resetShapeCacheForTests();
     const down = {
-      makeClient: () =>
-        ({
-          listShapes: async () => {
-            throw new Error("503");
-          },
-          getSandbox: async () => ({ destroy }),
-        }) as never,
+      makeClient: () => ({
+        listShapes: async () => {
+          throw new Error("503");
+        },
+        getSandbox: async () => ({ destroy }),
+      }),
     };
     const res = await post(
       workflowJobPayload({
@@ -165,8 +163,7 @@ describe("shape labels end-to-end", () => {
       runCommand: vi.fn().mockResolvedValue({ result: { exit_code: 0 } }),
     });
     const fillerDeps = {
-      makeClient: () =>
-        ({ createSandbox: fillerCreate, listShapes: async () => shapeCatalog() }) as never,
+      makeClient: () => ({ createSandbox: fillerCreate, listShapes: async () => shapeCatalog() }),
     };
 
     // Saturate MAX_CONCURRENT (2) with filler bare-label jobs, regardless of
@@ -221,12 +218,11 @@ describe("shape labels end-to-end", () => {
       };
     });
     const completeDeps = {
-      makeClient: () =>
-        ({
-          getSandbox: async () => ({ destroy }),
-          createSandbox: promoteCreate,
-          listShapes: async () => shapeCatalog(),
-        }) as never,
+      makeClient: () => ({
+        getSandbox: async () => ({ destroy }),
+        createSandbox: promoteCreate,
+        listShapes: async () => shapeCatalog(),
+      }),
     };
     const completedRes = await post(
       workflowJobPayload({ action: "completed", jobId: fillers[0]! }),

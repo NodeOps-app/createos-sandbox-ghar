@@ -32,8 +32,8 @@ const CATALOG = [
   { id: "s-8vcpu-16gb", vcpu: 8, mem_mib: 16384, default_disk_mib: 10240 },
 ];
 
-function depsWith(listShapes: () => Promise<unknown>) {
-  return { makeClient: () => ({ listShapes }) as never };
+function depsWith(listShapes: () => Promise<Shape[]>) {
+  return { makeClient: () => ({ listShapes }) };
 }
 
 beforeEach(() => {

@@ -1,16 +1,17 @@
 import { CreateosSandboxNotFoundError } from "@nodeops-createos/sandbox";
-import type { CreateosSandboxClient } from "@nodeops-createos/sandbox";
 import type { Config, PendingJob } from "./types";
 import type { GitHubClient } from "./github/client";
-import { makeSandboxClient, type SandboxDeps } from "./createos";
+import {
+  makeSandboxClient,
+  type CreateosClient,
+  type SandboxDeps,
+  type SandboxHandle,
+} from "./createos";
 import { shapeForLabel } from "./shapes";
 
 // Re-exported so existing consumers (handler.ts, index.ts, tests) keep importing
-// SandboxDeps from here.
-export type { SandboxDeps };
-
-/** A booted sandbox handle — the subset createRunnerSandbox returns to launchRunner. */
-export type SandboxHandle = Awaited<ReturnType<CreateosSandboxClient["createSandbox"]>>;
+// SandboxDeps/SandboxHandle from here.
+export type { SandboxDeps, SandboxHandle };
 
 /** createos-sandbox rejects names longer than this (API returns 400). */
 const MAX_SANDBOX_NAME = 22;
@@ -46,7 +47,7 @@ export async function createRunnerSandbox(
   config: Config,
   github: GitHubClient,
   job: PendingJob,
-  deps: SandboxDeps = {},
+  deps: SandboxDeps<Pick<CreateosClient, "createSandbox">> = {},
 ): Promise<{ sandboxId: string; runnerName: string; sandbox: SandboxHandle }> {
   const attemptId =
     deps.attemptId ??
@@ -104,7 +105,7 @@ export async function launchRunner(sandbox: SandboxHandle): Promise<void> {
 export async function teardownSandbox(
   config: Config,
   sandboxId: string,
-  deps: SandboxDeps = {},
+  deps: SandboxDeps<Pick<CreateosClient, "getSandbox">> = {},
 ): Promise<void> {
   const c = makeSandboxClient(config, deps);
   try {

@@ -110,7 +110,16 @@ describe("runReconciler", () => {
       runCommand: vi.fn().mockResolvedValue({ result: { stdout: "started" }, exec_ms: 1 }),
     });
     const ctx = createExecutionContext();
-    await runReconciler(env as any, { makeClient: () => ({ createSandbox }) as any });
+    // runReconciler unconditionally reaches usableShapes (listShapes) and the
+    // teardown path (getSandbox) too, even though this bare-label job and the
+    // empty runner-sweep never call either at runtime.
+    await runReconciler(env as any, {
+      makeClient: () => ({
+        createSandbox,
+        listShapes: vi.fn().mockResolvedValue([]),
+        getSandbox: vi.fn(),
+      }),
+    });
     await waitOnExecutionContext(ctx);
     expect(createSandbox).toHaveBeenCalledOnce();
     globalThis.fetch = realFetch;
@@ -122,7 +131,13 @@ describe("runReconciler", () => {
     await boot(singleton, 9102, "sb9102"); // fresh running row
     patchGitHub({ jobs: [{ id: 9102, status: "queued", labels: ["createos"] }] });
     const createSandbox = vi.fn();
-    await runReconciler(env as any, { makeClient: () => ({ createSandbox }) as any });
+    await runReconciler(env as any, {
+      makeClient: () => ({
+        createSandbox,
+        listShapes: vi.fn().mockResolvedValue([]),
+        getSandbox: vi.fn(),
+      }),
+    });
     expect(createSandbox).not.toHaveBeenCalled();
     globalThis.fetch = realFetch;
   });
@@ -167,7 +182,11 @@ describe("runReconciler", () => {
       id: "sb9402",
       runCommand: vi.fn().mockResolvedValue({ result: { stdout: "started" }, exec_ms: 1 }),
     });
-    await runReconciler(env as any, { makeClient: () => ({ listShapes, createSandbox }) as any });
+    // No completions/reaping in this test, so getSandbox is never actually
+    // called — but runReconciler's teardown path still requires it typewise.
+    await runReconciler(env as any, {
+      makeClient: () => ({ listShapes, createSandbox, getSandbox: vi.fn() }),
+    });
 
     expect(createSandbox).toHaveBeenCalledTimes(2);
     expect(createSandbox).toHaveBeenCalledWith(expect.objectContaining({ shape: "s-2vcpu-2gb" }));

@@ -24,7 +24,7 @@ describe("createRunnerSandbox", () => {
     const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
 
     const res = await createRunnerSandbox(config, github, job, {
-      makeClient: () => ({ createSandbox }) as any,
+      makeClient: () => ({ createSandbox }),
       attemptId: () => "k3",
     });
 
@@ -50,11 +50,11 @@ describe("createRunnerSandbox", () => {
     const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
 
     const a = await createRunnerSandbox(config, github, job, {
-      makeClient: () => ({ createSandbox }) as any,
+      makeClient: () => ({ createSandbox }),
       attemptId: () => "k3",
     });
     const b = await createRunnerSandbox(config, github, job, {
-      makeClient: () => ({ createSandbox }) as any,
+      makeClient: () => ({ createSandbox }),
       attemptId: () => "z9",
     });
 
@@ -66,7 +66,7 @@ describe("createRunnerSandbox", () => {
     const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
 
     await createRunnerSandbox(config, github, job, {
-      makeClient: () => ({ createSandbox }) as any,
+      makeClient: () => ({ createSandbox }),
     });
 
     const name = github.generateJitConfig.mock.calls[0]![0] as string;
@@ -86,7 +86,7 @@ describe("createRunnerSandbox", () => {
     };
 
     await createRunnerSandbox(cfg, github, bigJob, {
-      makeClient: () => ({ createSandbox }) as any,
+      makeClient: () => ({ createSandbox }),
     });
 
     const name = createSandbox.mock.calls[0]![0].name;
@@ -105,7 +105,7 @@ describe("createRunnerSandbox", () => {
     };
 
     await createRunnerSandbox(config, github, shapedJob, {
-      makeClient: () => ({ createSandbox }) as any,
+      makeClient: () => ({ createSandbox }),
       attemptId: () => "aa",
     });
 
@@ -119,7 +119,7 @@ describe("launchRunner", () => {
     const runCommand = vi
       .fn()
       .mockResolvedValue({ result: { stdout: "started", stderr: "", exit_code: 0 }, exec_ms: 5 });
-    await launchRunner({ id: "sb_1", runCommand } as any);
+    await launchRunner({ id: "sb_1", runCommand });
     expect(runCommand.mock.calls[0]![0]).toBe("bash");
     expect(runCommand.mock.calls[0]![1][1]).toContain("setsid");
   });
@@ -129,7 +129,7 @@ describe("teardownSandbox", () => {
   it("destroys an existing sandbox", async () => {
     const destroy = vi.fn().mockResolvedValue({ id: "sb_1", status: "destroying" });
     const getSandbox = vi.fn().mockResolvedValue({ destroy });
-    await teardownSandbox(config, "sb_1", { makeClient: () => ({ getSandbox }) as any });
+    await teardownSandbox(config, "sb_1", { makeClient: () => ({ getSandbox }) });
     expect(destroy).toHaveBeenCalledOnce();
   });
 
@@ -140,14 +140,14 @@ describe("teardownSandbox", () => {
         new CreateosSandboxNotFoundError("gone", new Response(null, { status: 404 })),
       );
     await expect(
-      teardownSandbox(config, "sb_x", { makeClient: () => ({ getSandbox }) as any }),
+      teardownSandbox(config, "sb_x", { makeClient: () => ({ getSandbox }) }),
     ).resolves.toBeUndefined();
   });
 
   it("rethrows other errors", async () => {
     const getSandbox = vi.fn().mockRejectedValue(new Error("boom"));
     await expect(
-      teardownSandbox(config, "sb_x", { makeClient: () => ({ getSandbox }) as any }),
+      teardownSandbox(config, "sb_x", { makeClient: () => ({ getSandbox }) }),
     ).rejects.toThrow(/boom/);
   });
 });

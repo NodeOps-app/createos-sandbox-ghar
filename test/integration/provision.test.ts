@@ -44,7 +44,12 @@ describe("full provision flow", () => {
         .fn()
         .mockResolvedValue({ result: { stdout: "started", stderr: "", exit_code: 0 }, exec_ms: 1 }),
     });
-    const deps = { makeClient: () => ({ createSandbox }) as any };
+    // handleWebhook unconditionally threads deps through isUsableLabel
+    // (listShapes) and the teardown paths (getSandbox) too, even though this
+    // job's bare label and happy-path boot never reach either at runtime.
+    const deps = {
+      makeClient: () => ({ createSandbox, getSandbox: vi.fn(), listShapes: vi.fn() }),
+    };
 
     const body = workflowJobPayload({ action: "queued", jobId: 500 });
     const req = new Request("https://ctrl.local/webhook", {
@@ -71,7 +76,11 @@ describe("full provision flow", () => {
     const before = await co.activeCount();
 
     const createSandbox = vi.fn();
-    const deps = { makeClient: () => ({ createSandbox }) as any };
+    // Ambiguous-label short-circuits before any client call, but the type
+    // still requires the full capability set handleWebhook can reach.
+    const deps = {
+      makeClient: () => ({ createSandbox, getSandbox: vi.fn(), listShapes: vi.fn() }),
+    };
 
     const body = workflowJobPayload({
       action: "queued",
