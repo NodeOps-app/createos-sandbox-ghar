@@ -194,4 +194,28 @@ describe("runReconciler", () => {
     expect(listShapes).toHaveBeenCalledTimes(1);
     globalThis.fetch = realFetch;
   });
+
+  // Fix 1: policy must be evaluated before the shape catalog is fetched. A
+  // tick whose only shaped candidates are all policy-blocked must never
+  // touch the shapes API.
+  it("skips the shape catalog entirely when every shaped candidate is policy-blocked", async () => {
+    patchGitHub({
+      jobs: [{ id: 9501, status: "queued", labels: ["createos-2vcpu-2gb"] }],
+    });
+    const listShapes = vi.fn().mockResolvedValue(shapeCatalog());
+    const createSandbox = vi.fn();
+    const blockedEnv = {
+      ...env,
+      PROVISION_POLICY: "repo-allowlist",
+      REPO_ALLOWLIST: "someone/else",
+    };
+
+    await runReconciler(blockedEnv as any, {
+      makeClient: () => ({ listShapes, createSandbox, getSandbox: vi.fn() }),
+    });
+
+    expect(listShapes).not.toHaveBeenCalled();
+    expect(createSandbox).not.toHaveBeenCalled();
+    globalThis.fetch = realFetch;
+  });
 });

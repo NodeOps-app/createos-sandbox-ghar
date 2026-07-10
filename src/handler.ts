@@ -98,9 +98,10 @@ export async function handleWebhook(
   const job = parseWorkflowJob(body);
   if (!job) return new Response("ignored", { status: 202 });
 
-  // "Is this ours" is a pure label question for every action — the catalog is
-  // only needed to admit a `queued` job below. Gating teardown on the shapes API
-  // would leak every shaped VM during a shapes outage.
+  // "Is this ours" is a pure label question for every action — the catalog and
+  // policy are only consulted for a `queued` job below. Gating teardown on
+  // either would leak every shaped VM during a shapes outage or a policy that
+  // has since changed.
   const requested = resolveRequestedLabel(job.labels, config);
   if (requested.kind === "none") return new Response("no-label", { status: 202 });
   if (requested.kind === "ambiguous") {
@@ -120,9 +121,20 @@ export async function handleWebhook(
   };
 
   if (job.action === "queued") {
-    // A bare label needs no catalog: only a shaped label consults it.
-    // Fetching one anyway would mean a shapes-API outage could stop
-    // bare-label jobs, which is exactly what must never happen.
+    // Policy first: a job the policy rejects must never cost a catalog fetch,
+    // and must be reported as policy-skip rather than as whatever the catalog
+    // fetch would have said (see the Fix-1 review finding: a policy-blocked
+    // shaped job used to return catalog-unavailable during an outage, which
+    // both lied about the reason and never reached the policy that would have
+    // permanently rejected it anyway).
+    const github = new GitHubClient(config);
+    const eligible = await shouldProvision(config, job, () =>
+      github.isForkJob(job.repoFullName, job.runId),
+    );
+    if (!eligible) return new Response("policy-skip", { status: 202 });
+
+    // Only a shaped label needs the catalog: a bare label's shape comes from
+    // config, so a shapes-API outage can never stop the jobs that work today.
     if (isShapedLabel(label, config)) {
       const catalog: Catalog = await fetchCatalog(config, deps);
       const check = validateShape(label, config, catalog);
@@ -137,11 +149,6 @@ export async function handleWebhook(
         return new Response(check.reason, { status: 202 });
       }
     }
-    const github = new GitHubClient(config);
-    const eligible = await shouldProvision(config, job, () =>
-      github.isForkJob(job.repoFullName, job.runId),
-    );
-    if (!eligible) return new Response("policy-skip", { status: 202 });
 
     const decision = await co.onQueued(pending, delivery);
     if (decision.action === "provision") {
@@ -246,8 +253,10 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
   }
 
   // Pure prefilter — no network. Each candidate's requested label is resolved
-  // once here and carried alongside the job. Jobs that aren't ours are skipped
-  // silently: "not ours" isn't a bound binding, it's just someone else's job.
+  // once here. Jobs that aren't ours are skipped silently: "not ours" isn't a
+  // bound binding, it's just someone else's job. An ambiguous job is malformed
+  // regardless of policy, so it's disposed of here too, before either policy
+  // or the catalog are ever consulted.
   const candidates: { job: QueuedJob; label: string }[] = [];
   for (const j of queued) {
     const requested = resolveRequestedLabel(j.labels, config);
@@ -261,19 +270,39 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
     candidates.push({ job: j, label: requested.label });
   }
 
-  // Only pay for the catalog if some candidate actually names a shaped label
-  // — a tick where every candidate is bare-label must never touch the shapes
-  // API. No synthetic catalog when it's skipped: `validateShape` is only ever
-  // called below when `isShapedLabel` is true, and `needsCatalog` is exactly
-  // that condition across every candidate, so `catalog` is always defined by
-  // the time it's needed.
-  const needsCatalog = candidates.some(({ label }) => isShapedLabel(label, config));
+  // Policy next, still before the catalog: a job the policy rejects must
+  // never cost a catalog fetch (see the Fix-1 review finding). One
+  // shouldProvision call per candidate, same as before this reordering —
+  // moving it earlier only changes *when* its (possibly network) fork check
+  // runs, not how many times.
+  const eligible: { job: QueuedJob; label: string }[] = [];
+  for (const { job: j, label } of candidates) {
+    const admitted = await shouldProvision(
+      config,
+      {
+        action: "queued",
+        jobId: j.jobId,
+        runId: j.runId,
+        repoFullName: j.repoFullName,
+        labels: [label],
+      },
+      () => github.isForkJob(j.repoFullName, j.runId),
+    );
+    if (admitted) eligible.push({ job: j, label });
+  }
+
+  // Only pay for the catalog if some POLICY-ELIGIBLE candidate actually names
+  // a shaped label — a tick whose only shaped jobs are all policy-blocked, or
+  // where every eligible job is bare-label, must never touch the shapes API.
+  const needsCatalog = eligible.some(({ label }) => isShapedLabel(label, config));
   let catalog: Catalog | undefined;
   if (needsCatalog) catalog = await fetchCatalog(config, deps);
 
   const toProvision: PendingJob[] = [];
-  for (const { job: j, label } of candidates) {
+  for (const { job: j, label } of eligible) {
     if (isShapedLabel(label, config)) {
+      // needsCatalog is exactly "some eligible candidate is shaped", so
+      // catalog was fetched above whenever this branch runs.
       const check = validateShape(label, config, catalog!);
       if (!check.ok) {
         console.warn(`reconcile: job ${j.jobId} (${j.repoFullName}) skipped: ${check.reason}`);
@@ -281,18 +310,6 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
       }
     }
     const job: PendingJob = { jobId: j.jobId, runId: j.runId, repoFullName: j.repoFullName, label };
-    const eligible = await shouldProvision(
-      config,
-      {
-        action: "queued",
-        jobId: job.jobId,
-        runId: job.runId,
-        repoFullName: job.repoFullName,
-        labels: [job.label],
-      },
-      () => github.isForkJob(job.repoFullName, job.runId),
-    );
-    if (!eligible) continue;
     // Same job_id → onQueued returns `ignore` for anything we're already
     // tracking (fresh boot / at-cap pending); only untracked jobs provision.
     const decision = await co.onQueued(job, `reconcile-${job.jobId}`);

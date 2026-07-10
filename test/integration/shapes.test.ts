@@ -29,7 +29,7 @@ function patchGitHub() {
   }) as typeof fetch;
 }
 
-async function post(body: string, delivery: string, deps: SandboxDeps) {
+async function post(body: string, delivery: string, deps: SandboxDeps, envOverride: unknown = env) {
   const req = new Request("https://ctrl.local/webhook", {
     method: "POST",
     headers: {
@@ -39,7 +39,7 @@ async function post(body: string, delivery: string, deps: SandboxDeps) {
     body,
   });
   const ctx = createExecutionContext();
-  const res = await handleWebhook(req, env as never, ctx, deps);
+  const res = await handleWebhook(req, envOverride as never, ctx, deps);
   await waitOnExecutionContext(ctx);
   return res;
 }
@@ -296,6 +296,39 @@ describe("shape labels end-to-end", () => {
 
     expect(res.status).toBe(202);
     expect(await res.text()).toBe("catalog-unavailable");
+    expect(createSandbox).not.toHaveBeenCalled();
+    expect(await co.activeCount()).toBe(before);
+  });
+
+  // Fix 1: policy must be evaluated before the shape catalog is fetched. A
+  // job blocked by repo-allowlist must never reach the shapes API — and it
+  // must report policy-skip, not whatever the (never-attempted) catalog
+  // fetch would have said.
+  it("a repo-allowlist-blocked job carrying a shaped label returns policy-skip and never calls listShapes", async () => {
+    const createSandbox = vi.fn();
+    const listShapes = vi.fn().mockResolvedValue(shapeCatalog());
+    const deps = {
+      makeClient: () => ({ createSandbox, listShapes, getSandbox: vi.fn() }),
+    };
+    const blockedEnv = {
+      ...env,
+      PROVISION_POLICY: "repo-allowlist",
+      REPO_ALLOWLIST: "someone/else",
+    };
+
+    const co = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
+    const before = await co.activeCount();
+
+    const body = workflowJobPayload({
+      action: "queued",
+      jobId: 704,
+      labels: ["createos-2vcpu-2gb"],
+    });
+    const res = await post(body, "dlv-policy-blocked", deps, blockedEnv);
+
+    expect(res.status).toBe(202);
+    expect(await res.text()).toBe("policy-skip");
+    expect(listShapes).not.toHaveBeenCalled();
     expect(createSandbox).not.toHaveBeenCalled();
     expect(await co.activeCount()).toBe(before);
   });

@@ -196,16 +196,46 @@ silently picking by array order, and the caller `console.warn`s, naming the
 job id. The job stays `queued` on GitHub and its author sees no runner, which
 is the correct signal that the workflow is wrong.
 
-**The catalog is consulted only on the `queued` action, and only lazily even
-then.** A `completed` webhook needs to know a job is ours (one createos label)
-and nothing more — the DO looks up the VM by `runner_name`; gating teardown on
-the shapes API would mean a shapes outage leaks every shaped VM until the
-reaper. On `queued`, `handleWebhook` calls `fetchCatalog` only when the job's
-label isn't bare. The cron reconciler fetches one `Catalog` for the whole
-tick, and only when at least one candidate names a shaped (non-bare) label —
-`GitHubClient.listQueuedJobs()` is dumb transport (no arguments, no
+### Policy before the catalog
+
+Both admission call sites check `shouldProvision` (the policy gate —
+org-wide / repo-allowlist / fork-gated) **before** they ever look at the
+shape catalog, not after. An earlier version fetched the catalog and
+validated the label first, and only then asked policy whether the job was
+allowed to run at all — which meant a job `repo-allowlist` was always going
+to reject still triggered a `listShapes()` call, and worse, during a real
+catalog outage a policy-blocked shaped job came back `catalog-unavailable`
+instead of `policy-skip`: a lie about the reason, and one that never reached
+the policy check that would have permanently rejected the job anyway.
+
+The fix reorders both call sites to: resolve the requested label (pure,
+disposes of `none`/`ambiguous`) → check policy → *only if* policy admits the
+job **and** its label is shaped, fetch the catalog and `validateShape`. A job
+the policy would reject never costs a catalog fetch, and always reports
+`policy-skip`, catalog outage or not.
+
+This does not change how many times `shouldProvision` is called — under
+`fork-gated` it makes one GitHub API call per candidate either way; moving it
+earlier only changes *when* that call happens relative to the catalog fetch,
+not how many times it happens. In the reconciler specifically, this means
+`needsCatalog` (whether to fetch a `Catalog` at all this tick) is computed
+over the **policy-eligible** candidates, not every candidate that merely
+names a shaped label — a tick whose only shaped jobs are all policy-blocked
+must not touch the shapes API.
+
+**The catalog is consulted only on the `queued` action, only for a
+policy-eligible job, and only lazily even then.** A `completed` webhook needs
+to know a job is ours (one createos label) and nothing more — the DO looks up
+the VM by `runner_name`; gating teardown on the shapes API (or on policy)
+would mean a shapes outage, or a policy that has since changed, leaks every
+shaped VM until the reaper. On `queued`, `handleWebhook` calls `fetchCatalog`
+only after `shouldProvision` admits the job, and only when the job's label
+isn't bare. The cron reconciler fetches one `Catalog` for the whole tick, and
+only when at least one *policy-eligible* candidate names a shaped (non-bare)
+label — `GitHubClient.listQueuedJobs()` is dumb transport (no arguments, no
 `pickLabel`, returns every queued job's raw labels), so the reconciler can
-run this check before deciding whether to fetch anything at all.
+run both the label and policy checks before deciding whether to fetch
+anything at all.
 
 ## The requested label must persist on the pending row
 
@@ -234,8 +264,8 @@ So:
 | Site | Change |
 | --- | --- |
 | `handler.ts` (`handleWebhook`, all actions) | `matchesLabel` → `resolveRequestedLabel(job.labels, config)`; the resolved label is carried into `PendingJob` |
-| `handler.ts` (`handleWebhook`, `queued` only) | only if `isShapedLabel(label, config)` does `fetchCatalog` (lazy) feed `validateShape(label, config, catalog)`, which decides shape admission |
-| `handler.ts` (`runReconciler`) | `resolveRequestedLabel` computed once per candidate job and reused; `fetchCatalog` fetched at most once per tick, and only if some candidate names a shaped label; `validateShape` decides each candidate's shape admission against that one `Catalog` |
+| `handler.ts` (`handleWebhook`, `queued` only) | `shouldProvision` runs first; only if it admits the job and `isShapedLabel(label, config)` does `fetchCatalog` (lazy) feed `validateShape(label, config, catalog)`, which decides shape admission |
+| `handler.ts` (`runReconciler`) | `resolveRequestedLabel` computed once per candidate job; `shouldProvision` filters to policy-eligible candidates; `fetchCatalog` fetched at most once per tick, and only if some *eligible* candidate names a shaped label; `validateShape` decides each eligible shaped candidate's admission against that one `Catalog` |
 | `github/client.ts` (`generateJitConfig`) | takes `(runnerName, label)` — registers the label the job actually requested, not `config.runnerLabel` |
 | `github/client.ts` (`listQueuedJobs`) | takes no arguments and applies no shape policy — dumb transport that returns every queued job's raw `labels`; admission is entirely the caller's job |
 | `sandbox.ts` (`createRunnerSandbox`) | `createSandbox({ shape })` takes `shapeForLabel(job.label, config)`, not `config.runnerShape` |
@@ -300,6 +330,10 @@ Plain `vitest` (`test/unit/shapes.test.ts`):
   `RUNNER_LABEL` (`test/integration/concurrency.test.ts`)
 - the reconciler provisions a shaped-label job, fetching the shape catalog
   once for the whole tick (`test/integration/reconcile.test.ts`)
+- a job blocked by `repo-allowlist`, carrying a shaped label, returns
+  `policy-skip` and never calls `listShapes` — proves policy runs before the
+  catalog is ever touched (both `handleWebhook` and `runReconciler`, the
+  latter in `test/integration/reconcile.test.ts`)
 
 Live, after deploy: add a `runs-on: [createos-2vcpu-2gb]` job to `ghar-test.yml`
 and confirm the VM boots at 2 vCPU.
