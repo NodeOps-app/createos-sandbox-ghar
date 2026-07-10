@@ -167,10 +167,17 @@ was never available to name in a warning. `resolveRequestedLabel` /
   `"not-ours"` or `"ambiguous"` reason here — `resolveRequestedLabel` already
   disposed of both before a caller ever reaches this function.
 - `validateShape(label, config, catalog): ShapeCheck` — pure **and silent**,
-  like `resolveRequestedLabel`. Precondition: `label` is a SHAPED label (not
-  the bare `config.runnerLabel`) — callers must check `isShapedLabel` (and
-  fetch a `Catalog`) before calling this; a bare label's shape comes from
-  config and needs neither.
+  like `resolveRequestedLabel`. Total, not partial: it has no precondition on
+  `label`. The bare `config.runnerLabel` short-circuits to `{ok: true}` before
+  `catalog` is ever touched, because its shape comes from config, not the
+  catalog — a shapes-API outage must never be able to block it, which is the
+  load-bearing invariant of this whole feature. An earlier version enforced
+  "shaped label only" as a doc-comment precondition and relied on both call
+  sites gating it behind `isShapedLabel` to uphold it; that gate decides
+  whether to *fetch* the catalog (still needed — no point fetching one for a
+  bare label) but is no longer what keeps the function correct. A caller that
+  forgets the gate now gets `{ok: true}` instead of a silently wrong
+  `catalog-unavailable`.
 - `fetchCatalog(config, deps): Promise<Catalog>` — the one function that
   actually calls `usableShapes()` (the network fetch), converting a throw into
   `{ok: false}` instead of propagating it. This is the only impure half of
@@ -324,7 +331,9 @@ Plain `vitest` (`test/unit/shapes.test.ts`):
   `console.warn`s regardless of outcome
 - `validateShape` — admits a shaped label present in a healthy catalog,
   `unknown-shape` against a healthy catalog missing it, `catalog-unavailable`
-  against `{ok: false}`; never `console.warn`s regardless of outcome
+  against `{ok: false}`; admits the bare `config.runnerLabel` even against
+  `{ok: false}` (the totality this function's whole design rests on); never
+  `console.warn`s regardless of outcome
 - `fetchCatalog` — resolves `{ok: true, usable}` on a healthy fetch and
   `{ok: false}` (not a throw) when `listShapes` rejects; a single
   uncontended call still observes the cause warned (from inside
@@ -352,6 +361,13 @@ Plain `vitest` (`test/unit/shapes.test.ts`):
   `policy-skip` and never calls `listShapes` — proves policy runs before the
   catalog is ever touched (both `handleWebhook` and `runReconciler`, the
   latter in `test/integration/reconcile.test.ts`)
+- a tick with two shaped candidates, one policy-eligible and one blocked by
+  `repo-allowlist`, fetches the catalog exactly once and boots only the
+  eligible job's sandbox (`test/integration/reconcile.test.ts`) — the mixed
+  case the two single-outcome ticks above don't cover together
+- a job that is both policy-blocked *and* names an unknown shape returns
+  `policy-skip`, not `unknown-shape`, and never calls `listShapes` — the
+  permanent rejection wins and the shape is never even checked
 
 Live, after deploy: add a `runs-on: [createos-2vcpu-2gb]` job to `ghar-test.yml`
 and confirm the VM boots at 2 vCPU.

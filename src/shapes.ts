@@ -191,11 +191,16 @@ export type ShapeCheck =
  * Whether `label` names a shape actually offered by the live catalog. Pure
  * and silent, like `resolveRequestedLabel`.
  *
- * Precondition: `label` is a SHAPED label (not the bare `config.runnerLabel`)
- * — a bare label's shape comes from config and needs no catalog, so callers
- * must not fetch one or call this for it.
+ * Total, not partial: the bare `config.runnerLabel` short-circuits to
+ * `{ok: true}` before `catalog` is ever touched. Its shape comes from config,
+ * not the catalog, so a shapes-API outage must never be able to block it —
+ * that is the load-bearing invariant of this whole feature. Callers still
+ * gate the catalog *fetch* behind `isShapedLabel` (fetching one for a bare
+ * label would be wasted work either way), but a caller who forgets that gate
+ * now gets the correct answer instead of a silently wrong one.
  */
 export function validateShape(label: string, config: Config, catalog: Catalog): ShapeCheck {
+  if (label === config.runnerLabel) return { ok: true };
   if (!catalog.ok) return { ok: false, reason: "catalog-unavailable" };
   if (!catalog.usable.has(shapeForLabel(label, config))) {
     return { ok: false, reason: "unknown-shape" };

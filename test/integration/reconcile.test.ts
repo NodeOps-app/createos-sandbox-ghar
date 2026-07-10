@@ -82,9 +82,15 @@ function patchGitHub(
   over: {
     runners?: { name: string; status: string }[];
     jobs?: { id: number; status: string; labels: string[] }[];
+    // Multi-repo installations: which repos the app sees, and each repo's own
+    // queued jobs. Falls back to the single-repo `jobs` list above when
+    // omitted — every existing case in this file stays on that flat path.
+    repos?: string[];
+    jobsByRepo?: Record<string, { id: number; status: string; labels: string[] }[]>;
   } = {},
 ) {
   const runners = over.runners ?? [];
+  const repos = over.repos ?? ["nodeops-app/api"];
   const jobs = over.jobs ?? [];
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const req = new Request(input, init);
@@ -95,8 +101,11 @@ function patchGitHub(
     if (u.includes("generate-jitconfig")) return json({ encoded_jit_config: "BLOB" }, 201);
     if (req.method === "GET" && u.includes("/actions/runners")) return json({ runners });
     if (u.includes("/installation/repositories"))
-      return json({ repositories: [{ full_name: "nodeops-app/api" }] });
-    if (u.includes("/jobs")) return json({ jobs });
+      return json({ repositories: repos.map((full_name) => ({ full_name })) });
+    if (u.includes("/jobs")) {
+      const repo = repos.find((r) => u.includes(`/repos/${r}/`));
+      return json({ jobs: (repo && over.jobsByRepo?.[repo]) ?? jobs });
+    }
     if (u.includes("/actions/runs"))
       return json({ workflow_runs: [{ id: 9000, status: "in_progress" }] });
     return new Response("unmocked " + u, { status: 404 });
@@ -216,6 +225,40 @@ describe("runReconciler", () => {
 
     expect(listShapes).not.toHaveBeenCalled();
     expect(createSandbox).not.toHaveBeenCalled();
+    globalThis.fetch = realFetch;
+  });
+
+  // Fix 2: the previous two tests cover "all shaped candidates blocked" and
+  // "bare + shaped, both eligible" separately, but never a tick with both an
+  // eligible and a blocked shaped candidate together. The catalog must still
+  // be fetched exactly once (for the eligible one), and only the eligible
+  // job's createSandbox must fire — the blocked one must never reach it.
+  it("fetches the catalog once and boots only the eligible job when one of two shaped candidates is policy-blocked", async () => {
+    patchGitHub({
+      repos: ["nodeops-app/api", "nodeops-app/other"],
+      jobsByRepo: {
+        "nodeops-app/api": [{ id: 9601, status: "queued", labels: ["createos-2vcpu-2gb"] }],
+        "nodeops-app/other": [{ id: 9602, status: "queued", labels: ["createos-2vcpu-2gb"] }],
+      },
+    });
+    const listShapes = vi.fn().mockResolvedValue(shapeCatalog());
+    const createSandbox = vi.fn().mockResolvedValue({
+      id: "sb9601",
+      runCommand: vi.fn().mockResolvedValue({ result: { stdout: "started" }, exec_ms: 1 }),
+    });
+    const blockedEnv = {
+      ...env,
+      PROVISION_POLICY: "repo-allowlist",
+      REPO_ALLOWLIST: "nodeops-app/api",
+    };
+
+    await runReconciler(blockedEnv as any, {
+      makeClient: () => ({ listShapes, createSandbox, getSandbox: vi.fn() }),
+    });
+
+    expect(listShapes).toHaveBeenCalledTimes(1);
+    expect(createSandbox).toHaveBeenCalledTimes(1);
+    expect(createSandbox).toHaveBeenCalledWith(expect.objectContaining({ shape: "s-2vcpu-2gb" }));
     globalThis.fetch = realFetch;
   });
 });

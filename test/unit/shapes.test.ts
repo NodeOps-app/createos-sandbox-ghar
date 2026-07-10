@@ -254,6 +254,14 @@ describe("validateShape", () => {
     });
   });
 
+  // Fix 1: validateShape must be total. Both call sites gate it behind
+  // isShapedLabel, but a caller that forgets the gate must still get the
+  // right answer — a bare label's shape comes from config, so a shapes-API
+  // outage must never be able to block it.
+  it("admits the bare label even when the catalog is unavailable", () => {
+    expect(validateShape(config.runnerLabel, config, down)).toEqual({ ok: true });
+  });
+
   it("never logs — the caller owns the job id and does the logging", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     validateShape("createos-99vcpu-1tb", config, healthy);

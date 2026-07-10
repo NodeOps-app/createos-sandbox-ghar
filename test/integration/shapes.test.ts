@@ -332,4 +332,38 @@ describe("shape labels end-to-end", () => {
     expect(createSandbox).not.toHaveBeenCalled();
     expect(await co.activeCount()).toBe(before);
   });
+
+  // Fix 3: a job that is BOTH policy-blocked AND names an unknown shape must
+  // report policy-skip — the permanent rejection — not unknown-shape, which
+  // is irrelevant to a job that will never run regardless of its shape. It
+  // must also never reach the catalog to find out the shape is unknown:
+  // policy runs first.
+  it("a repo-allowlist-blocked job naming an unknown shape returns policy-skip, not unknown-shape", async () => {
+    const createSandbox = vi.fn();
+    const listShapes = vi.fn().mockResolvedValue(shapeCatalog());
+    const deps = {
+      makeClient: () => ({ createSandbox, listShapes, getSandbox: vi.fn() }),
+    };
+    const blockedEnv = {
+      ...env,
+      PROVISION_POLICY: "repo-allowlist",
+      REPO_ALLOWLIST: "someone/else",
+    };
+
+    const co = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
+    const before = await co.activeCount();
+
+    const body = workflowJobPayload({
+      action: "queued",
+      jobId: 705,
+      labels: ["createos-99vcpu-1tb"],
+    });
+    const res = await post(body, "dlv-policy-unknown-shape", deps, blockedEnv);
+
+    expect(res.status).toBe(202);
+    expect(await res.text()).toBe("policy-skip");
+    expect(listShapes).not.toHaveBeenCalled();
+    expect(createSandbox).not.toHaveBeenCalled();
+    expect(await co.activeCount()).toBe(before);
+  });
 });
