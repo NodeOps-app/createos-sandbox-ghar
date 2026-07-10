@@ -1,7 +1,7 @@
 # Shape-selectable runner labels
 
 **Date:** 2026-07-09
-**Status:** approved, not yet implemented
+**Status:** implemented on branch `feat/shape-labels`, not yet merged to `main`
 
 ## Problem
 
@@ -77,8 +77,21 @@ floor is one env var to retune; it is not a per-shape allowlist.
 
 ### Caching
 
-A module-level `{ fetchedAt, ids }` with a 5 minute TTL. Per-isolate, so a cold
-isolate pays one cheap unauthenticated request. No Cache API, no DO state.
+A module-level `{ fetchedAt, minRunnerMemMib, ids }` with a 5 minute TTL.
+Per-isolate; no Cache API, no DO state. The cache key includes
+`minRunnerMemMib`, not just the TTL: an operator retuning
+`MIN_RUNNER_MEM_MIB` mid-rollout is a miss even well inside the TTL window, so
+an isolate that survives the config change can never keep serving an
+admission decision computed under the old floor.
+
+A single module-level in-flight slot (keyed the same way, on
+`minRunnerMemMib`) coalesces concurrent cold-cache callers onto the one
+`listShapes()` request already in progress. The interesting property isn't
+that a single cold call is cheap — it's that N *concurrent* cold callers (a
+GitHub Actions matrix burst landing on a freshly-woken isolate) also pay for
+exactly one `listShapes()` call, not N. A rejected in-flight fetch clears the
+slot immediately, so the next caller re-attempts rather than inheriting the
+same rejection forever.
 
 The fetch is blocking network I/O and lives in the Worker, never the Durable
 Object — ADR-0002 requires the DO stay passive so it hibernates.
@@ -181,12 +194,12 @@ So:
 
 | Site | Change |
 | --- | --- |
-| `handler.ts:92` | `matchesLabel` → `createosLabels` (all actions) + `isUsableLabel` (queued only); carry the label into `PendingJob` |
-| `handler.ts:219` | the reconciler synthesizes `labels: [config.runnerLabel]`; it must use `job.label`, which `listQueuedJobs` now resolves |
-| `github/client.ts:50` | `generateJitConfig(runnerName, label)` — register the label the job requested, not `config.runnerLabel` |
-| `github/client.ts:142` | `listQueuedJobs(usable)` takes the catalog, fetched once per reconcile tick |
-| `github/client.ts:186` | `labels.includes(runnerLabel)` → `pickLabel(j.labels, usable, config)` |
-| `sandbox.ts` | `createSandbox({ shape })` takes `shapeForLabel(job.label, config)`, not `config.runnerShape` |
+| `handler.ts` (`handleWebhook`, all actions) | `matchesLabel` → `createosLabels(job.labels, config)`; the resolved label is carried into `PendingJob` |
+| `handler.ts` (`handleWebhook`, `queued` only) | `fetchCatalog` (called lazily — only when the label isn't bare) feeds `selectLabel(job.labels, config, catalog)`, which decides admission |
+| `handler.ts` (`runReconciler`) | `createosLabels` computed once per candidate job and reused; `fetchCatalog` fetched at most once per tick, and only if some candidate names a shaped label; `selectLabel` decides each candidate's admission against that one `Catalog` |
+| `github/client.ts` (`generateJitConfig`) | takes `(runnerName, label)` — registers the label the job actually requested, not `config.runnerLabel` |
+| `github/client.ts` (`listQueuedJobs`) | takes no arguments and applies no shape policy — dumb transport that returns every queued job's raw `labels`; admission is entirely the caller's job |
+| `sandbox.ts` (`createRunnerSandbox`) | `createSandbox({ shape })` takes `shapeForLabel(job.label, config)`, not `config.runnerShape` |
 
 `RUNNER_DISK_MIB` stays global at `10240` (the plan's disk cap) across every
 shape.
@@ -206,27 +219,44 @@ shape.
 
 ## Verification
 
-Plain `vitest`:
+Plain `vitest` (`test/unit/shapes.test.ts`):
 
-- `createosLabels` / `pickLabel` — bare label, shaped label, unknown label,
-  non-createos label, a shaped label naming a real-but-floored shape
-  (`createos-1vcpu-1gb` → `null`), incidental labels ignored
-  (`[self-hosted, linux, createos-2vcpu-2gb]`), two createos labels → `null` + warn
-- `shapeForLabel` — bare → `config.runnerShape`; `createos-8vcpu-16gb` → `s-8vcpu-16gb`
-- the floor — excludes on `mem_mib`, excludes on `cpu_quota_pct`
-- the cache — a second call inside the TTL does not refetch; a call past it does
-- cold-cache fetch failure — `isUsableLabel` is `true` for the bare label without
-  a fetch, `false` for a shaped label, and `console.warn` fired
+- `createosLabels` — keeps the bare label and shaped labels, drops
+  incidental labels (`self-hosted`, `linux`) and non-createos labels
+- `shapeForLabel` — bare → `config.runnerShape`; `createos-8vcpu-16gb` →
+  `s-8vcpu-16gb`; a label matching neither the bare label nor its prefix
+  throws (and warns) rather than slicing a garbage shape out of it
+- the floor — excludes on `mem_mib`, excludes on `cpu_quota_pct`, warns when
+  the fetched catalog is empty
+- the cache — serves inside the TTL, refetches past it, and treats a changed
+  `minRunnerMemMib` as a miss even well inside the TTL
+- the in-flight coalescing — 10 concurrent cold callers produce exactly one
+  `listShapes()` call; a rejected fetch clears the in-flight slot so the next
+  call re-attempts rather than inheriting the same rejection
+- `selectLabel` — every `LabelSelection` outcome (`not-ours`, `ambiguous`,
+  `unknown-shape`, `catalog-unavailable`, and both `ok: true` cases), plus
+  that it never `console.warn`s regardless of the outcome
+- `fetchCatalog` — resolves `{ok: true, usable}` on a healthy fetch and
+  `{ok: false}` (not a throw) when `listShapes` rejects
 
-`@cloudflare/vitest-pool-workers` (createos mocked at the `fetch` boundary):
+`@cloudflare/vitest-pool-workers` (createos mocked at the `fetch` boundary,
+`test/integration/shapes.test.ts` unless noted):
 
-- a shaped webhook reaches `createSandbox` with the matching shape, and
-  `generate-jitconfig` with the matching label
-- an unknown shaped label returns `202` and warns
-- a job queued at the concurrency cap dequeues with its label intact
-- a `completed` webhook for a shaped job tears the VM down with the shapes API
-  unreachable
-- the migration adds `label` to a pre-existing `jobs` table
+- a shaped webhook reaches `createSandbox` with the matching shape
+- an unknown shaped label returns `202 unknown-shape`, warns, and burns no
+  concurrency slot
+- a shaped label whose catalog fetch fails returns `202 catalog-unavailable`,
+  never reaches `createSandbox`, and burns no concurrency slot
+- a `completed` webhook tears down a shaped job's VM even with the shapes API
+  unreachable — teardown never consults the catalog
+- a shaped job promoted out of the pending queue after its shape has since
+  vanished from the platform fails safely (`markProvisionFailed`), never
+  falling back to a default-size VM
+- a job queued at the concurrency cap dequeues with its label intact, and a
+  pre-migration row (`label = NULL`) dequeues under the default
+  `RUNNER_LABEL` (`test/integration/concurrency.test.ts`)
+- the reconciler provisions a shaped-label job, fetching the shape catalog
+  once for the whole tick (`test/integration/reconcile.test.ts`)
 
 Live, after deploy: add a `runs-on: [createos-2vcpu-2gb]` job to `ghar-test.yml`
 and confirm the VM boots at 2 vCPU.

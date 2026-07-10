@@ -43,7 +43,7 @@ bun install
 Verify the toolchain is healthy:
 
 ```bash
-bun run lint && bun run typecheck && bun run test    # expect: 88 tests pass
+bun run lint && bun run typecheck && bun run test    # expect: everything passes
 ```
 
 > If installs misbehave, see the "Toolchain gotchas" section in `CLAUDE.md` (pinned versions are deliberate — do not upgrade `vitest`/`vitest-pool-workers`).
@@ -166,7 +166,7 @@ Use exactly one `createos*` label. Two (`[createos, createos-2vcpu-2gb]`) is ref
 ## Development
 
 ```bash
-bun run test        # vitest (unit + real-DO integration, 88 tests)
+bun run test        # vitest (unit + real-DO integration)
 bun run typecheck   # tsc --noEmit
 bun run lint        # oxlint
 bun run dev         # wrangler dev (needs .dev.vars)

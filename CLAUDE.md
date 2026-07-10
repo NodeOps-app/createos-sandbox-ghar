@@ -1,7 +1,5 @@
 # CLAUDE.md — createos-sandbox-ghar
 
-> Cost 
-
 Guidance for Claude Code (and human collaborators) working in this repo. Read this before editing.
 
 ## What this is
