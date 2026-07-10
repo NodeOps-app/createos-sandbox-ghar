@@ -6,9 +6,20 @@ const CACHE_TTL_MS = 300_000;
 
 let cache: { fetchedAt: number; minRunnerMemMib: number; ids: Set<string> } | null = null;
 
+/**
+ * The one fetch-in-progress, if any. Concurrent callers that arrive before it
+ * settles await this same promise instead of each issuing their own request —
+ * without it, a burst of N concurrent callers against a cold cache makes N
+ * `listShapes()` calls, not 1. Keyed on `minRunnerMemMib` like the settled
+ * cache so a floor change is still a miss; a single slot (not a map) because
+ * the catalog is one global thing, not a per-key resource.
+ */
+let inflight: { minRunnerMemMib: number; promise: Promise<Set<string>> } | null = null;
+
 /** Test-only: drops the module-level cache so cases don't leak into each other. */
 export function resetShapeCacheForTests(): void {
   cache = null;
+  inflight = null;
 }
 
 /**
@@ -66,6 +77,10 @@ export function shapeForLabel(label: string, config: Config): string {
  * under: a changed floor is treated as a miss, so an isolate that survives a
  * mid-rollout config change can't serve an admission decision computed under
  * the old floor for up to CACHE_TTL_MS.
+ *
+ * Concurrent callers that arrive before a cold-cache fetch resolves share the
+ * one in-flight request (see `inflight`) instead of each issuing their own —
+ * a GitHub Actions matrix burst delivers exactly that shape of traffic.
  */
 export async function usableShapes(
   config: Config,
@@ -80,24 +95,41 @@ export async function usableShapes(
     return cache.ids;
   }
 
-  const shapes: Shape[] = await makeSandboxClient(config, deps).listShapes();
-  if (shapes.length === 0) {
-    console.warn("shapes: catalog fetch returned an empty list; every shaped label will be denied");
+  if (inflight && inflight.minRunnerMemMib === config.minRunnerMemMib) {
+    return inflight.promise;
   }
-  const ids = new Set<string>();
-  const excluded: string[] = [];
-  for (const s of shapes) {
-    if (s.mem_mib >= config.minRunnerMemMib && s.cpu_quota_pct == null) ids.add(s.id);
-    else excluded.push(s.id);
+
+  const promise = (async () => {
+    const shapes: Shape[] = await makeSandboxClient(config, deps).listShapes();
+    if (shapes.length === 0) {
+      console.warn(
+        "shapes: catalog fetch returned an empty list; every shaped label will be denied",
+      );
+    }
+    const ids = new Set<string>();
+    const excluded: string[] = [];
+    for (const s of shapes) {
+      if (s.mem_mib >= config.minRunnerMemMib && s.cpu_quota_pct == null) ids.add(s.id);
+      else excluded.push(s.id);
+    }
+    if (excluded.length > 0) {
+      console.warn(
+        `shapes: ${excluded.length}/${shapes.length} below the runner floor ` +
+          `(mem_mib < ${config.minRunnerMemMib} or cpu_quota_pct set), not offered as labels: ${excluded.join(", ")}`,
+      );
+    }
+    cache = { fetchedAt: nowMs, minRunnerMemMib: config.minRunnerMemMib, ids };
+    return ids;
+  })();
+
+  inflight = { minRunnerMemMib: config.minRunnerMemMib, promise };
+  try {
+    return await promise;
+  } finally {
+    // Only clear if we still own the slot — a differing-floor request that
+    // raced in after us and replaced it must not have its own entry evicted.
+    if (inflight?.promise === promise) inflight = null;
   }
-  if (excluded.length > 0) {
-    console.warn(
-      `shapes: ${excluded.length}/${shapes.length} below the runner floor ` +
-        `(mem_mib < ${config.minRunnerMemMib} or cpu_quota_pct set), not offered as labels: ${excluded.join(", ")}`,
-    );
-  }
-  cache = { fetchedAt: nowMs, minRunnerMemMib: config.minRunnerMemMib, ids };
-  return ids;
 }
 
 /**

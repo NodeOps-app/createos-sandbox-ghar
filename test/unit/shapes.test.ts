@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { Shape } from "@nodeops-createos/sandbox";
 import { loadConfig } from "../../src/config";
 import {
   createosLabels,
@@ -96,6 +97,44 @@ describe("usableShapes", () => {
     await usableShapes(config, depsWith(listShapes), 1_000_000 + 299_999);
     expect(listShapes).toHaveBeenCalledTimes(1);
     await usableShapes(config, depsWith(listShapes), 1_000_000 + 300_000);
+    expect(listShapes).toHaveBeenCalledTimes(2);
+  });
+
+  // A1: concurrent callers arriving before a cold-cache fetch resolves must
+  // coalesce onto the one in-flight request, not each issue their own.
+  it("coalesces concurrent misses into a single listShapes call", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const listShapes = vi.fn(
+      () => new Promise<Shape[]>((resolve) => setTimeout(() => resolve(CATALOG), 10)),
+    );
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => usableShapes(config, depsWith(listShapes))),
+    );
+    expect(listShapes).toHaveBeenCalledTimes(1);
+    const expected = [...results[0]!];
+    expected.sort();
+    for (const ids of results) {
+      const sorted = [...ids];
+      sorted.sort();
+      expect(sorted).toEqual(expected);
+    }
+  });
+
+  // A1: a rejected fetch must not poison the in-flight slot — the next call
+  // has to re-attempt, not inherit the same rejected promise forever.
+  it("clears the in-flight entry on rejection so a later call re-attempts", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let calls = 0;
+    const listShapes = vi.fn(async () => {
+      calls++;
+      if (calls === 1) throw new Error("503");
+      return CATALOG;
+    });
+
+    await expect(usableShapes(config, depsWith(listShapes))).rejects.toThrow("503");
+    const ids = await usableShapes(config, depsWith(listShapes));
+
+    expect(ids.size).toBeGreaterThan(0);
     expect(listShapes).toHaveBeenCalledTimes(2);
   });
 
