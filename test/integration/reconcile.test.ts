@@ -2,6 +2,7 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { runReconciler } from "../../src/handler";
 import { resetShapeCacheForTests } from "../../src/shapes";
+import { shapeCatalog } from "../helpers/mocks";
 
 // The shapes.ts catalog cache is module-level and outlives any single test —
 // without this, whichever suite runs first (bare-label fallback here vs. a
@@ -116,7 +117,7 @@ describe("runReconciler", () => {
     await runReconciler(env as any, {
       makeClient: () => ({
         createSandbox,
-        listShapes: vi.fn().mockResolvedValue([]),
+        listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
         getSandbox: vi.fn(),
       }),
     });
@@ -134,7 +135,7 @@ describe("runReconciler", () => {
     await runReconciler(env as any, {
       makeClient: () => ({
         createSandbox,
-        listShapes: vi.fn().mockResolvedValue([]),
+        listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
         getSandbox: vi.fn(),
       }),
     });

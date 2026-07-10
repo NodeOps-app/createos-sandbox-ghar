@@ -1,12 +1,7 @@
 import { CreateosSandboxNotFoundError } from "@nodeops-createos/sandbox";
 import type { Config, PendingJob } from "./types";
 import type { GitHubClient } from "./github/client";
-import {
-  makeSandboxClient,
-  type CreateosClient,
-  type SandboxDeps,
-  type SandboxHandle,
-} from "./createos";
+import { makeSandboxClient, type SandboxDeps, type SandboxHandle } from "./createos";
 import { shapeForLabel } from "./shapes";
 
 // Re-exported so existing consumers (handler.ts, index.ts, tests) keep importing
@@ -47,7 +42,7 @@ export async function createRunnerSandbox(
   config: Config,
   github: GitHubClient,
   job: PendingJob,
-  deps: SandboxDeps<Pick<CreateosClient, "createSandbox">> = {},
+  deps: SandboxDeps = {},
 ): Promise<{ sandboxId: string; runnerName: string; sandbox: SandboxHandle }> {
   const attemptId =
     deps.attemptId ??
@@ -105,7 +100,7 @@ export async function launchRunner(sandbox: SandboxHandle): Promise<void> {
 export async function teardownSandbox(
   config: Config,
   sandboxId: string,
-  deps: SandboxDeps<Pick<CreateosClient, "getSandbox">> = {},
+  deps: SandboxDeps = {},
 ): Promise<void> {
   const c = makeSandboxClient(config, deps);
   try {

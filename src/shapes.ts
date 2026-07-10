@@ -1,6 +1,6 @@
 import type { Shape } from "@nodeops-createos/sandbox";
 import type { Config } from "./types";
-import { makeSandboxClient, type CreateosClient, type SandboxDeps } from "./createos";
+import { makeSandboxClient, type SandboxDeps } from "./createos";
 
 const CACHE_TTL_MS = 300_000;
 
@@ -84,7 +84,7 @@ export function shapeForLabel(label: string, config: Config): string {
  */
 export async function usableShapes(
   config: Config,
-  deps: SandboxDeps<Pick<CreateosClient, "listShapes">>,
+  deps: SandboxDeps,
   nowMs: number = Date.now(),
 ): Promise<Set<string>> {
   if (
@@ -142,7 +142,7 @@ export async function usableShapes(
 export async function isUsableLabel(
   label: string,
   config: Config,
-  deps: SandboxDeps<Pick<CreateosClient, "listShapes">>,
+  deps: SandboxDeps,
 ): Promise<boolean> {
   if (label === config.runnerLabel) return true;
   let usable: Set<string>;

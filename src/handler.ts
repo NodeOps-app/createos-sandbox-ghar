@@ -5,13 +5,8 @@ import { createosLabels, isUsableLabel, usableShapes } from "./shapes";
 import { shouldProvision } from "./policy";
 import { GitHubClient } from "./github/client";
 import { createRunnerSandbox, launchRunner, teardownSandbox, type SandboxDeps } from "./sandbox";
-import type { CreateosClient } from "./createos";
 import { notify } from "./notify";
 import type { PendingJob, Config } from "./types";
-
-/** What provisionAndRecord/failProvision/destroyAndConfirm need: booting a new
- * VM (createSandbox) and tearing one down on failure/cleanup (getSandbox). */
-type ProvisionDeps = SandboxDeps<Pick<CreateosClient, "createSandbox" | "getSandbox">>;
 
 function coordinator(env: Bindings) {
   return env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
@@ -27,7 +22,7 @@ function coordinator(env: Bindings) {
 async function provisionAndRecord(
   env: Bindings,
   job: PendingJob,
-  deps: ProvisionDeps = {},
+  deps: SandboxDeps = {},
 ): Promise<void> {
   const config = loadConfig(env as Record<string, unknown>);
   const github = new GitHubClient(config);
@@ -68,7 +63,7 @@ async function failProvision(
   env: Bindings,
   config: Config,
   job: PendingJob,
-  deps: ProvisionDeps,
+  deps: SandboxDeps,
   err: unknown,
 ): Promise<void> {
   console.error(`provision failed job=${job.jobId}: ${String(err)}`);
@@ -157,7 +152,7 @@ async function destroyAndConfirm(
   env: Bindings,
   config: Config,
   task: { jobId: number; sandboxId: string },
-  deps: SandboxDeps<Pick<CreateosClient, "getSandbox">>,
+  deps: SandboxDeps,
 ): Promise<void> {
   try {
     await teardownSandbox(config, task.sandboxId, deps);
@@ -171,7 +166,7 @@ async function destroyAndConfirm(
   }
 }
 
-export async function runReaper(env: Bindings, deps: ProvisionDeps = {}): Promise<void> {
+export async function runReaper(env: Bindings, deps: SandboxDeps = {}): Promise<void> {
   const config = loadConfig(env as Record<string, unknown>);
   const co = coordinator(env);
   const { toDestroy, nextPending } = await co.sweep(Date.now(), config.reaperMaxAgeMs);

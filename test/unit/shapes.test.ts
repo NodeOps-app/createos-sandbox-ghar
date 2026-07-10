@@ -33,7 +33,9 @@ const CATALOG = [
 ];
 
 function depsWith(listShapes: () => Promise<Shape[]>) {
-  return { makeClient: () => ({ listShapes }) };
+  // CreateosClient is a flat interface (all 3 methods); createSandbox/getSandbox
+  // are unused by usableShapes/isUsableLabel but must be present to typecheck.
+  return { makeClient: () => ({ createSandbox: vi.fn(), getSandbox: vi.fn(), listShapes }) };
 }
 
 beforeEach(() => {

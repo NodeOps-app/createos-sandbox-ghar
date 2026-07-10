@@ -26,10 +26,8 @@ interface DestroyableSandbox {
 
 /**
  * The subset of CreateosSandboxClient this codebase actually calls. Narrower
- * than the SDK's client on purpose: `SandboxDeps<C>` lets each call site
- * require only the capability it uses (e.g. shapes.ts only ever calls
- * `listShapes`), so a test stub missing a method that path DOES call is a
- * compile error instead of a runtime "x is not a function".
+ * than the SDK's client on purpose: a test stub only needs these three
+ * methods, not the SDK's full surface (templates/networks/disks/...).
  */
 export interface CreateosClient {
   createSandbox(
@@ -40,9 +38,9 @@ export interface CreateosClient {
   listShapes(options?: RequestOptions): Promise<Shape[]>;
 }
 
-export interface SandboxDeps<C extends Partial<CreateosClient> = CreateosClient> {
+export interface SandboxDeps {
   /** Injection seam for tests. Defaults to a real client from config. */
-  makeClient?: (config: Config) => C;
+  makeClient?: (config: Config) => CreateosClient;
   /** Injection seam for tests. 2-char token discriminating provision attempts. */
   attemptId?: () => string;
 }
@@ -52,18 +50,13 @@ export interface SandboxDeps<C extends Partial<CreateosClient> = CreateosClient>
  * sandbox.ts so shapes.ts can build a client without importing sandbox.ts,
  * which imports shapes.ts for shapeForLabel — a cycle otherwise.
  */
-export function makeSandboxClient<C extends Partial<CreateosClient> = CreateosClient>(
-  config: Config,
-  deps: SandboxDeps<C>,
-): C {
+export function makeSandboxClient(config: Config, deps: SandboxDeps): CreateosClient {
   if (deps.makeClient) return deps.makeClient(config);
-  // The real client structurally satisfies CreateosClient (and thus any
-  // narrower capability C a caller asks for) — asserted once, here, at the
-  // single boundary between the SDK's concrete class and the generic C.
+  // The real client structurally satisfies CreateosClient — no cast needed.
   return new CreateosSandboxClient({
     baseUrl: config.createosBaseUrl,
     apiKey: config.createosApiKey,
     // Workers rejects an unbound fetch called off the SDK's config object.
     fetch: globalThis.fetch.bind(globalThis),
-  }) as unknown as C;
+  });
 }

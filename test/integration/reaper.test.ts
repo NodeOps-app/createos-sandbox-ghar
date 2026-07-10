@@ -64,9 +64,9 @@ describe("reaper", () => {
     const getSandbox = vi.fn().mockResolvedValue({ destroy });
     // runReaper unconditionally threads deps through provisionAndRecord too,
     // for any pending job a freed slot promotes — none here, so this never
-    // fires, but the type still requires createSandbox present.
+    // fires, but the type still requires createSandbox/listShapes present.
     const createSandbox = vi.fn();
-    const deps = { makeClient: () => ({ getSandbox, createSandbox }) };
+    const deps = { makeClient: () => ({ getSandbox, createSandbox, listShapes: vi.fn() }) };
 
     await expect(runReaper(env as any, deps)).resolves.toBeUndefined();
     expect(destroy).toHaveBeenCalled();
