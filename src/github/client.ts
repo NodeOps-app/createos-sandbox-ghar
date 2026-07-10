@@ -149,9 +149,9 @@ export class GitHubClient {
    *
    * Dumb transport: returns every queued job with its raw labels, unfiltered.
    * Which job is ours and which shape (if any) it names is a policy decision
-   * (`selectLabel` in shapes.ts) that belongs to the caller, not this client —
-   * deciding it here would also steal the job id out of any warning the
-   * caller wants to log about it.
+   * (`resolveRequestedLabel`/`validateShape` in shapes.ts) that belongs to the
+   * caller, not this client — deciding it here would also steal the job id
+   * out of any warning the caller wants to log about it.
    */
   async listQueuedJobs(): Promise<QueuedJob[]> {
     const out: QueuedJob[] = [];

@@ -1,7 +1,14 @@
 import type { Bindings } from "./index";
 import { loadConfig } from "./config";
 import { verifySignature, parseWorkflowJob } from "./webhook";
-import { createosLabels, selectLabel, fetchCatalog, shapeForLabel, type Catalog } from "./shapes";
+import {
+  resolveRequestedLabel,
+  isShapedLabel,
+  validateShape,
+  fetchCatalog,
+  shapeForLabel,
+  type Catalog,
+} from "./shapes";
 import { shouldProvision } from "./policy";
 import { GitHubClient } from "./github/client";
 import { createRunnerSandbox, launchRunner, teardownSandbox, type SandboxDeps } from "./sandbox";
@@ -94,13 +101,15 @@ export async function handleWebhook(
   // "Is this ours" is a pure label question for every action — the catalog is
   // only needed to admit a `queued` job below. Gating teardown on the shapes API
   // would leak every shaped VM during a shapes outage.
-  const ours = createosLabels(job.labels, config);
-  if (ours.length === 0) return new Response("no-label", { status: 202 });
-  if (ours.length > 1) {
-    console.warn(`job ${job.jobId} names ${ours.length} createos labels (${ours.join(", ")})`);
+  const requested = resolveRequestedLabel(job.labels, config);
+  if (requested.kind === "none") return new Response("no-label", { status: 202 });
+  if (requested.kind === "ambiguous") {
+    console.warn(
+      `job ${job.jobId} names ${requested.labels.length} createos labels (${requested.labels.join(", ")})`,
+    );
     return new Response("ambiguous-label", { status: 202 });
   }
-  const label = ours[0]!;
+  const label = requested.label;
 
   const co = coordinator(env);
   const pending: PendingJob = {
@@ -111,23 +120,22 @@ export async function handleWebhook(
   };
 
   if (job.action === "queued") {
-    // A bare label needs no catalog: selectLabel short-circuits before
-    // consulting it. Fetching one anyway would mean a shapes-API outage could
-    // stop bare-label jobs, which is exactly what must never happen.
-    const catalog: Catalog =
-      label === config.runnerLabel
-        ? { ok: true, usable: new Set() }
-        : await fetchCatalog(config, deps);
-    const sel = selectLabel(job.labels, config, catalog);
-    if (!sel.ok) {
-      if (sel.reason === "unknown-shape") {
-        console.warn(
-          `job ${job.jobId}: label "${label}" names shape "${shapeForLabel(label, config)}", which is not offered`,
-        );
-      } else {
-        console.warn(`job ${job.jobId}: ${sel.reason}`);
+    // A bare label needs no catalog: only a shaped label consults it.
+    // Fetching one anyway would mean a shapes-API outage could stop
+    // bare-label jobs, which is exactly what must never happen.
+    if (isShapedLabel(label, config)) {
+      const catalog: Catalog = await fetchCatalog(config, deps);
+      const check = validateShape(label, config, catalog);
+      if (!check.ok) {
+        if (check.reason === "unknown-shape") {
+          console.warn(
+            `job ${job.jobId}: label "${label}" names shape "${shapeForLabel(label, config)}", which is not offered`,
+          );
+        } else {
+          console.warn(`job ${job.jobId}: ${check.reason}`);
+        }
+        return new Response(check.reason, { status: 202 });
       }
-      return new Response(sel.reason, { status: 202 });
     }
     const github = new GitHubClient(config);
     const eligible = await shouldProvision(config, job, () =>
@@ -237,44 +245,42 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
     return;
   }
 
-  // Pure prefilter — no network. Each candidate's createos labels are computed
-  // once here and carried alongside the job, reused by the needsCatalog check
-  // right below (createosLabels was otherwise recomputed per `.filter` call
-  // and again per `.some` call, on top of the one selectLabel does per job
-  // in the loop further down). Jobs that aren't ours are skipped silently:
-  // "not ours" isn't a bound binding, it's just someone else's job.
-  const candidates = queued
-    .map((j) => ({ job: j, ours: createosLabels(j.labels, config) }))
-    .filter(({ ours }) => ours.length > 0);
-
-  // Only pay for the catalog if some candidate actually names a shaped label
-  // (exactly one createos label, and it isn't the bare one) — a tick where
-  // every candidate is bare-label must never touch the shapes API.
-  const needsCatalog = candidates.some(
-    ({ ours }) => ours.length === 1 && ours[0] !== config.runnerLabel,
-  );
-  // `{ ok: true, usable: new Set() }` here is safe ONLY because selectLabel
-  // short-circuits the bare label before ever touching `usable` — every
-  // candidate that reaches selectLabel in this branch is bare by construction
-  // (needsCatalog is false). Do not "fix" this into a real fetch without
-  // checking why needsCatalog exists.
-  const catalog: Catalog = needsCatalog
-    ? await fetchCatalog(config, deps)
-    : { ok: true, usable: new Set() };
-
-  const toProvision: PendingJob[] = [];
-  for (const { job: j } of candidates) {
-    const sel = selectLabel(j.labels, config, catalog);
-    if (!sel.ok) {
-      console.warn(`reconcile: job ${j.jobId} (${j.repoFullName}) skipped: ${sel.reason}`);
+  // Pure prefilter — no network. Each candidate's requested label is resolved
+  // once here and carried alongside the job. Jobs that aren't ours are skipped
+  // silently: "not ours" isn't a bound binding, it's just someone else's job.
+  const candidates: { job: QueuedJob; label: string }[] = [];
+  for (const j of queued) {
+    const requested = resolveRequestedLabel(j.labels, config);
+    if (requested.kind === "none") continue;
+    if (requested.kind === "ambiguous") {
+      console.warn(
+        `reconcile: job ${j.jobId} (${j.repoFullName}) skipped: ambiguous (${requested.labels.join(", ")})`,
+      );
       continue;
     }
-    const job: PendingJob = {
-      jobId: j.jobId,
-      runId: j.runId,
-      repoFullName: j.repoFullName,
-      label: sel.label,
-    };
+    candidates.push({ job: j, label: requested.label });
+  }
+
+  // Only pay for the catalog if some candidate actually names a shaped label
+  // — a tick where every candidate is bare-label must never touch the shapes
+  // API. No synthetic catalog when it's skipped: `validateShape` is only ever
+  // called below when `isShapedLabel` is true, and `needsCatalog` is exactly
+  // that condition across every candidate, so `catalog` is always defined by
+  // the time it's needed.
+  const needsCatalog = candidates.some(({ label }) => isShapedLabel(label, config));
+  let catalog: Catalog | undefined;
+  if (needsCatalog) catalog = await fetchCatalog(config, deps);
+
+  const toProvision: PendingJob[] = [];
+  for (const { job: j, label } of candidates) {
+    if (isShapedLabel(label, config)) {
+      const check = validateShape(label, config, catalog!);
+      if (!check.ok) {
+        console.warn(`reconcile: job ${j.jobId} (${j.repoFullName}) skipped: ${check.reason}`);
+        continue;
+      }
+    }
+    const job: PendingJob = { jobId: j.jobId, runId: j.runId, repoFullName: j.repoFullName, label };
     const eligible = await shouldProvision(
       config,
       {

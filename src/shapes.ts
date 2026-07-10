@@ -142,50 +142,62 @@ export async function usableShapes(
 export type Catalog = { ok: true; usable: Set<string> } | { ok: false };
 
 /**
- * The outcome of admitting one job's `runs-on` labels: the single createos
- * label it may boot under, or the reason it can't. Four distinct reasons
- * rather than one boolean because a caller building an alert or a log line
- * needs to say *which* of these happened — "not ours" and "the shapes API is
- * down" are not the same 202.
+ * Which createos label, if any, a job's `runs-on` requests. Pure and silent —
+ * it never logs, because it doesn't know the job id; the caller does, and the
+ * caller is the one who should name it in a warning.
  */
-export type LabelSelection =
-  | { ok: true; label: string }
-  | { ok: false; reason: "not-ours" | "ambiguous" | "unknown-shape" | "catalog-unavailable" };
+export type RequestedLabel =
+  | { kind: "none" }
+  | { kind: "ambiguous"; labels: string[] }
+  | { kind: "one"; label: string };
+
+export function resolveRequestedLabel(labels: string[], config: Config): RequestedLabel {
+  const ours = createosLabels(labels, config);
+  if (ours.length === 0) return { kind: "none" };
+  if (ours.length > 1) return { kind: "ambiguous", labels: ours };
+  return { kind: "one", label: ours[0]! };
+}
 
 /**
- * Admission decision for a job's `runs-on` labels. Pure and silent — it never
- * logs, because it doesn't know the job id; the caller does, and the caller is
- * the one who should name it in a warning.
- *
- * The bare label is checked and returned *before* the catalog is even looked
- * at: its shape comes from config, so a shapes-API outage (or a caller that
- * skipped fetching one because it wasn't needed) can never stop the jobs that
- * work today. Only a shaped label consults `catalog`.
+ * Whether `label` names a shape rather than the bare `config.runnerLabel`. A
+ * bare label's shape comes from config and needs no catalog; only a shaped
+ * label is worth fetching one for.
  */
-export function selectLabel(labels: string[], config: Config, catalog: Catalog): LabelSelection {
-  const ours = createosLabels(labels, config);
-  // Unreachable from both production call sites today: the webhook handler
-  // and the reconciler each pre-filter on createosLabels(...).length === 0
-  // before ever calling selectLabel. The branch stays so selectLabel is total
-  // over its input — a future or third caller that skips that pre-filter
-  // still gets a typed "not-ours" answer instead of silently falling through
-  // to a wrong reason.
-  if (ours.length === 0) return { ok: false, reason: "not-ours" };
-  if (ours.length > 1) return { ok: false, reason: "ambiguous" };
-  const label = ours[0]!;
-  if (label === config.runnerLabel) return { ok: true, label };
+export function isShapedLabel(label: string, config: Config): boolean {
+  return label !== config.runnerLabel;
+}
+
+/**
+ * The outcome of checking a SHAPED label against the live catalog. Two
+ * distinct reasons rather than one boolean because a caller building an alert
+ * or a log line needs to say *which* of these happened — an unknown shape and
+ * an unreachable shapes API are not the same 202.
+ */
+export type ShapeCheck =
+  | { ok: true }
+  | { ok: false; reason: "unknown-shape" | "catalog-unavailable" };
+
+/**
+ * Whether `label` names a shape actually offered by the live catalog. Pure
+ * and silent, like `resolveRequestedLabel`.
+ *
+ * Precondition: `label` is a SHAPED label (not the bare `config.runnerLabel`)
+ * — a bare label's shape comes from config and needs no catalog, so callers
+ * must not fetch one or call this for it.
+ */
+export function validateShape(label: string, config: Config, catalog: Catalog): ShapeCheck {
   if (!catalog.ok) return { ok: false, reason: "catalog-unavailable" };
   if (!catalog.usable.has(shapeForLabel(label, config))) {
     return { ok: false, reason: "unknown-shape" };
   }
-  return { ok: true, label };
+  return { ok: true };
 }
 
 /**
- * Fetches the live shape catalog for `selectLabel`, converting a failed fetch
- * into `{ok: false}` rather than throwing — the caller (webhook handler,
- * reconciler) decides what an unavailable catalog means for the job in front
- * of it (202 + retry via the cron reconciler), not this function.
+ * Fetches the live shape catalog for `validateShape`, converting a failed
+ * fetch into `{ok: false}` rather than throwing — the caller (webhook
+ * handler, reconciler) decides what an unavailable catalog means for the job
+ * in front of it (202 + retry via the cron reconciler), not this function.
  *
  * This is the only place the underlying failure is visible: callers see
  * `{ok: false}` and log a job id against the `catalog-unavailable` reason, but

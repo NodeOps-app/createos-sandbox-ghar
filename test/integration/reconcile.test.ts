@@ -112,8 +112,9 @@ describe("runReconciler", () => {
     });
     const ctx = createExecutionContext();
     // Every candidate this tick is the bare `createos` label, so runReconciler
-    // must never fetch the shape catalog for it (selectLabel short-circuits
-    // the bare label before touching it) — the assertion below is the proof.
+    // must never fetch the shape catalog for it (isShapedLabel is false for
+    // the bare label, so needsCatalog never trips) — the assertion below is
+    // the proof.
     // listShapes/getSandbox are still supplied so the makeClient factory
     // typechecks against CreateosClient's full surface, even though neither is
     // called at runtime here.

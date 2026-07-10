@@ -5,7 +5,8 @@ import {
   createosLabels,
   shapeForLabel,
   usableShapes,
-  selectLabel,
+  resolveRequestedLabel,
+  validateShape,
   fetchCatalog,
   resetShapeCacheForTests,
   type Catalog,
@@ -169,60 +170,64 @@ describe("usableShapes", () => {
   });
 });
 
-describe("selectLabel", () => {
-  const usable = new Set(["s-2vcpu-2gb", "s-4vcpu-4gb"]);
-  const healthy: Catalog = { ok: true, usable };
-  const down: Catalog = { ok: false };
+describe("resolveRequestedLabel", () => {
+  it("returns none for a job naming no createos label", () => {
+    expect(resolveRequestedLabel(["ubuntu-latest"], config)).toEqual({ kind: "none" });
+  });
 
-  it("returns not-ours for a job naming no createos label", () => {
-    expect(selectLabel(["ubuntu-latest"], config, healthy)).toEqual({
-      ok: false,
-      reason: "not-ours",
+  it("returns ambiguous for two createos labels", () => {
+    expect(resolveRequestedLabel(["createos", "createos-2vcpu-2gb"], config)).toEqual({
+      kind: "ambiguous",
+      labels: ["createos", "createos-2vcpu-2gb"],
     });
   });
 
-  it("returns ambiguous for two createos labels, catalog healthy or not", () => {
-    expect(selectLabel(["createos", "createos-2vcpu-2gb"], config, healthy)).toEqual({
-      ok: false,
-      reason: "ambiguous",
-    });
-    expect(selectLabel(["createos", "createos-2vcpu-2gb"], config, down)).toEqual({
-      ok: false,
-      reason: "ambiguous",
-    });
+  it("returns one for the bare label", () => {
+    expect(resolveRequestedLabel(["createos"], config)).toEqual({ kind: "one", label: "createos" });
   });
 
-  it("returns unknown-shape for a shaped label absent from a healthy catalog", () => {
-    expect(selectLabel(["createos-99vcpu-1tb"], config, healthy)).toEqual({
-      ok: false,
-      reason: "unknown-shape",
-    });
-  });
-
-  it("returns catalog-unavailable for a shaped label when the catalog could not be fetched", () => {
-    expect(selectLabel(["createos-2vcpu-2gb"], config, down)).toEqual({
-      ok: false,
-      reason: "catalog-unavailable",
-    });
-  });
-
-  // Load-bearing: a shapes outage must never stop the jobs that work today.
-  it("admits the bare label even when the catalog is unavailable", () => {
-    expect(selectLabel(["createos"], config, down)).toEqual({ ok: true, label: "createos" });
-  });
-
-  it("admits a shaped label present in a healthy catalog, ignoring incidental labels", () => {
-    expect(selectLabel(["self-hosted", "createos-2vcpu-2gb"], config, healthy)).toEqual({
-      ok: true,
+  it("returns one for a shaped label, ignoring incidental labels", () => {
+    expect(resolveRequestedLabel(["self-hosted", "linux", "createos-2vcpu-2gb"], config)).toEqual({
+      kind: "one",
       label: "createos-2vcpu-2gb",
     });
   });
 
   it("never logs — the caller owns the job id and does the logging", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    selectLabel(["createos", "createos-2vcpu-2gb"], config, healthy);
-    selectLabel(["createos-99vcpu-1tb"], config, healthy);
-    selectLabel(["createos-2vcpu-2gb"], config, down);
+    resolveRequestedLabel(["createos", "createos-2vcpu-2gb"], config);
+    resolveRequestedLabel(["ubuntu-latest"], config);
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe("validateShape", () => {
+  const usable = new Set(["s-2vcpu-2gb", "s-4vcpu-4gb"]);
+  const healthy: Catalog = { ok: true, usable };
+  const down: Catalog = { ok: false };
+
+  it("admits a shaped label present in a healthy catalog", () => {
+    expect(validateShape("createos-2vcpu-2gb", config, healthy)).toEqual({ ok: true });
+  });
+
+  it("returns unknown-shape for a shaped label absent from a healthy catalog", () => {
+    expect(validateShape("createos-99vcpu-1tb", config, healthy)).toEqual({
+      ok: false,
+      reason: "unknown-shape",
+    });
+  });
+
+  it("returns catalog-unavailable when the catalog could not be fetched", () => {
+    expect(validateShape("createos-2vcpu-2gb", config, down)).toEqual({
+      ok: false,
+      reason: "catalog-unavailable",
+    });
+  });
+
+  it("never logs — the caller owns the job id and does the logging", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    validateShape("createos-99vcpu-1tb", config, healthy);
+    validateShape("createos-2vcpu-2gb", config, down);
     expect(warn).not.toHaveBeenCalled();
   });
 });

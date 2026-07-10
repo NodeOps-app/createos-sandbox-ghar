@@ -117,15 +117,15 @@ outage.
 
 ### Label selection
 
-`matchesLabel` is replaced by a pure decision function plus one fetch, kept
+`matchesLabel` is replaced by two pure decision functions plus one fetch, kept
 strictly apart so the catalog is only ever touched where — and when — it is
 actually needed. Earlier drafts of this feature put the fetch and the
 decision in one function (`isUsableLabel`) and let `GitHubClient.listQueuedJobs`
 take the catalog and call a `pickLabel` internally — a transport client
 making an admission decision, which meant the reconciler had to fetch the
 catalog before it even knew whether any queued job needed one, and a job id
-was never available to name in a warning. `selectLabel`/`fetchCatalog` fix
-that:
+was never available to name in a warning. `resolveRequestedLabel` /
+`validateShape` / `fetchCatalog` fix that:
 
 - `createosLabels(labels, config): string[]` — pure. The createos labels in a
   job's `runs-on`: the bare `config.runnerLabel`, plus anything prefixed
@@ -134,22 +134,31 @@ that:
   those implicitly, and this ignores them.
 - `shapeForLabel(label, config): string` — pure. Bare label → `config.runnerShape`;
   otherwise `s-` + the label's suffix.
+- `type RequestedLabel = { kind: "none" } | { kind: "ambiguous"; labels:
+  string[] } | { kind: "one"; label: string }` — which createos label, if any,
+  a job's `runs-on` requests.
+- `resolveRequestedLabel(labels, config): RequestedLabel` — pure **and
+  silent**, built on `createosLabels`. It never `console.warn`s: it doesn't
+  have the job id, and the caller does, so the caller is the one who logs.
+- `isShapedLabel(label, config): boolean` — pure. `label !==
+  config.runnerLabel`. A small named predicate so call sites read as "if this
+  needs the catalog" rather than repeating the bare-label comparison inline.
 - `type Catalog = { ok: true; usable: Set<string> } | { ok: false }` — the
   shape catalog, or the fact it couldn't be fetched. `{ok: false}` is distinct
   from an empty `Set` on purpose: an outage and an authoritative empty catalog
   mean different things and must not be conflated.
-- `type LabelSelection = { ok: true; label: string } | { ok: false; reason:
-  "not-ours" | "ambiguous" | "unknown-shape" | "catalog-unavailable" }` — the
-  outcome of admitting one job's labels. Four reasons, not one boolean,
-  because "not ours" and "the shapes API is down" are not the same 202 and a
-  caller building a log line or a response body needs to say which happened.
-- `selectLabel(labels, config, catalog): LabelSelection` — pure **and
-  silent**. It never `console.warn`s: it doesn't have the job id, and the
-  caller does, so the caller is the one who logs. It resolves the bare label
-  and returns *before* even looking at `catalog` — the bare label's shape
-  comes from config, so a shapes-API outage (or a caller that skipped the
-  fetch because nothing needed it) can never stop the jobs that work today.
-  Only a shaped label consults `catalog`.
+- `type ShapeCheck = { ok: true } | { ok: false; reason: "unknown-shape" |
+  "catalog-unavailable" }` — the outcome of checking a *shaped* label against
+  the catalog. Two reasons, not one boolean, because "the shape doesn't exist"
+  and "the shapes API is down" are not the same 202 and a caller building a
+  log line or a response body needs to say which happened. There is no
+  `"not-ours"` or `"ambiguous"` reason here — `resolveRequestedLabel` already
+  disposed of both before a caller ever reaches this function.
+- `validateShape(label, config, catalog): ShapeCheck` — pure **and silent**,
+  like `resolveRequestedLabel`. Precondition: `label` is a SHAPED label (not
+  the bare `config.runnerLabel`) — callers must check `isShapedLabel` (and
+  fetch a `Catalog`) before calling this; a bare label's shape comes from
+  config and needs neither.
 - `fetchCatalog(config, deps): Promise<Catalog>` — the one function that
   actually calls `usableShapes()` (the network fetch), converting a throw into
   `{ok: false}` instead of propagating it. This is the only impure half of
@@ -158,12 +167,34 @@ that:
   this, so a tick with no shaped jobs, or a caller that only ever sees bare
   labels, never pays for (or is blocked by) a fetch nothing needs.
 
+An earlier version of this split had one function, `selectLabel(labels,
+config, catalog): LabelSelection`, that took the raw labels *and* a
+precomputed `Catalog` and did both the none/ambiguous/bare check and the
+shape lookup in one call. That forced every caller to precompute
+`createosLabels` up front (to decide whether a catalog was even worth
+fetching), then hand the raw labels back in so `selectLabel` recomputed the
+same thing, and it forced the reconciler to fabricate a `{ ok: true, usable:
+new Set() }` catalog on ticks that skipped the fetch — safe only because
+`selectLabel` happened to short-circuit the bare label before ever touching
+`usable`, which needed a comment warning the next reader not to "fix" it.
+Splitting into `resolveRequestedLabel` (no catalog involved at all) and
+`validateShape` (catalog required, shaped label only) means a caller that
+never needs a catalog never constructs one, real or synthetic — there is no
+synthetic `Catalog` anywhere in the codebase.
+
+`selectLabel`'s `LabelSelection` also carried a `"not-ours"` reason that was
+unreachable from both real call sites (each pre-filtered on `createosLabels`
+being empty before ever calling it) and needed a comment explaining why the
+dead branch was intentional. `RequestedLabel`'s `{ kind: "none" }` plays that
+role instead, and it's the same value both call sites already return early on
+— no unreachable branch to explain.
+
 **Exactly one createos label may resolve.** Two (`[createos, createos-2vcpu-2gb]`,
 or two shaped labels) is a contradiction with no defensible winner:
-`selectLabel` returns `{ok: false, reason: "ambiguous"}` rather than silently
-picking by array order, and the caller `console.warn`s, naming the job id. The
-job stays `queued` on GitHub and its author sees no runner, which is the
-correct signal that the workflow is wrong.
+`resolveRequestedLabel` returns `{kind: "ambiguous", labels}` rather than
+silently picking by array order, and the caller `console.warn`s, naming the
+job id. The job stays `queued` on GitHub and its author sees no runner, which
+is the correct signal that the workflow is wrong.
 
 **The catalog is consulted only on the `queued` action, and only lazily even
 then.** A `completed` webhook needs to know a job is ours (one createos label)
@@ -172,7 +203,7 @@ the shapes API would mean a shapes outage leaks every shaped VM until the
 reaper. On `queued`, `handleWebhook` calls `fetchCatalog` only when the job's
 label isn't bare. The cron reconciler fetches one `Catalog` for the whole
 tick, and only when at least one candidate names a shaped (non-bare) label —
-`GitHubClient.listQueuedJobs()` is now dumb transport (no arguments, no
+`GitHubClient.listQueuedJobs()` is dumb transport (no arguments, no
 `pickLabel`, returns every queued job's raw labels), so the reconciler can
 run this check before deciding whether to fetch anything at all.
 
@@ -202,9 +233,9 @@ So:
 
 | Site | Change |
 | --- | --- |
-| `handler.ts` (`handleWebhook`, all actions) | `matchesLabel` → `createosLabels(job.labels, config)`; the resolved label is carried into `PendingJob` |
-| `handler.ts` (`handleWebhook`, `queued` only) | `fetchCatalog` (called lazily — only when the label isn't bare) feeds `selectLabel(job.labels, config, catalog)`, which decides admission |
-| `handler.ts` (`runReconciler`) | `createosLabels` computed once per candidate job and reused; `fetchCatalog` fetched at most once per tick, and only if some candidate names a shaped label; `selectLabel` decides each candidate's admission against that one `Catalog` |
+| `handler.ts` (`handleWebhook`, all actions) | `matchesLabel` → `resolveRequestedLabel(job.labels, config)`; the resolved label is carried into `PendingJob` |
+| `handler.ts` (`handleWebhook`, `queued` only) | only if `isShapedLabel(label, config)` does `fetchCatalog` (lazy) feed `validateShape(label, config, catalog)`, which decides shape admission |
+| `handler.ts` (`runReconciler`) | `resolveRequestedLabel` computed once per candidate job and reused; `fetchCatalog` fetched at most once per tick, and only if some candidate names a shaped label; `validateShape` decides each candidate's shape admission against that one `Catalog` |
 | `github/client.ts` (`generateJitConfig`) | takes `(runnerName, label)` — registers the label the job actually requested, not `config.runnerLabel` |
 | `github/client.ts` (`listQueuedJobs`) | takes no arguments and applies no shape policy — dumb transport that returns every queued job's raw `labels`; admission is entirely the caller's job |
 | `sandbox.ts` (`createRunnerSandbox`) | `createSandbox({ shape })` takes `shapeForLabel(job.label, config)`, not `config.runnerShape` |
@@ -241,9 +272,13 @@ Plain `vitest` (`test/unit/shapes.test.ts`):
 - the in-flight coalescing — 10 concurrent cold callers produce exactly one
   `listShapes()` call; a rejected fetch clears the in-flight slot so the next
   call re-attempts rather than inheriting the same rejection
-- `selectLabel` — every `LabelSelection` outcome (`not-ours`, `ambiguous`,
-  `unknown-shape`, `catalog-unavailable`, and both `ok: true` cases), plus
-  that it never `console.warn`s regardless of the outcome
+- `resolveRequestedLabel` — `none` for a job naming no createos label,
+  `ambiguous` for two createos labels, `one` for the bare label and for a
+  shaped label, ignoring incidental labels (`self-hosted`, `linux`); never
+  `console.warn`s regardless of outcome
+- `validateShape` — admits a shaped label present in a healthy catalog,
+  `unknown-shape` against a healthy catalog missing it, `catalog-unavailable`
+  against `{ok: false}`; never `console.warn`s regardless of outcome
 - `fetchCatalog` — resolves `{ok: true, usable}` on a healthy fetch and
   `{ok: false}` (not a throw) when `listShapes` rejects
 
