@@ -7,6 +7,7 @@ import {
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CreateosSandboxValidationError } from "@nodeops-createos/sandbox";
 import { handleWebhook } from "../../src/handler";
+import type { SandboxDeps } from "../../src/createos";
 import { resetShapeCacheForTests } from "../../src/shapes";
 import { sign, workflowJobPayload } from "../helpers/fixtures";
 import { shapeCatalog } from "../helpers/mocks";
@@ -28,7 +29,7 @@ function patchGitHub() {
   }) as typeof fetch;
 }
 
-async function post(body: string, delivery: string, deps: object) {
+async function post(body: string, delivery: string, deps: SandboxDeps) {
   const req = new Request("https://ctrl.local/webhook", {
     method: "POST",
     headers: {
@@ -59,7 +60,11 @@ describe("shape labels end-to-end", () => {
       runCommand: vi.fn().mockResolvedValue({ result: { exit_code: 0 } }),
     });
     const deps = {
-      makeClient: () => ({ createSandbox, listShapes: async () => shapeCatalog() }),
+      makeClient: () => ({
+        createSandbox,
+        listShapes: async () => shapeCatalog(),
+        getSandbox: vi.fn(),
+      }),
     };
 
     const body = workflowJobPayload({
@@ -78,7 +83,11 @@ describe("shape labels end-to-end", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const createSandbox = vi.fn();
     const deps = {
-      makeClient: () => ({ createSandbox, listShapes: async () => shapeCatalog() }),
+      makeClient: () => ({
+        createSandbox,
+        listShapes: async () => shapeCatalog(),
+        getSandbox: vi.fn(),
+      }),
     };
 
     // The DO is a singleton shared across every case in this file, so assert on
@@ -127,8 +136,11 @@ describe("shape labels end-to-end", () => {
     // the teardown path never consults the shape catalog, so a shapes-API
     // outage can't leak this VM.
     resetShapeCacheForTests();
+    const downCreate = vi.fn();
     const down = {
       makeClient: () => ({
+        // Inert: a `completed` webhook must never provision. Asserted below.
+        createSandbox: downCreate,
         listShapes: async () => {
           throw new Error("503");
         },
@@ -148,6 +160,7 @@ describe("shape labels end-to-end", () => {
 
     expect(await res.text()).toBe("completed");
     expect(destroy).toHaveBeenCalled();
+    expect(downCreate).not.toHaveBeenCalled();
   });
 
   // Fix 4: a shaped job admitted while its shape existed can be promoted later
@@ -163,7 +176,11 @@ describe("shape labels end-to-end", () => {
       runCommand: vi.fn().mockResolvedValue({ result: { exit_code: 0 } }),
     });
     const fillerDeps = {
-      makeClient: () => ({ createSandbox: fillerCreate, listShapes: async () => shapeCatalog() }),
+      makeClient: () => ({
+        createSandbox: fillerCreate,
+        listShapes: async () => shapeCatalog(),
+        getSandbox: vi.fn(),
+      }),
     };
 
     // Saturate MAX_CONCURRENT (2) with filler bare-label jobs, regardless of
@@ -262,6 +279,7 @@ describe("shape labels end-to-end", () => {
         listShapes: async () => {
           throw new Error("503");
         },
+        getSandbox: vi.fn(),
       }),
     };
 

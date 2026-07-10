@@ -44,9 +44,9 @@ describe("full provision flow", () => {
         .fn()
         .mockResolvedValue({ result: { stdout: "started", stderr: "", exit_code: 0 }, exec_ms: 1 }),
     });
-    // handleWebhook unconditionally threads deps through isUsableLabel
-    // (listShapes) and the teardown paths (getSandbox) too, even though this
-    // job's bare label and happy-path boot never reach either at runtime.
+    // handleWebhook's deps type spans every path it can take — the catalog
+    // fetch (listShapes) and teardown (getSandbox) — even though this job's
+    // bare label and happy-path boot never reach either at runtime.
     const deps = {
       makeClient: () => ({ createSandbox, getSandbox: vi.fn(), listShapes: vi.fn() }),
     };
