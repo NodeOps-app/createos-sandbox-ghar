@@ -237,17 +237,22 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
     return;
   }
 
-  // Pure prefilter — no network. Jobs that aren't ours are skipped silently:
+  // Pure prefilter — no network. Each candidate's createos labels are computed
+  // once here and carried alongside the job, reused by the needsCatalog check
+  // right below (createosLabels was otherwise recomputed per `.filter` call
+  // and again per `.some` call, on top of the one selectLabel does per job
+  // in the loop further down). Jobs that aren't ours are skipped silently:
   // "not ours" isn't a bound binding, it's just someone else's job.
-  const candidates = queued.filter((j) => createosLabels(j.labels, config).length > 0);
+  const candidates = queued
+    .map((j) => ({ job: j, ours: createosLabels(j.labels, config) }))
+    .filter(({ ours }) => ours.length > 0);
 
   // Only pay for the catalog if some candidate actually names a shaped label
   // (exactly one createos label, and it isn't the bare one) — a tick where
   // every candidate is bare-label must never touch the shapes API.
-  const needsCatalog = candidates.some((j) => {
-    const ours = createosLabels(j.labels, config);
-    return ours.length === 1 && ours[0] !== config.runnerLabel;
-  });
+  const needsCatalog = candidates.some(
+    ({ ours }) => ours.length === 1 && ours[0] !== config.runnerLabel,
+  );
   // `{ ok: true, usable: new Set() }` here is safe ONLY because selectLabel
   // short-circuits the bare label before ever touching `usable` — every
   // candidate that reaches selectLabel in this branch is bare by construction
@@ -258,7 +263,7 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
     : { ok: true, usable: new Set() };
 
   const toProvision: PendingJob[] = [];
-  for (const j of candidates) {
+  for (const { job: j } of candidates) {
     const sel = selectLabel(j.labels, config, catalog);
     if (!sel.ok) {
       console.warn(`reconcile: job ${j.jobId} (${j.repoFullName}) skipped: ${sel.reason}`);

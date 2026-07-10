@@ -164,6 +164,12 @@ export type LabelSelection =
  */
 export function selectLabel(labels: string[], config: Config, catalog: Catalog): LabelSelection {
   const ours = createosLabels(labels, config);
+  // Unreachable from both production call sites today: the webhook handler
+  // and the reconciler each pre-filter on createosLabels(...).length === 0
+  // before ever calling selectLabel. The branch stays so selectLabel is total
+  // over its input — a future or third caller that skips that pre-filter
+  // still gets a typed "not-ours" answer instead of silently falling through
+  // to a wrong reason.
   if (ours.length === 0) return { ok: false, reason: "not-ours" };
   if (ours.length > 1) return { ok: false, reason: "ambiguous" };
   const label = ours[0]!;
