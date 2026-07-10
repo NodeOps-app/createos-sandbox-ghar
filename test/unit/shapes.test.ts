@@ -243,4 +243,18 @@ describe("fetchCatalog", () => {
     });
     await expect(fetchCatalog(config, boom)).resolves.toEqual({ ok: false });
   });
+
+  it("warns the underlying cause before discarding it", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const boom = depsWith(async () => {
+      throw new Error("503 upstream");
+    });
+
+    await fetchCatalog(config, boom);
+
+    // Callers only ever see `{ok: false}` and log a job id against the
+    // `catalog-unavailable` reason. If the cause is not surfaced here, a DNS
+    // failure, a 500, and an auth error are indistinguishable in the logs.
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("503 upstream"))).toBe(true);
+  });
 });

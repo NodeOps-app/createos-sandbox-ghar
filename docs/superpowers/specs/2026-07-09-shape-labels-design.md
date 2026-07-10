@@ -105,7 +105,15 @@ the next tick.
 
 The `console.warn` is mandatory, not decorative: a silent `202` is
 indistinguishable from "this job was never ours", which is exactly the silent
-bound CLAUDE.md forbids. Log the label, the job id, and the underlying error.
+bound CLAUDE.md forbids.
+
+The logging is split across the two layers that each hold half the story.
+`fetchCatalog` knows *why* the catalog is gone but not which job asked, so it
+warns the underlying error before collapsing it to `{ok: false}` — otherwise a
+DNS failure, a 500, and an auth error are indistinguishable after the fact. The
+caller knows the job but not the cause, so it warns the job id against the
+`catalog-unavailable` reason. Neither line alone is enough to diagnose an
+outage.
 
 ### Label selection
 

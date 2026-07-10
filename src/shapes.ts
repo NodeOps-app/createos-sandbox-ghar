@@ -186,11 +186,18 @@ export function selectLabel(labels: string[], config: Config, catalog: Catalog):
  * into `{ok: false}` rather than throwing — the caller (webhook handler,
  * reconciler) decides what an unavailable catalog means for the job in front
  * of it (202 + retry via the cron reconciler), not this function.
+ *
+ * This is the only place the underlying failure is visible: callers see
+ * `{ok: false}` and log a job id against the `catalog-unavailable` reason, but
+ * that says nothing about *why* the catalog is gone. Swallowing the cause here
+ * would make a DNS failure, a 500, and an auth error indistinguishable in the
+ * logs, so the error is warned before it is discarded.
  */
 export async function fetchCatalog(config: Config, deps: SandboxDeps): Promise<Catalog> {
   try {
     return { ok: true, usable: await usableShapes(config, deps) };
-  } catch {
+  } catch (err) {
+    console.warn(`shapes: catalog fetch failed, shaped labels denied: ${String(err)}`);
     return { ok: false };
   }
 }
