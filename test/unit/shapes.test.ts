@@ -142,6 +142,36 @@ describe("usableShapes", () => {
     expect(listShapes).toHaveBeenCalledTimes(2);
   });
 
+  // Fix 3: every one of N concurrent callers coalesced onto the same failing
+  // fetch used to independently catch the shared rejection and warn its own
+  // copy of the cause — 10 callers, 10 identical log lines. The warn now
+  // lives inside the one coalesced fetch attempt, so it must fire exactly
+  // once no matter how many callers share it. `listShapes` rejects on a timer
+  // so the 10 calls genuinely overlap rather than resolving sequentially.
+  it("warns exactly once when N concurrent callers share a failing fetch", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const listShapes = vi.fn(
+      () =>
+        new Promise<Shape[]>((_resolve, reject) =>
+          setTimeout(() => reject(new Error("503 upstream")), 10),
+        ),
+    );
+
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () =>
+        usableShapes(config, depsWith(listShapes)).then(
+          () => "resolved",
+          () => "rejected",
+        ),
+      ),
+    );
+
+    expect(listShapes).toHaveBeenCalledTimes(1);
+    expect(results.every((r) => r === "rejected")).toBe(true);
+    const causeWarnings = warn.mock.calls.filter((c) => String(c[0]).includes("503 upstream"));
+    expect(causeWarnings).toHaveLength(1);
+  });
+
   // Fix 2: an empty catalog is exactly the no-silent-bounds case — it denies
   // every shaped label, and that must be logged at the fetch site, not left
   // to be inferred later from a string of "not offered" denials.
@@ -257,9 +287,12 @@ describe("fetchCatalog", () => {
 
     await fetchCatalog(config, boom);
 
-    // Callers only ever see `{ok: false}` and log a job id against the
-    // `catalog-unavailable` reason. If the cause is not surfaced here, a DNS
-    // failure, a 500, and an auth error are indistinguishable in the logs.
+    // The warn itself now lives inside usableShapes' coalesced fetch attempt
+    // (see the "warns exactly once" test above), not here — but a single
+    // uncontended fetchCatalog call still observes it. Callers only ever see
+    // `{ok: false}` and log a job id against the `catalog-unavailable`
+    // reason; if the cause were never surfaced, a DNS failure, a 500, and an
+    // auth error would be indistinguishable in the logs.
     expect(warn.mock.calls.some((c) => String(c[0]).includes("503 upstream"))).toBe(true);
   });
 });

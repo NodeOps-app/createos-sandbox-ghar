@@ -108,12 +108,24 @@ indistinguishable from "this job was never ours", which is exactly the silent
 bound CLAUDE.md forbids.
 
 The logging is split across the two layers that each hold half the story.
-`fetchCatalog` knows *why* the catalog is gone but not which job asked, so it
-warns the underlying error before collapsing it to `{ok: false}` — otherwise a
-DNS failure, a 500, and an auth error are indistinguishable after the fact. The
-caller knows the job but not the cause, so it warns the job id against the
-`catalog-unavailable` reason. Neither line alone is enough to diagnose an
-outage.
+`usableShapes` knows *why* the catalog is gone but not which job asked, so it
+warns the underlying error, inside its own coalesced fetch attempt, before the
+rejection propagates out — otherwise a DNS failure, a 500, and an auth error
+are indistinguishable after the fact. The caller knows the job but not the
+cause, so it warns the job id against the `catalog-unavailable` reason.
+Neither line alone is enough to diagnose an outage.
+
+The warn has to live inside `usableShapes`' coalesced fetch attempt
+specifically, not in `fetchCatalog`. `usableShapes` coalesces N concurrent
+cold-cache callers onto one in-flight `listShapes()` promise, but each of
+those N callers still independently `await`s it and, if it rejects, each would
+independently catch that shared rejection. A warn in `fetchCatalog`'s catch —
+the per-caller side of the coalescing — fires once per caller, not once per
+fetch: 10 concurrent callers against a failing fetch produced one
+`listShapes()` call but 10 identical log lines. Moving the warn inside the
+`(async () => {...})()` body that only ever runs once per actual attempt fixes
+that: `fetchCatalog` then just converts the rejection to `{ok: false}`
+silently.
 
 ### Label selection
 
@@ -302,6 +314,10 @@ Plain `vitest` (`test/unit/shapes.test.ts`):
 - the in-flight coalescing — 10 concurrent cold callers produce exactly one
   `listShapes()` call; a rejected fetch clears the in-flight slot so the next
   call re-attempts rather than inheriting the same rejection
+- a coalesced failing fetch warns exactly once, not once per coalesced
+  caller — `listShapes` rejects on a timer so 10 concurrent `usableShapes`
+  calls genuinely overlap onto the one in-flight promise; asserts exactly one
+  `listShapes()` call *and* exactly one warning containing the cause
 - `resolveRequestedLabel` — `none` for a job naming no createos label,
   `ambiguous` for two createos labels, `one` for the bare label and for a
   shaped label, ignoring incidental labels (`self-hosted`, `linux`); never
@@ -310,7 +326,9 @@ Plain `vitest` (`test/unit/shapes.test.ts`):
   `unknown-shape` against a healthy catalog missing it, `catalog-unavailable`
   against `{ok: false}`; never `console.warn`s regardless of outcome
 - `fetchCatalog` — resolves `{ok: true, usable}` on a healthy fetch and
-  `{ok: false}` (not a throw) when `listShapes` rejects
+  `{ok: false}` (not a throw) when `listShapes` rejects; a single
+  uncontended call still observes the cause warned (from inside
+  `usableShapes`, not here — see the coalescing test above)
 
 `@cloudflare/vitest-pool-workers` (createos mocked at the `fetch` boundary,
 `test/integration/shapes.test.ts` unless noted):

@@ -100,7 +100,17 @@ export async function usableShapes(
   }
 
   const promise = (async () => {
-    const shapes: Shape[] = await makeSandboxClient(config, deps).listShapes();
+    let shapes: Shape[];
+    try {
+      shapes = await makeSandboxClient(config, deps).listShapes();
+    } catch (err) {
+      // Warned exactly once per actual fetch attempt, here — this body runs
+      // once no matter how many concurrent callers coalesce onto `promise`
+      // below. Warning in `fetchCatalog` instead (the per-caller side of the
+      // coalescing) would fire once per caller sharing the same rejection.
+      console.warn(`shapes: catalog fetch failed, shaped labels denied: ${String(err)}`);
+      throw err;
+    }
     if (shapes.length === 0) {
       console.warn(
         "shapes: catalog fetch returned an empty list; every shaped label will be denied",
@@ -199,17 +209,15 @@ export function validateShape(label: string, config: Config, catalog: Catalog): 
  * handler, reconciler) decides what an unavailable catalog means for the job
  * in front of it (202 + retry via the cron reconciler), not this function.
  *
- * This is the only place the underlying failure is visible: callers see
- * `{ok: false}` and log a job id against the `catalog-unavailable` reason, but
- * that says nothing about *why* the catalog is gone. Swallowing the cause here
- * would make a DNS failure, a 500, and an auth error indistinguishable in the
- * logs, so the error is warned before it is discarded.
+ * Silent on failure: the cause is already warned exactly once, inside
+ * `usableShapes`' coalesced fetch attempt (see there) — warning again here
+ * would either duplicate that line, or (worse) fire once per caller sharing a
+ * coalesced rejection, which is the bug this split fixed.
  */
 export async function fetchCatalog(config: Config, deps: SandboxDeps): Promise<Catalog> {
   try {
     return { ok: true, usable: await usableShapes(config, deps) };
-  } catch (err) {
-    console.warn(`shapes: catalog fetch failed, shaped labels denied: ${String(err)}`);
+  } catch {
     return { ok: false };
   }
 }
