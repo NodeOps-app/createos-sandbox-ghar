@@ -5,7 +5,7 @@
     "": {
       "name": "createos-sandbox-ghar",
       "dependencies": {
-        "@nodeops-createos/sandbox": "link:@nodeops-createos/sandbox",
+        "@nodeops-createos/sandbox": "0.6.1",
       },
       "devDependencies": {
         "@cloudflare/vitest-pool-workers": "0.8.71",
@@ -148,7 +148,7 @@
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.9", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.0.3", "@jridgewell/sourcemap-codec": "^1.4.10" } }, "sha512-3Belt6tdc8bPgAtbcmdtNJlirVoTmEb5e2gC94PnkwEW9jI6CAHUeoG85tjWP5WquqfavoMtMwiG4P926ZKKuQ=="],
 
-    "@nodeops-createos/sandbox": ["@nodeops-createos/sandbox@link:@nodeops-createos/sandbox", {}],
+    "@nodeops-createos/sandbox": ["@nodeops-createos/sandbox@0.6.1", "", {}, "sha512-MpkKsaLsjEjzDAFtXaR/+4CfRFHHnLRBjWvUnAnwPTSC8uMc++vMHqQN7Q/STDz53WVdkylb3I/2IyfTUBi2tQ=="],
 
     "@oxlint/binding-android-arm-eabi": ["@oxlint/binding-android-arm-eabi@1.72.0", "", { "os": "android", "cpu": "arm" }, "sha512-zhCmvn+1Mj3UchAc/90i99S0t7jJUsHmFVSPg4UWrjO8b8eaSGwscgO6QAUtvHBstkjQwBttQNswEnAF1mIQdA=="],
 
