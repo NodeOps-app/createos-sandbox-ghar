@@ -12,13 +12,13 @@ Glossary for the GitHub Actions runner controller. Terms only, no implementation
 
 - **Runner** — the GitHub Actions self-hosted runner process inside a Sandbox. Ephemeral: takes exactly one Job then exits. Registered via JIT config, outbound-only (long-polls GitHub, no inbound).
 
-- **Job** — a GitHub Actions `workflow_job`. `queued` action = provision trigger; `completed` action = teardown trigger. One `queued` Job provisions one Sandbox; but because Runners carry only the shared label, under a backlog GitHub may run a *different* queued Job on that Sandbox — so teardown is keyed on Runner name, not the provisioning Job id (see `docs/adr/0003`).
+- **Job** — a GitHub Actions `workflow_job`. `queued` action = provision trigger; `completed` action = teardown trigger. One `queued` Job provisions one Sandbox; but because Runners carry only the shared label, under a backlog GitHub may run a *different* queued Job on that Sandbox — so teardown is keyed on Runner name, not the provisioning Job id.
 
 - **JIT config** — single-use encoded runner config from `POST /orgs/{org}/actions/runners/generate-jitconfig`. Passed to `run.sh --jitconfig`. Ephemeral by construction; token never persisted to disk.
 
-- **Org** — `nodeops-app` GitHub org. Runners register at org scope, not per-repo.
+- **Org** — the GitHub org the Controller serves (`GITHUB_ORG`). Runners register at org scope, not per-repo.
 
-- **Self-destruct** (a.k.a. **self-delete**) — a Sandbox tearing down its own VM from inside the guest, triggered when its Runner exits. Shipped in fc (NodeOps-app/fc#520, commit `a56978b`): the guest agent exposes a loopback-only endpoint `POST 127.0.0.1:1029/self/delete` and the host destroys the VM by its UDS identity. In this controller it is the **fast teardown path** — it reclaims the host VM in seconds but does **not** free the DO concurrency slot, so the `completed` webhook + Job→Sandbox map are still needed to free the slot and as a backstop. Sibling endpoint `/self/pause` exists but is unused (runners are one-shot ephemeral).
+- **Self-destruct** (a.k.a. **self-delete**) — a Sandbox tearing down its own VM from inside the guest, triggered when its Runner exits. The guest agent exposes a loopback-only endpoint `POST 127.0.0.1:1029/self/delete`; the host destroys the VM by its UDS identity (requires a createos host fleet with the self-signal agent baked into the host initrd — probe with `curl -o /dev/null -w '%{http_code}' http://127.0.0.1:1029/self/pause`, `405` = present). In this controller it is the **fast teardown path** — it reclaims the host VM in seconds but does **not** free the DO concurrency slot, so the `completed` webhook + Job→Sandbox map are still needed to free the slot and as a backstop. Sibling endpoint `/self/pause` exists but is unused (runners are one-shot ephemeral).
 
 - **Reaper** — safety-net teardown, a cron sweep: destroys orphan Sandboxes (a Job that booted a Sandbox but whose completion was never recorded — crash, dropped webhook) and retries any **Destroying** row whose teardown was never confirmed.
 
