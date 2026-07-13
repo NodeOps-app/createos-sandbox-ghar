@@ -93,7 +93,3 @@ export function parseWorkflowJob(body: string): WorkflowJob | null {
     runnerName,
   };
 }
-
-export function matchesLabel(job: WorkflowJob, label: string): boolean {
-  return job.labels.includes(label);
-}

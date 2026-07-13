@@ -153,10 +153,11 @@ Set in `wrangler.toml [vars]` unless marked secret (`wrangler secret put`).
 | `GITHUB_WEBHOOK_SECRET` | ✅ | — | Webhook HMAC secret. |
 | `CREATEOS_BASE_URL` | | — | CreateOS control plane, e.g. `https://api.sb.createos.sh`. |
 | `CREATEOS_API_KEY` | ✅ | — | CreateOS API key. |
-| `RUNNER_LABEL` | | `createos` | The opt-in `runs-on` label. |
+| `RUNNER_LABEL` | | `createos` | The opt-in `runs-on` label. Also the prefix for shaped labels (`createos-8vcpu-16gb`) — see [Choosing a runner size](#choosing-a-runner-size). |
 | `RUNNER_TEMPLATE` | | `ghar-runner` | Rootfs template built in step 3. |
 | `SANDBOX_NAME_PREFIX` | | — | Cosmetic VM name prefix (`<prefix>-ghar-<jobId>`). |
-| `RUNNER_SHAPE` | | `s-4vcpu-4gb` | VM size preset. |
+| `RUNNER_SHAPE` | | `s-4vcpu-4gb` | VM size for the bare `RUNNER_LABEL`. |
+| `MIN_RUNNER_MEM_MIB` | | `2048` | Floor on shapes offered as shaped labels — smaller shapes can't run an Actions runner. |
 | `RUNNER_DISK_MIB` | | `30720` | Overlay disk — **must be ≤ your plan's disk cap** or `createSandbox` 403s. |
 | `MAX_CONCURRENT` | | `0` | `0` = unlimited; `N` = cap + pending queue. Set a finite value in production. |
 | `PROVISION_POLICY` | | `org-wide` | `org-wide` \| `repo-allowlist` \| `fork-gated`. |
@@ -164,6 +165,20 @@ Set in `wrangler.toml [vars]` unless marked secret (`wrangler secret put`).
 | `REAPER_MAX_AGE_MS` | | `3600000` | Orphan-VM cutoff — keep **above your longest job**. |
 | `RECONCILE_GRACE_MS` | | `180000` | Boot grace before a runner-less VM is reaped — keep **above VM boot + runner registration**. |
 | `ALERT_WEBHOOK_URL` | ✅ | — | Optional Slack-compatible webhook for provision/teardown failures. |
+
+## Choosing a runner size
+
+```yaml
+jobs:
+  build:
+    runs-on: [createos]             # RUNNER_SHAPE (default s-4vcpu-4gb)
+  big:
+    runs-on: [createos-8vcpu-16gb]  # a specific CreateOS shape
+```
+
+Available labels are derived live from the CreateOS shape catalog (`GET /v1/shapes`), so a shape added to the platform is usable without redeploying this Worker. Shapes below `MIN_RUNNER_MEM_MIB` (default 2048) or with a fractional-vCPU quota are excluded — an Actions runner cannot work on them.
+
+Use exactly one `createos*` label. Two (`[createos, createos-2vcpu-2gb]`) is refused and the job will never get a runner.
 
 ## Teardown
 

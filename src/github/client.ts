@@ -1,4 +1,4 @@
-import type { Config, PendingJob } from "../types";
+import type { Config, QueuedJob } from "../types";
 import { TokenCache } from "./auth";
 
 type FetchLike = typeof fetch;
@@ -37,8 +37,16 @@ export class GitHubClient {
     };
   }
 
-  /** Creates a JIT ephemeral org runner config; returns encoded_jit_config. */
-  async generateJitConfig(runnerName: string): Promise<string> {
+  /**
+   * Creates a JIT ephemeral org runner config; returns encoded_jit_config.
+   *
+   * The runner carries exactly the ONE label its job asked for. GitHub
+   * AND-matches `runs-on` against a runner's labels, so a runner registered with
+   * both `createos` and `createos-8vcpu-16gb` would be eligible for bare
+   * `createos` jobs while sitting on an 8 vCPU VM. One label per runner keeps
+   * each shape's pool disjoint (ADR-0004).
+   */
+  async generateJitConfig(runnerName: string, label: string): Promise<string> {
     const res = await this.fetchImpl(
       `${this.config.githubApiUrl}/orgs/${this.config.githubOrg}/actions/runners/generate-jitconfig`,
       {
@@ -47,7 +55,7 @@ export class GitHubClient {
         body: JSON.stringify({
           name: runnerName,
           runner_group_id: 1,
-          labels: [this.config.runnerLabel],
+          labels: [label],
           work_folder: "_work",
         }),
       },
@@ -133,17 +141,23 @@ export class GitHubClient {
   }
 
   /**
-   * Every label-matching workflow_job GitHub still reports as `queued` — the
-   * reconciler's source of truth for jobs needing a runner, independent of
-   * whether we ever saw (or lost) their `queued` webhook. Scans the app's
-   * installed repos; a partly-drained matrix run is `in_progress` with its
-   * remaining jobs still `queued`, so both run statuses are inspected.
+   * Every workflow_job GitHub still reports as `queued` — the reconciler's
+   * source of truth for jobs needing a runner, independent of whether we ever
+   * saw (or lost) their `queued` webhook. Scans the app's installed repos; a
+   * partly-drained matrix run is `in_progress` with its remaining jobs still
+   * `queued`, so both run statuses are inspected.
+   *
+   * Dumb transport: returns every queued job with its raw labels, unfiltered.
+   * Which job is ours and which shape (if any) it names is a policy decision
+   * (`resolveRequestedLabel`/`validateShape` in shapes.ts) that belongs to the
+   * caller, not this client — deciding it here would also steal the job id
+   * out of any warning the caller wants to log about it.
    */
-  async listQueuedJobs(): Promise<PendingJob[]> {
-    const out: PendingJob[] = [];
+  async listQueuedJobs(): Promise<QueuedJob[]> {
+    const out: QueuedJob[] = [];
     for (const repo of await this.#installationRepos()) {
       for (const runId of await this.#activeRunIds(repo)) {
-        out.push(...(await this.#queuedLabelJobs(repo, runId)));
+        out.push(...(await this.#queuedJobs(repo, runId)));
       }
     }
     return out;
@@ -173,20 +187,15 @@ export class GitHubClient {
     return [...ids];
   }
 
-  async #queuedLabelJobs(repoFullName: string, runId: number): Promise<PendingJob[]> {
+  async #queuedJobs(repoFullName: string, runId: number): Promise<QueuedJob[]> {
     const jobs = await this.#getPaged<JobLite>(
       `/repos/${repoFullName}/actions/runs/${runId}/jobs?filter=latest`,
       "jobs",
     );
-    const out: PendingJob[] = [];
+    const out: QueuedJob[] = [];
     for (const j of jobs) {
-      if (
-        j.status === "queued" &&
-        typeof j.id === "number" &&
-        (j.labels ?? []).includes(this.config.runnerLabel)
-      ) {
-        out.push({ jobId: j.id, runId, repoFullName });
-      }
+      if (j.status !== "queued" || typeof j.id !== "number") continue;
+      out.push({ jobId: j.id, runId, repoFullName, labels: j.labels ?? [] });
     }
     return out;
   }

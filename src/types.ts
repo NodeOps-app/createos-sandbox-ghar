@@ -13,7 +13,8 @@ export interface Config {
   runnerLabel: string; // "createos"
   runnerTemplate: string; // template id/name
   sandboxNamePrefix: string; // createos VM name prefix (cosmetic, e.g. "gha-ci"); "" = none
-  runnerShape: string; // "s-4vcpu-4gb"
+  runnerShape: string; // "s-4vcpu-4gb" — the shape the bare `createos` label means
+  minRunnerMemMib: number; // 2048 — shapes below this are never offered as labels
   runnerDiskMib: number; // 30720
   maxConcurrent: number; // 0 = unlimited
   provisionPolicy: ProvisionPolicy;
@@ -39,11 +40,31 @@ export interface QueuedDecision {
   jobId: number;
 }
 
+/**
+ * A queued workflow_job as GitHub reports it. Raw labels; no policy applied —
+ * `GitHubClient.listQueuedJobs` is transport, not an admission decision, so it
+ * hands back exactly what GitHub said and lets the caller (label selection)
+ * decide which jobs are ours and what shape they name.
+ */
+export interface QueuedJob {
+  jobId: number;
+  runId: number;
+  repoFullName: string;
+  labels: string[];
+}
+
 /** DO → Worker: a job to boot (returned by onCompleted/sweep when a slot frees). */
 export interface PendingJob {
   jobId: number;
   runId: number;
   repoFullName: string;
+  /**
+   * The single createos label the job asked for ("createos", or a shaped
+   * "createos-2vcpu-2gb"). Persisted on the row: a job that queues behind the
+   * concurrency cap must boot at the size it requested, and its JIT runner must
+   * register under exactly this label (see ADR-0004).
+   */
+  label: string;
 }
 
 /**

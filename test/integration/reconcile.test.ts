@@ -1,10 +1,24 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { runReconciler } from "../../src/handler";
+import { resetShapeCacheForTests } from "../../src/shapes";
+import { shapeCatalog } from "../helpers/mocks";
+
+// The shapes.ts catalog cache is module-level and outlives any single test —
+// without this, whichever suite runs first (bare-label fallback here vs. a
+// real catalog elsewhere) decides what every later case silently exercises.
+beforeEach(() => {
+  resetShapeCacheForTests();
+});
 
 type Stub = ReturnType<typeof env.COORDINATOR.get>;
 const stub = (name: string) => env.COORDINATOR.get(env.COORDINATOR.idFromName(name));
-const job = (id: number) => ({ jobId: id, runId: id, repoFullName: "nodeops-app/api" });
+const job = (id: number) => ({
+  jobId: id,
+  runId: id,
+  repoFullName: "nodeops-app/api",
+  label: "createos",
+});
 async function boot(s: Stub, jobId: number, sandboxId: string) {
   await s.recordSandboxCreated(jobId, sandboxId, `ghar-${jobId}`);
   await s.markRunning(jobId);
@@ -68,9 +82,15 @@ function patchGitHub(
   over: {
     runners?: { name: string; status: string }[];
     jobs?: { id: number; status: string; labels: string[] }[];
+    // Multi-repo installations: which repos the app sees, and each repo's own
+    // queued jobs. Falls back to the single-repo `jobs` list above when
+    // omitted — every existing case in this file stays on that flat path.
+    repos?: string[];
+    jobsByRepo?: Record<string, { id: number; status: string; labels: string[] }[]>;
   } = {},
 ) {
   const runners = over.runners ?? [];
+  const repos = over.repos ?? ["nodeops-app/api"];
   const jobs = over.jobs ?? [];
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const req = new Request(input, init);
@@ -81,8 +101,11 @@ function patchGitHub(
     if (u.includes("generate-jitconfig")) return json({ encoded_jit_config: "BLOB" }, 201);
     if (req.method === "GET" && u.includes("/actions/runners")) return json({ runners });
     if (u.includes("/installation/repositories"))
-      return json({ repositories: [{ full_name: "nodeops-app/api" }] });
-    if (u.includes("/jobs")) return json({ jobs });
+      return json({ repositories: repos.map((full_name) => ({ full_name })) });
+    if (u.includes("/jobs")) {
+      const repo = repos.find((r) => u.includes(`/repos/${r}/`));
+      return json({ jobs: (repo && over.jobsByRepo?.[repo]) ?? jobs });
+    }
     if (u.includes("/actions/runs"))
       return json({ workflow_runs: [{ id: 9000, status: "in_progress" }] });
     return new Response("unmocked " + u, { status: 404 });
@@ -97,9 +120,20 @@ describe("runReconciler", () => {
       runCommand: vi.fn().mockResolvedValue({ result: { stdout: "started" }, exec_ms: 1 }),
     });
     const ctx = createExecutionContext();
-    await runReconciler(env as any, { makeClient: () => ({ createSandbox }) as any });
+    // Every candidate this tick is the bare `createos` label, so runReconciler
+    // must never fetch the shape catalog for it (isShapedLabel is false for
+    // the bare label, so needsCatalog never trips) — the assertion below is
+    // the proof.
+    // listShapes/getSandbox are still supplied so the makeClient factory
+    // typechecks against CreateosClient's full surface, even though neither is
+    // called at runtime here.
+    const listShapes = vi.fn().mockResolvedValue(shapeCatalog());
+    await runReconciler(env as any, {
+      makeClient: () => ({ createSandbox, listShapes, getSandbox: vi.fn() }),
+    });
     await waitOnExecutionContext(ctx);
     expect(createSandbox).toHaveBeenCalledOnce();
+    expect(listShapes).not.toHaveBeenCalled();
     globalThis.fetch = realFetch;
   });
 
@@ -109,8 +143,12 @@ describe("runReconciler", () => {
     await boot(singleton, 9102, "sb9102"); // fresh running row
     patchGitHub({ jobs: [{ id: 9102, status: "queued", labels: ["createos"] }] });
     const createSandbox = vi.fn();
-    await runReconciler(env as any, { makeClient: () => ({ createSandbox }) as any });
+    const listShapes = vi.fn().mockResolvedValue(shapeCatalog());
+    await runReconciler(env as any, {
+      makeClient: () => ({ createSandbox, listShapes, getSandbox: vi.fn() }),
+    });
     expect(createSandbox).not.toHaveBeenCalled();
+    expect(listShapes).not.toHaveBeenCalled();
     globalThis.fetch = realFetch;
   });
 
@@ -135,6 +173,92 @@ describe("runReconciler", () => {
     }) as typeof fetch;
     await expect(runReconciler(env as any, {})).resolves.toBeUndefined();
     expect(await singleton.activeCount()).toBe(1); // 9200 not reaped
+    globalThis.fetch = realFetch;
+  });
+
+  it("provisions a shaped-label job, fetching the shape catalog once for the whole tick", async () => {
+    // Two queued jobs (bare + shaped): if the catalog were fetched per job
+    // instead of once for the tick, listShapes would show 2 calls, not 1.
+    patchGitHub({
+      jobs: [
+        { id: 9401, status: "queued", labels: ["createos"] },
+        { id: 9402, status: "queued", labels: ["createos-2vcpu-2gb"] },
+      ],
+    });
+    const listShapes = vi
+      .fn()
+      .mockResolvedValue([{ id: "s-2vcpu-2gb", vcpu: 2, mem_mib: 2048, default_disk_mib: 10240 }]);
+    const createSandbox = vi.fn().mockResolvedValue({
+      id: "sb9402",
+      runCommand: vi.fn().mockResolvedValue({ result: { stdout: "started" }, exec_ms: 1 }),
+    });
+    // No completions/reaping in this test, so getSandbox is never actually
+    // called — but runReconciler's teardown path still requires it typewise.
+    await runReconciler(env as any, {
+      makeClient: () => ({ listShapes, createSandbox, getSandbox: vi.fn() }),
+    });
+
+    expect(createSandbox).toHaveBeenCalledTimes(2);
+    expect(createSandbox).toHaveBeenCalledWith(expect.objectContaining({ shape: "s-2vcpu-2gb" }));
+    expect(listShapes).toHaveBeenCalledTimes(1);
+    globalThis.fetch = realFetch;
+  });
+
+  // Fix 1: policy must be evaluated before the shape catalog is fetched. A
+  // tick whose only shaped candidates are all policy-blocked must never
+  // touch the shapes API.
+  it("skips the shape catalog entirely when every shaped candidate is policy-blocked", async () => {
+    patchGitHub({
+      jobs: [{ id: 9501, status: "queued", labels: ["createos-2vcpu-2gb"] }],
+    });
+    const listShapes = vi.fn().mockResolvedValue(shapeCatalog());
+    const createSandbox = vi.fn();
+    const blockedEnv = {
+      ...env,
+      PROVISION_POLICY: "repo-allowlist",
+      REPO_ALLOWLIST: "someone/else",
+    };
+
+    await runReconciler(blockedEnv as any, {
+      makeClient: () => ({ listShapes, createSandbox, getSandbox: vi.fn() }),
+    });
+
+    expect(listShapes).not.toHaveBeenCalled();
+    expect(createSandbox).not.toHaveBeenCalled();
+    globalThis.fetch = realFetch;
+  });
+
+  // Fix 2: the previous two tests cover "all shaped candidates blocked" and
+  // "bare + shaped, both eligible" separately, but never a tick with both an
+  // eligible and a blocked shaped candidate together. The catalog must still
+  // be fetched exactly once (for the eligible one), and only the eligible
+  // job's createSandbox must fire — the blocked one must never reach it.
+  it("fetches the catalog once and boots only the eligible job when one of two shaped candidates is policy-blocked", async () => {
+    patchGitHub({
+      repos: ["nodeops-app/api", "nodeops-app/other"],
+      jobsByRepo: {
+        "nodeops-app/api": [{ id: 9601, status: "queued", labels: ["createos-2vcpu-2gb"] }],
+        "nodeops-app/other": [{ id: 9602, status: "queued", labels: ["createos-2vcpu-2gb"] }],
+      },
+    });
+    const listShapes = vi.fn().mockResolvedValue(shapeCatalog());
+    const createSandbox = vi.fn().mockResolvedValue({
+      id: "sb9601",
+      runCommand: vi.fn().mockResolvedValue({ result: { stdout: "started" }, exec_ms: 1 }),
+    });
+    const blockedEnv = {
+      ...env,
+      PROVISION_POLICY: "repo-allowlist",
+      REPO_ALLOWLIST: "nodeops-app/api",
+    };
+
+    await runReconciler(blockedEnv as any, {
+      makeClient: () => ({ listShapes, createSandbox, getSandbox: vi.fn() }),
+    });
+
+    expect(listShapes).toHaveBeenCalledTimes(1);
+    expect(createSandbox).toHaveBeenCalledTimes(1);
+    expect(createSandbox).toHaveBeenCalledWith(expect.objectContaining({ shape: "s-2vcpu-2gb" }));
     globalThis.fetch = realFetch;
   });
 });

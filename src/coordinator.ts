@@ -11,6 +11,7 @@ import type {
 
 interface Env {
   MAX_CONCURRENT: string;
+  RUNNER_LABEL: string;
 }
 
 type Row = {
@@ -19,6 +20,7 @@ type Row = {
   repo: string;
   sandbox_id: string | null;
   runner_name: string | null;
+  label: string | null;
   state: string;
   created_at: number;
   booted_at: number | null;
@@ -52,6 +54,7 @@ export class Coordinator extends DurableObject<Env> {
         repo        TEXT NOT NULL,
         sandbox_id  TEXT,
         runner_name TEXT,
+        label       TEXT,
         state       TEXT NOT NULL,
         created_at  INTEGER NOT NULL,
         booted_at   INTEGER
@@ -61,16 +64,31 @@ export class Coordinator extends DurableObject<Env> {
         seen_at     INTEGER NOT NULL
       );
     `);
-    // Migrate DOs created before runner-identity teardown: add the column if a
-    // pre-existing `jobs` table lacks it (CREATE TABLE IF NOT EXISTS won't).
+    // Migrate DOs created before a column existed: CREATE TABLE IF NOT EXISTS
+    // won't add one to a live table. A NULL `label` is a row from before shape
+    // labels, which by definition asked for the bare label.
     const cols = this.#sql.exec(`PRAGMA table_info(jobs)`).toArray() as { name: string }[];
-    if (!cols.some((c) => c.name === "runner_name")) {
-      this.#sql.exec(`ALTER TABLE jobs ADD COLUMN runner_name TEXT`);
-    }
+    const has = (c: string) => cols.some((col) => col.name === c);
+    if (!has("runner_name")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN runner_name TEXT`);
+    if (!has("label")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN label TEXT`);
   }
 
   #maxConcurrent(): number {
     return Number(this.env.MAX_CONCURRENT ?? "0") || 0;
+  }
+
+  /** The label a pre-migration row implicitly asked for. */
+  #defaultLabel(): string {
+    return this.env.RUNNER_LABEL || "createos";
+  }
+
+  #toPending(row: Row): PendingJob {
+    return {
+      jobId: row.job_id,
+      runId: row.run_id,
+      repoFullName: row.repo,
+      label: row.label ?? this.#defaultLabel(),
+    };
   }
 
   #active(): number {
@@ -118,11 +136,12 @@ export class Coordinator extends DurableObject<Env> {
     const atCap = cap > 0 && this.#active() >= cap;
     const state = atCap ? "pending" : "provisioning";
     this.#sql.exec(
-      `INSERT INTO jobs (job_id, run_id, repo, sandbox_id, runner_name, state, created_at, booted_at)
-       VALUES (?, ?, ?, NULL, NULL, ?, ?, NULL)`,
+      `INSERT INTO jobs (job_id, run_id, repo, sandbox_id, runner_name, label, state, created_at, booted_at)
+       VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, NULL)`,
       job.jobId,
       job.runId,
       job.repoFullName,
+      job.label,
       state,
       now,
     );
@@ -219,7 +238,7 @@ export class Coordinator extends DurableObject<Env> {
     const row = rows[0];
     if (!row) return null;
     this.#sql.exec(`UPDATE jobs SET state = 'provisioning' WHERE job_id = ?`, row.job_id);
-    return { jobId: row.job_id, runId: row.run_id, repoFullName: row.repo };
+    return this.#toPending(row);
   }
 
   /**

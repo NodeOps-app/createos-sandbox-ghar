@@ -48,7 +48,9 @@ Each file does one thing. Keep files under 1100 lines.
 | `src/policy.ts` | `shouldProvision` (org-wide / repo-allowlist / fork-gated). Pure; the fork check is injected. |
 | `src/handler.ts` | Orchestration: webhook path, provisioning, teardown, reconciler, reaper. |
 | `src/sandbox.ts` | `createRunnerSandbox` (JIT → createSandbox) and `launchRunner` as **two steps**, so ownership is recorded in the DO between them; plus idempotent `teardownSandbox`. `SandboxDeps.makeClient` is the test seam. |
-| `src/coordinator.ts` | The `Coordinator` **Durable Object**. ALL state (SQLite): job rows (owning their VM by `runner_name`), concurrency counter, pending queue, delivery dedup, `sweep`. Rows: `pending`→`provisioning`→`running`→`destroying`. |
+| `src/shapes.ts` | Label ↔ shape mapping and the cached (5 min), floored shape catalog from `GET /v1/shapes`. Label admission is two pure, **silent** functions (the caller has the job id and does the logging): `resolveRequestedLabel` (`none`/`ambiguous`/`one`) and `validateShape`, which is **total** — a bare label short-circuits before touching the catalog. Only `fetchCatalog` hits the network. Callers check policy *before* fetching a catalog, and even then only lazily. |
+| `src/createos.ts` | Builds the CreateOS SDK client; owns the `CreateosClient` capability interface and `SandboxDeps`. Exists to break the `sandbox.ts` ↔ `shapes.ts` import cycle. |
+| `src/coordinator.ts` | The `Coordinator` **Durable Object**. ALL state (SQLite): job rows (owning their VM by `runner_name`, and their requested `label`), concurrency counter, pending queue, delivery dedup, `sweep`. Rows: `pending`→`provisioning`→`running`→`destroying`. Stays passive; never imports `shapes.ts`. |
 | `src/github/{jwt,auth,client}.ts` | Zero-dep GitHub App auth: RS256 JWT (Web Crypto) → installation-token cache → `GitHubClient`. |
 | `src/notify.ts` | Optional Slack-style failure webhook. No-op if unset; never throws. |
 | `template/` | Pre-baked runner rootfs (`Dockerfile` + `build.ts`). Not part of the Worker bundle. |
@@ -73,11 +75,15 @@ bun run build:template   # rebuild the ghar-runner rootfs (needs CREATEOS_* env)
 - **The Cloudflare Free plan is a hard constraint.** The DO must stay `new_sqlite_classes`; keep it passive (state only) so it hibernates; do all blocking network I/O (createSandbox poll, GitHub API, destroy) in the Worker, not the DO; the reaper is a **cron trigger**, not a DO alarm.
 - `vitest.config.ts` `miniflare.bindings` holds a **throwaway test-only PKCS#8 key** — not a secret. Real secrets live in `.dev.vars` (gitignored) or `wrangler secret`.
 - The runner launch script is embedded in `template/Dockerfile` via `printf` (the template builder permits `RUN` only — no `COPY`/heredoc). That Dockerfile is its single source of truth.
+- **Changing `RUNNER_LABEL` while jobs are in flight strands rows.** A job's requested label is persisted in `jobs.label` at `onQueued` and re-mapped to a shape at provision time against the *current* `config.runnerLabel`. Rename the var mid-flight and an old row's label no longer matches — `shapeForLabel` throws rather than slicing a garbage shape out of it, which routes to `markProvisionFailed` (logged, alerted, slot freed). Loud and safe, but expect a provision-failure alert per row queued before the rename.
+- **The shape catalog is only consulted on `queued`.** A `completed` webhook must never depend on `GET /v1/shapes` — teardown keys on runner identity, and gating it on the catalog would leak every shaped VM during a shapes outage.
+- **`src/shapes.ts` holds a module-level cache.** Tests that stub `listShapes` must call `resetShapeCacheForTests()` in `beforeEach`, or the first suite's catalog leaks into the next.
 
 ## Conventions
 
 - **bun only** — never npm/npx/node. Pin exact versions (`bun add -E`).
 - **Deploy with `bunx wrangler@latest deploy`**, so deploys always use the latest wrangler.
+- **Always be ready to roll back before pushing to prod.** Before any prod deploy: capture the current live version (`bunx wrangler@latest deployments list` → note the active version id), know the rollback command (`bunx wrangler@latest rollback [version-id]`), and confirm the change is roll-back-safe. Worker rollback reverts **code only** — a DO SQLite migration does **not** auto-revert, so every migration must be forward-compatible (additive `ALTER TABLE ADD COLUMN`; old code ignores new columns) and never destructive in a single deploy. After deploying, watch the smoke run; if it fails, roll back first and diagnose second.
 - **Implement, then test — no TDD.** Two layers: plain `vitest` for pure logic (jwt/hmac/policy/config), `@cloudflare/vitest-pool-workers` for real-DO integration (webhook flow, cap, idempotency, reaper). Mock GitHub and CreateOS at the `fetch` boundary; **never hit the network in tests**.
 - **oxlint + oxfmt** on every `.ts` change.
 - **Conventional Commits**, imperative subject ≤ 50 chars, atomic.

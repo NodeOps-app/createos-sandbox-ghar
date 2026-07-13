@@ -30,6 +30,7 @@ async function cfg(): Promise<Config> {
     runnerTemplate: "ghar-runner",
     sandboxNamePrefix: "gha-ci",
     runnerShape: "s-4vcpu-4gb",
+    minRunnerMemMib: 2048,
     runnerDiskMib: 30720,
     maxConcurrent: 0,
     provisionPolicy: "org-wide",
@@ -40,16 +41,26 @@ async function cfg(): Promise<Config> {
 }
 
 describe("GitHubClient.generateJitConfig", () => {
-  it("returns encoded_jit_config", async () => {
-    const client = new GitHubClient(await cfg(), mockFetch(githubRoutes()));
-    expect(await client.generateJitConfig("ghar-100")).toBe("ENCODED_JIT_BLOB");
+  it("returns encoded_jit_config and registers the runner under the requested label", async () => {
+    let body: unknown;
+    const routes = githubRoutes({
+      "POST /generate-jitconfig": async (req) => {
+        body = await req.json();
+        return new Response(JSON.stringify({ encoded_jit_config: "ENCODED_JIT_BLOB" }), {
+          status: 201,
+        });
+      },
+    });
+    const client = new GitHubClient(await cfg(), mockFetch(routes));
+    expect(await client.generateJitConfig("ghar-1-aa", "createos")).toBe("ENCODED_JIT_BLOB");
+    expect((body as { labels: string[] }).labels).toEqual(["createos"]);
   });
   it("throws on failure", async () => {
     const routes = githubRoutes({
       "POST /generate-jitconfig": () => new Response("bad", { status: 422 }),
     });
     const client = new GitHubClient(await cfg(), mockFetch(routes));
-    await expect(client.generateJitConfig("x")).rejects.toThrow(/422/);
+    await expect(client.generateJitConfig("x", "createos")).rejects.toThrow(/422/);
   });
 });
 

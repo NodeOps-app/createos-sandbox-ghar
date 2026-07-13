@@ -1,10 +1,15 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 
 function stub(name: string) {
   return env.COORDINATOR.get(env.COORDINATOR.idFromName(name));
 }
-const job = (id: number) => ({ jobId: id, runId: id, repoFullName: "nodeops-app/api" });
+const job = (id: number) => ({
+  jobId: id,
+  runId: id,
+  repoFullName: "nodeops-app/api",
+  label: "createos",
+});
 
 async function boot(s: ReturnType<typeof stub>, jobId: number, sandboxId: string) {
   await s.recordSandboxCreated(jobId, sandboxId, `ghar-${jobId}`);
@@ -43,5 +48,55 @@ describe("concurrency cap (MAX_CONCURRENT=2)", () => {
     const res = await s.markProvisionFailed(21); // job 21 boot threw mid-provision
     expect(res.nextPending?.jobId).toBe(22); // slot freed → 22 promoted
     expect(await s.activeCount()).toBe(2); // 20 running + 22 provisioning
+  });
+
+  it("a job queued at the cap dequeues with its label intact", async () => {
+    const co = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
+
+    // MAX_CONCURRENT is 2 in vitest.config.ts — fill both slots.
+    await co.onQueued({ jobId: 901, runId: 1, repoFullName: "o/r", label: "createos" }, "d-901");
+    await co.onQueued({ jobId: 902, runId: 1, repoFullName: "o/r", label: "createos" }, "d-902");
+
+    const third = await co.onQueued(
+      { jobId: 903, runId: 1, repoFullName: "o/r", label: "createos-8vcpu-16gb" },
+      "d-903",
+    );
+    expect(third.action).toBe("queued");
+
+    // Free a slot; the promoted job must still carry its shaped label.
+    const { nextPending } = await co.onCompleted(901);
+    expect(nextPending?.jobId).toBe(903);
+    expect(nextPending?.label).toBe("createos-8vcpu-16gb");
+  });
+
+  it("a pre-migration row (label=NULL) dequeues with the default RUNNER_LABEL", async () => {
+    const s = stub("null-label-" + Math.random());
+
+    // Fill both slots so the seeded row must wait as pending.
+    expect((await s.onQueued(job(51), "n1")).action).toBe("provision");
+    await boot(s, 51, "sb51");
+    expect((await s.onQueued(job(52), "n2")).action).toBe("provision");
+    await boot(s, 52, "sb52");
+
+    // Seed a row the way it would exist pre-migration: written straight to
+    // SQLite (not through onQueued, which always supplies a label) with a
+    // literal NULL label, as every production row will have on next deploy.
+    await runInDurableObject(s, (_instance, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO jobs (job_id, run_id, repo, sandbox_id, runner_name, label, state, created_at, booted_at)
+         VALUES (?, ?, ?, NULL, NULL, NULL, 'pending', ?, NULL)`,
+        53,
+        53,
+        "nodeops-app/api",
+        Date.now(),
+      );
+    });
+
+    // Free a slot; the seeded row must be the one promoted (oldest pending).
+    const res = await s.onCompleted(51, "ghar-51");
+    expect(res.nextPending?.jobId).toBe(53);
+    expect(res.nextPending?.label).toBe("createos"); // coalesced from RUNNER_LABEL
+    expect(res.nextPending?.label).not.toBeNull();
+    expect(res.nextPending?.label).not.toBeUndefined();
   });
 });
