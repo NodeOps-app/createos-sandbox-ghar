@@ -97,7 +97,10 @@ openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in app.pem -out app.pkcs
 
 ### 3. Build the runner template
 
-Bakes a rootfs with the Actions runner + docker + git, named `ghar-runner`:
+Bakes a rootfs with the Actions runner + git + Docker (docker-ce, with the buildx and
+compose plugins, so `docker/build-push-action`, `docker compose` and `services:` all
+work), named `ghar-runner`. The microVM has no init system, so `start-runner.sh` starts
+`dockerd` itself and waits for the socket before the runner accepts a job:
 
 ```bash
 CREATEOS_BASE_URL=https://api.sb.createos.sh \

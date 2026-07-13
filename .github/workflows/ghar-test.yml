@@ -18,6 +18,34 @@ jobs:
         run: |
           curl -fsS https://api.github.com/zen && echo
 
+      # The microVM has no init, so dockerd is started by start-runner.sh. If that
+      # ever regresses, every one of these fails with "Cannot connect to the Docker
+      # daemon" — which is exactly the breakage this job exists to catch.
+      - name: Prove the Docker daemon is up
+        run: |
+          docker version
+          docker buildx version
+          docker compose version
+          docker run --rm hello-world
+
+      - name: Prove buildx can build an image
+        run: |
+          printf 'FROM alpine:3.21\nRUN echo baked > /proof\n' > Dockerfile.smoke
+          docker buildx build -f Dockerfile.smoke -t ghar-smoke:latest --load .
+          test "$(docker run --rm ghar-smoke:latest cat /proof)" = "baked"
+
+  smoke-services:
+    runs-on: [createos]
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    steps:
+      - name: Prove service containers work
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends redis-tools
+          test "$(redis-cli -h 127.0.0.1 -p 6379 ping)" = "PONG"
+
   smoke-shaped:
     runs-on: [createos-2vcpu-2gb]
     steps:
