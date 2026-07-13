@@ -3,9 +3,6 @@ main = "src/index.ts"
 compatibility_date = "2026-07-01"
 compatibility_flags = ["nodejs_compat"]
 
-[observability]
-enabled = true
-
 [[durable_objects.bindings]]
 name = "COORDINATOR"
 class_name = "Coordinator"
@@ -40,3 +37,18 @@ RECONCILE_GRACE_MS = "180000"
 # wrangler secret put GITHUB_APP_PRIVATE_KEY   # paste full PKCS#8 PEM
 # wrangler secret put GITHUB_WEBHOOK_SECRET
 # wrangler secret put CREATEOS_API_KEY
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 0.5
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+persist = true
+head_sampling_rate = 0.5
