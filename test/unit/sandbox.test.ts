@@ -2,9 +2,12 @@ import { describe, it, expect, vi } from "vitest";
 import {
   createRunnerSandbox,
   jobIdFromRunnerName,
+  jobIdFromSandboxName,
   launchRunner,
   RUNNER_PREFIX,
   runnerNameFor,
+  sandboxNameFor,
+  sandboxNamesAreSweepable,
   teardownSandbox,
 } from "../../src/sandbox";
 import { CreateosSandboxNotFoundError } from "@nodeops-createos/sandbox";
@@ -48,6 +51,75 @@ const config = {
   runnerDiskMib: 30720,
   sandboxNamePrefix: "gha-ci",
 } as Config;
+
+describe("jobIdFromSandboxName", () => {
+  // The orphaned-SANDBOX sweep's ownership test, and the sharpest edge in this
+  // file: what it returns gets fed straight to destroy(). A false positive
+  // destroys a VM we did not create — the createos account also holds hand-made
+  // boxes and other projects' sandboxes.
+  const noPrefix = { ...config, sandboxNamePrefix: "" } as Config;
+
+  it("round-trips the name createRunnerSandbox mints (prefixed)", () => {
+    expect(jobIdFromSandboxName(sandboxNameFor(86749416515, "ignored", config), config)).toBe(
+      86749416515,
+    );
+  });
+
+  it("round-trips the name createRunnerSandbox mints (no prefix → the runner name)", () => {
+    const runner = runnerNameFor(86749416515, "ow");
+    expect(jobIdFromSandboxName(sandboxNameFor(86749416515, runner, noPrefix), noPrefix)).toBe(
+      86749416515,
+    );
+  });
+
+  it.each([
+    ["staging-db-123", "a stranger's VM that merely contains digits"],
+    ["gha-ci", "the bare prefix, no job id"],
+    ["gha-ci-", "empty job id"],
+    ["gha-ci-abc", "non-numeric job id"],
+    ["gha-ci-123-extra", "trailing junk after the job id"],
+    ["x-gha-ci-123", "not anchored at the start"],
+    ["friendly-heyrovsky", "an unrelated auto-named box"],
+    ["", "empty"],
+  ])("refuses %j — %s", (name) => {
+    expect(jobIdFromSandboxName(name, config)).toBeNull();
+  });
+
+  it("refuses a runner-shaped name when a prefix IS configured", () => {
+    expect(jobIdFromSandboxName(runnerNameFor(123, "aa"), config)).toBeNull();
+  });
+
+  it("refuses a bare prefixed name when NO prefix is configured", () => {
+    // With no prefix the VM name is the runner name, so only that grammar owns it.
+    expect(jobIdFromSandboxName("gha-ci-123", noPrefix)).toBeNull();
+  });
+
+  // The sharpest failure mode of all. Under a long prefix, job 86749416515 mints
+  // `gha-ci-nodeops-app-86749416515`, which createos truncates to
+  // `gha-ci-nodeops-app-867` — a name that parses cleanly as job 867 and even
+  // round-trips back to itself. Nothing in the NAME reveals the lie. Were the
+  // sweep to act on it, it would find no row for job 867 and destroy the VM while
+  // job 86749416515 was still running on it. So ownership is refused wholesale
+  // for any config whose names can truncate.
+  describe("a prefix long enough to truncate disables ownership entirely", () => {
+    const long = { ...config, sandboxNamePrefix: "gha-ci-nodeops-app" } as Config;
+
+    it("is not sweepable", () => {
+      expect(sandboxNamesAreSweepable(long)).toBe(false);
+      expect(sandboxNamesAreSweepable(config)).toBe(true); // the deployed prefix is fine
+      expect(sandboxNamesAreSweepable(noPrefix)).toBe(true);
+    });
+
+    it("refuses the truncated name, and the plausible-but-wrong job id it parses as", () => {
+      const minted = sandboxNameFor(86749416515, "ignored", long);
+      expect(minted).toBe("gha-ci-nodeops-app-867"); // truncated: the digits are a lie
+      expect(jobIdFromSandboxName(minted, long)).toBeNull();
+      // Even a name that is genuinely well-formed under this prefix is refused —
+      // we cannot tell it apart from a truncated one.
+      expect(jobIdFromSandboxName("gha-ci-nodeops-app-867", long)).toBeNull();
+    });
+  });
+});
 const job: PendingJob = {
   jobId: 100,
   runId: 200,
@@ -62,7 +134,12 @@ describe("createRunnerSandbox", () => {
     const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
 
     const res = await createRunnerSandbox(config, github, job, {
-      makeClient: () => ({ createSandbox, getSandbox: vi.fn(), listShapes: vi.fn() }),
+      makeClient: () => ({
+        createSandbox,
+        getSandbox: vi.fn(),
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
       attemptId: () => "k3",
     });
 
@@ -88,11 +165,21 @@ describe("createRunnerSandbox", () => {
     const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
 
     const a = await createRunnerSandbox(config, github, job, {
-      makeClient: () => ({ createSandbox, getSandbox: vi.fn(), listShapes: vi.fn() }),
+      makeClient: () => ({
+        createSandbox,
+        getSandbox: vi.fn(),
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
       attemptId: () => "k3",
     });
     const b = await createRunnerSandbox(config, github, job, {
-      makeClient: () => ({ createSandbox, getSandbox: vi.fn(), listShapes: vi.fn() }),
+      makeClient: () => ({
+        createSandbox,
+        getSandbox: vi.fn(),
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
       attemptId: () => "z9",
     });
 
@@ -104,7 +191,12 @@ describe("createRunnerSandbox", () => {
     const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
 
     await createRunnerSandbox(config, github, job, {
-      makeClient: () => ({ createSandbox, getSandbox: vi.fn(), listShapes: vi.fn() }),
+      makeClient: () => ({
+        createSandbox,
+        getSandbox: vi.fn(),
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
     });
 
     const name = github.generateJitConfig.mock.calls[0]![0] as string;
@@ -124,7 +216,12 @@ describe("createRunnerSandbox", () => {
     };
 
     await createRunnerSandbox(cfg, github, bigJob, {
-      makeClient: () => ({ createSandbox, getSandbox: vi.fn(), listShapes: vi.fn() }),
+      makeClient: () => ({
+        createSandbox,
+        getSandbox: vi.fn(),
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
     });
 
     const name = createSandbox.mock.calls[0]![0].name;
@@ -143,12 +240,20 @@ describe("createRunnerSandbox", () => {
     };
 
     await createRunnerSandbox(config, github, shapedJob, {
-      makeClient: () => ({ createSandbox, getSandbox: vi.fn(), listShapes: vi.fn() }),
+      makeClient: () => ({
+        createSandbox,
+        getSandbox: vi.fn(),
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
       attemptId: () => "aa",
     });
 
     expect(createSandbox.mock.calls[0]![0].shape).toBe("s-8vcpu-16gb");
-    expect(github.generateJitConfig).toHaveBeenCalledWith(runnerNameFor(7, "aa"), "createos-8vcpu-16gb");
+    expect(github.generateJitConfig).toHaveBeenCalledWith(
+      runnerNameFor(7, "aa"),
+      "createos-8vcpu-16gb",
+    );
   });
 });
 
@@ -168,7 +273,12 @@ describe("teardownSandbox", () => {
     const destroy = vi.fn().mockResolvedValue({ id: "sb_1", status: "destroying" });
     const getSandbox = vi.fn().mockResolvedValue({ destroy });
     await teardownSandbox(config, "sb_1", {
-      makeClient: () => ({ getSandbox, createSandbox: vi.fn(), listShapes: vi.fn() }),
+      makeClient: () => ({
+        getSandbox,
+        createSandbox: vi.fn(),
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
     });
     expect(destroy).toHaveBeenCalledOnce();
   });
@@ -181,7 +291,12 @@ describe("teardownSandbox", () => {
       );
     await expect(
       teardownSandbox(config, "sb_x", {
-        makeClient: () => ({ getSandbox, createSandbox: vi.fn(), listShapes: vi.fn() }),
+        makeClient: () => ({
+          getSandbox,
+          createSandbox: vi.fn(),
+          listShapes: vi.fn(),
+          listSandboxes: vi.fn().mockResolvedValue([]),
+        }),
       }),
     ).resolves.toBeUndefined();
   });
@@ -190,7 +305,12 @@ describe("teardownSandbox", () => {
     const getSandbox = vi.fn().mockRejectedValue(new Error("boom"));
     await expect(
       teardownSandbox(config, "sb_x", {
-        makeClient: () => ({ getSandbox, createSandbox: vi.fn(), listShapes: vi.fn() }),
+        makeClient: () => ({
+          getSandbox,
+          createSandbox: vi.fn(),
+          listShapes: vi.fn(),
+          listSandboxes: vi.fn().mockResolvedValue([]),
+        }),
       }),
     ).rejects.toThrow(/boom/);
   });

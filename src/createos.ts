@@ -5,6 +5,7 @@ import type {
   DestroyedResponse,
   ExecOptions,
   ExecResponse,
+  ListSandboxesOptions,
   RequestOptions,
   Shape,
 } from "@nodeops-createos/sandbox";
@@ -25,8 +26,18 @@ interface DestroyableSandbox {
 }
 
 /**
+ * What the orphaned-sandbox sweep needs from a listed VM: enough to decide
+ * whether it is ours and abandoned, and to destroy it if so.
+ */
+export interface ListedSandbox extends DestroyableSandbox {
+  readonly id: string;
+  readonly name?: string;
+  readonly status: string;
+}
+
+/**
  * The subset of CreateosSandboxClient this codebase actually calls. Narrower
- * than the SDK's client on purpose: a test stub only needs these three
+ * than the SDK's client on purpose: a test stub only needs these four
  * methods, not the SDK's full surface (templates/networks/disks/...).
  */
 export interface CreateosClient {
@@ -35,6 +46,7 @@ export interface CreateosClient {
     options?: CreateSandboxOptions,
   ): Promise<SandboxHandle>;
   getSandbox(id: string, options?: RequestOptions): Promise<DestroyableSandbox>;
+  listSandboxes(options?: ListSandboxesOptions): Promise<ListedSandbox[]>;
   listShapes(options?: RequestOptions): Promise<Shape[]>;
 }
 

@@ -122,6 +122,23 @@ function patchGitHub(
   return { deleted };
 }
 
+/** A VM as createos lists it. Named `gha-ci-<jobId>` — see the sandbox-sweep suite. */
+const vmName = (jobId: number) => `gha-ci-${jobId}`;
+const vm = (name: string, status = "running") => ({
+  id: `sb_${name}`,
+  name,
+  status,
+  destroy: vi.fn().mockResolvedValue({ id: `sb_${name}`, status: "destroying" }),
+});
+const depsWith = (sandboxes: ReturnType<typeof vm>[]) => ({
+  makeClient: () => ({
+    createSandbox: vi.fn(),
+    listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
+    getSandbox: vi.fn().mockResolvedValue({ destroy: vi.fn() }),
+    listSandboxes: vi.fn().mockResolvedValue(sandboxes),
+  }),
+});
+
 describe("runReconciler", () => {
   it("provisions a job GitHub reports queued but the DO never tracked", async () => {
     patchGitHub({ jobs: [{ id: 9001, status: "queued", labels: ["createos"] }] });
@@ -134,12 +151,17 @@ describe("runReconciler", () => {
     // must never fetch the shape catalog for it (isShapedLabel is false for
     // the bare label, so needsCatalog never trips) — the assertion below is
     // the proof.
-    // listShapes/getSandbox are still supplied so the makeClient factory
-    // typechecks against CreateosClient's full surface, even though neither is
-    // called at runtime here.
+    // listShapes/getSandbox/listSandboxes are still supplied so the makeClient
+    // factory typechecks against CreateosClient's full surface, even though
+    // none of them is called at runtime here.
     const listShapes = vi.fn().mockResolvedValue(shapeCatalog());
     await runReconciler(env as any, {
-      makeClient: () => ({ createSandbox, listShapes, getSandbox: vi.fn() }),
+      makeClient: () => ({
+        createSandbox,
+        listShapes,
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
     });
     await waitOnExecutionContext(ctx);
     expect(createSandbox).toHaveBeenCalledOnce();
@@ -155,7 +177,12 @@ describe("runReconciler", () => {
     const createSandbox = vi.fn();
     const listShapes = vi.fn().mockResolvedValue(shapeCatalog());
     await runReconciler(env as any, {
-      makeClient: () => ({ createSandbox, listShapes, getSandbox: vi.fn() }),
+      makeClient: () => ({
+        createSandbox,
+        listShapes,
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
     });
     expect(createSandbox).not.toHaveBeenCalled();
     expect(listShapes).not.toHaveBeenCalled();
@@ -205,7 +232,12 @@ describe("runReconciler", () => {
     // No completions/reaping in this test, so getSandbox is never actually
     // called — but runReconciler's teardown path still requires it typewise.
     await runReconciler(env as any, {
-      makeClient: () => ({ listShapes, createSandbox, getSandbox: vi.fn() }),
+      makeClient: () => ({
+        listShapes,
+        createSandbox,
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
     });
 
     expect(createSandbox).toHaveBeenCalledTimes(2);
@@ -230,7 +262,12 @@ describe("runReconciler", () => {
     };
 
     await runReconciler(blockedEnv as any, {
-      makeClient: () => ({ listShapes, createSandbox, getSandbox: vi.fn() }),
+      makeClient: () => ({
+        listShapes,
+        createSandbox,
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
     });
 
     expect(listShapes).not.toHaveBeenCalled();
@@ -263,7 +300,12 @@ describe("runReconciler", () => {
     };
 
     await runReconciler(blockedEnv as any, {
-      makeClient: () => ({ listShapes, createSandbox, getSandbox: vi.fn() }),
+      makeClient: () => ({
+        listShapes,
+        createSandbox,
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
     });
 
     expect(listShapes).toHaveBeenCalledTimes(1);
@@ -288,6 +330,7 @@ describe("runReconciler — orphaned runner sweep", () => {
       createSandbox: vi.fn(),
       listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
       getSandbox: vi.fn().mockResolvedValue({ destroy: vi.fn() }),
+      listSandboxes: vi.fn().mockResolvedValue([]),
     }),
   });
 
@@ -343,6 +386,76 @@ describe("runReconciler — orphaned runner sweep", () => {
     });
     await runReconciler(env as any, deps());
     expect(gh.deleted).toEqual([]);
+    globalThis.fetch = realFetch;
+  });
+});
+
+/**
+ * The orphaned-SANDBOX sweep: the last line of defence against a leaked VM, and
+ * the only teardown path that still works when the DO is what failed. Every other
+ * path records a `destroying` row first, which needs the Coordinator reachable at
+ * the moment of the failure. This one re-derives ownership from the VM's name.
+ *
+ * It matters more than the runner sweep: a leaked registration is clutter, but a
+ * leaked VM never self-deletes (its runner never launched) and burns capacity for
+ * as long as it lives.
+ *
+ * VM names come from SANDBOX_NAME_PREFIX (`gha-ci` in wrangler.toml, which the
+ * test env loads), so a VM is named `gha-ci-<jobId>` — NOT after its runner.
+ */
+describe("runReconciler — orphaned sandbox sweep", () => {
+  it("destroys a VM the DO holds no row for", async () => {
+    patchGitHub();
+    const orphan = vm(vmName(9801));
+    await runReconciler(env as any, depsWith([orphan]));
+    expect(orphan.destroy).toHaveBeenCalledOnce();
+    globalThis.fetch = realFetch;
+  });
+
+  it("spares a VM whose job the DO still tracks — the mid-boot window", async () => {
+    // THE safety property, same as the runner sweep: onQueued inserts the row
+    // BEFORE createRunnerSandbox creates the VM, so a VM that is merely booting
+    // always has a live row. Drop this check and the sweep eats live jobs.
+    const singleton = stub("singleton");
+    await singleton.onQueued(job(9802), "sb-sweep-inflight");
+    patchGitHub();
+    const booting = vm(vmName(9802));
+    await runReconciler(env as any, depsWith([booting]));
+    expect(booting.destroy).not.toHaveBeenCalled();
+    globalThis.fetch = realFetch;
+  });
+
+  it("never destroys a VM it did not create", async () => {
+    // The createos account also holds hand-made boxes and other projects' VMs.
+    // The name is the only thing standing between them and a destroy call.
+    patchGitHub();
+    const strangers = [
+      vm("friendly-heyrovsky"),
+      vm("cos-tuntest"),
+      vm("staging-db-123"),
+      vm("ghar-runner"),
+    ];
+    await runReconciler(env as any, depsWith(strangers));
+    for (const s of strangers) expect(s.destroy).not.toHaveBeenCalled();
+    globalThis.fetch = realFetch;
+  });
+
+  it("ignores VMs that are already gone", async () => {
+    patchGitHub();
+    const dead = vm(vmName(9803), "destroyed");
+    await runReconciler(env as any, depsWith([dead]));
+    expect(dead.destroy).not.toHaveBeenCalled();
+    globalThis.fetch = realFetch;
+  });
+
+  it("still runs when GitHub is down — the leaks it cleans up are not GitHub's", async () => {
+    // Steps A/B/C all depend on GitHub reads. This one must not: a VM leaked by a
+    // failed DO call has nothing to do with GitHub, and capacity keeps burning
+    // during an outage.
+    globalThis.fetch = (async () => new Response("boom", { status: 500 })) as typeof fetch;
+    const orphan = vm(vmName(9804));
+    await runReconciler(env as any, depsWith([orphan]));
+    expect(orphan.destroy).toHaveBeenCalledOnce();
     globalThis.fetch = realFetch;
   });
 });

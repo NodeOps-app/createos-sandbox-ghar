@@ -14,12 +14,15 @@ import { GitHubClient } from "./github/client";
 import {
   createRunnerSandbox,
   jobIdFromRunnerName,
+  jobIdFromSandboxName,
   launchRunner,
+  sandboxNamesAreSweepable,
   teardownSandbox,
   type SandboxDeps,
 } from "./sandbox";
+import { makeSandboxClient } from "./createos";
 import { notify } from "./notify";
-import type { PendingJob, Config, QueuedJob, Runner } from "./types";
+import type { PendingJob, Config, ProvisionFailedResult, QueuedJob, Runner } from "./types";
 
 function coordinator(env: Bindings) {
   return env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
@@ -52,40 +55,92 @@ async function provisionAndRecord(
     return;
   }
 
-  // Record the VM before launching it: from here a `completed` tears it down
-  // via runner identity, so the runner launch below can never orphan it.
-  const decision = await co.recordSandboxCreated(job.jobId, sandboxId, runnerName);
-  if (decision.action === "destroy") {
-    // Job already completed/cancelled during creation — destroy the orphan now.
-    await teardownSandbox(config, sandboxId, deps);
-    return;
-  }
-
+  // From here a VM EXISTS. Every exit below must account for it: the runner has
+  // not launched yet, so the VM will never self-delete, and if we lose track of
+  // its id it leaks silently until the orphaned-sandbox sweep finds it. Hence
+  // one guard around the whole region — the failure path always carries
+  // sandboxId, so the teardown is persisted (or at minimum attempted) rather
+  // than dropped on the floor.
   try {
+    // Record the VM before launching it: from here a `completed` tears it down
+    // via runner identity, so the runner launch below can never orphan it.
+    const decision = await co.recordSandboxCreated(job.jobId, sandboxId, runnerName);
+    if (decision.action === "destroy") {
+      // Job already completed/cancelled during creation — destroy the orphan.
+      // A throw here is caught below, which persists the teardown for retry.
+      await teardownSandbox(config, sandboxId, deps);
+      return;
+    }
     await launchRunner(sandbox);
     await co.markRunning(job.jobId);
   } catch (err) {
-    // VM exists + is recorded → destroy it, then free the slot + advance.
-    await teardownSandbox(config, sandboxId, deps).catch(() => {});
-    await failProvision(env, config, job, deps, err);
+    await failProvision(env, config, job, deps, err, sandboxId);
   }
 }
 
-/** Logs + alerts a provision failure, frees the slot, and boots the next pending job. */
+/**
+ * Logs + alerts a provision failure, disposes of any VM it left behind, frees
+ * the slot, and boots the next pending job.
+ *
+ * `sandboxId` is passed whenever a VM was created — including when the DO call
+ * that was supposed to record it is what failed, which is exactly the case where
+ * the Coordinator does not know the VM exists and only we do. markProvisionFailed
+ * persists it as a `destroying` row before we attempt the destroy, so a destroy
+ * that then fails is retried by the reaper instead of leaking.
+ *
+ * If markProvisionFailed itself throws (the DO is unreachable — the one case
+ * where nothing can be persisted at all) we still attempt the destroy inline, and
+ * the orphaned-sandbox sweep is the backstop if even that fails.
+ */
 async function failProvision(
   env: Bindings,
   config: Config,
   job: PendingJob,
   deps: SandboxDeps,
   err: unknown,
+  sandboxId?: string,
 ): Promise<void> {
   console.error(`provision failed job=${job.jobId}: ${String(err)}`);
   await notify(
     config,
     `ghar provision failed — job ${job.jobId} (${job.repoFullName}): ${String(err)}`,
   );
-  const { nextPending } = await coordinator(env).markProvisionFailed(job.jobId);
-  if (nextPending) await provisionAndRecord(env, nextPending, deps);
+
+  let result: ProvisionFailedResult;
+  try {
+    result = await coordinator(env).markProvisionFailed(job.jobId, sandboxId);
+  } catch (doErr) {
+    console.error(`markProvisionFailed unreachable job=${job.jobId}: ${String(doErr)}`);
+    if (sandboxId) await destroyUnrecorded(config, job.jobId, sandboxId, deps);
+    return;
+  }
+
+  if (result.toDestroy) await destroyAndConfirm(env, config, result.toDestroy, deps);
+  if (result.nextPending) await provisionAndRecord(env, result.nextPending, deps);
+}
+
+/**
+ * Destroys a VM the Coordinator holds no row for — the DO was unreachable, so
+ * there is nowhere to persist a retry. Best-effort by construction: on failure
+ * the VM is a true orphan and only `sweepOrphanedSandboxes` can still reclaim it,
+ * so this shouts rather than throwing into a `waitUntil` nobody reads.
+ */
+async function destroyUnrecorded(
+  config: Config,
+  jobId: number,
+  sandboxId: string,
+  deps: SandboxDeps,
+): Promise<void> {
+  try {
+    await teardownSandbox(config, sandboxId, deps);
+  } catch (err) {
+    console.error(`unrecorded teardown failed sandbox=${sandboxId} job=${jobId}: ${String(err)}`);
+    await notify(
+      config,
+      `ghar VM leaked — sandbox ${sandboxId} (job ${jobId}) has no Coordinator row and could not be ` +
+        `destroyed: ${String(err)}. The orphaned-sandbox sweep will retry.`,
+    );
+  }
 }
 
 export async function handleWebhook(
@@ -213,6 +268,77 @@ async function destroyAndConfirm(
  */
 const MAX_RUNNER_DELETES_PER_TICK = 10;
 
+/** Destroys at most this many orphaned VMs per cron tick. Same budget logic as above. */
+const MAX_SANDBOX_DESTROYS_PER_TICK = 5;
+
+/**
+ * Destroys the microVMs no Coordinator row owns — the last line of defence
+ * against a leaked VM, and the only one that works when the DO itself is the
+ * thing that failed.
+ *
+ * Every other teardown path routes through a `destroying` row, so it needs the
+ * DO to be reachable at the moment of failure. This one does not: it re-derives
+ * ownership from the VM's NAME, which was minted from the job id, so a VM whose
+ * teardown record was never written (recordSandboxCreated threw; a raced
+ * `completed` dropped the row before we could persist) is still reclaimable. It
+ * matters more here than for runners because a leaked VM is not merely clutter —
+ * its runner never launched, so it never self-deletes, and it burns capacity for
+ * as long as it exists.
+ *
+ * Same three-part ownership proof as the runner sweep, and the same safety
+ * oracle: `onQueued` inserts the job row BEFORE `createRunnerSandbox` creates the
+ * VM, so a VM that is merely mid-boot ALWAYS has a live row and is never a
+ * target. Listing createos BEFORE reading the DO closes the other direction. A
+ * name that does not round-trip through `sandboxNameFor` is not ours (the
+ * account also holds hand-made boxes) and is never touched.
+ */
+async function sweepOrphanedSandboxes(
+  env: Bindings,
+  config: Config,
+  deps: SandboxDeps,
+): Promise<void> {
+  // A prefix long enough to truncate a minted name makes ownership unprovable,
+  // and an unprovable owner here means destroying a VM with a job still on it.
+  // Refuse the whole sweep rather than act on names we cannot trust — loudly,
+  // because the cost is that leaked VMs stop being reclaimed.
+  if (!sandboxNamesAreSweepable(config)) {
+    console.warn(
+      `sandbox sweep: DISABLED — SANDBOX_NAME_PREFIX="${config.sandboxNamePrefix}" is long enough ` +
+        `that createos truncates the VM name, so a VM's job id cannot be proven. Leaked VMs will ` +
+        `NOT be reclaimed until the prefix is shortened.`,
+    );
+    return;
+  }
+
+  const client = makeSandboxClient(config, deps);
+  const sandboxes = await client.listSandboxes();
+  const live = new Set(await coordinator(env).liveJobIds());
+
+  const orphans = sandboxes.filter((s) => {
+    if (s.status === "destroyed" || s.status === "failed") return false;
+    if (!s.name) return false;
+    const jobId = jobIdFromSandboxName(s.name, config);
+    return jobId !== null && !live.has(jobId);
+  });
+  if (orphans.length === 0) return;
+
+  const batch = orphans.slice(0, MAX_SANDBOX_DESTROYS_PER_TICK);
+  if (batch.length < orphans.length) {
+    console.warn(
+      `sandbox sweep: ${orphans.length} orphaned VMs found, destroying ${batch.length} this tick ` +
+        `(MAX_SANDBOX_DESTROYS_PER_TICK=${MAX_SANDBOX_DESTROYS_PER_TICK}); the rest follow next cron`,
+    );
+  }
+
+  const results = await Promise.allSettled(batch.map((s) => s.destroy()));
+  const failed = results.filter((r) => r.status === "rejected");
+  for (const f of failed) console.error(`sandbox sweep: destroy failed: ${String(f.reason)}`);
+  console.log(
+    `sandbox sweep: destroyed ${batch.length - failed.length}/${batch.length} orphaned VM(s): ` +
+      batch.map((s) => s.name).join(", "),
+  );
+}
+
 /**
  * Deletes the GitHub runner registrations we minted for jobs that never
  * completed one — createSandbox failed, the job was cancelled mid-boot, the VM
@@ -317,13 +443,14 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
     console.error(`reconcile: runner sweep skipped: ${String(err)}`);
   }
 
-  // B. Re-drive every still-queued label job GitHub knows about.
-  let queued: QueuedJob[];
+  // B. Re-drive every still-queued label job GitHub knows about. An outage here
+  //    skips only the GitHub-dependent work — it must NOT skip step D, whose
+  //    leaked VMs are not GitHub's doing and keep burning capacity regardless.
+  let queued: QueuedJob[] = [];
   try {
     queued = await github.listQueuedJobs();
   } catch (err) {
     console.error(`reconcile: queued-job poll failed: ${String(err)}`);
-    return;
   }
 
   // Pure prefilter — no network. Each candidate's requested label is resolved
@@ -392,16 +519,25 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
   await Promise.allSettled(toProvision.map((job) => provisionAndRecord(env, job, deps)));
 
   // C. Delete the GitHub runner registrations left behind by jobs that never ran
-  //    one. Deliberately LAST: it is the least critical work in the tick, so if
-  //    the Free-plan subrequest budget runs out it starves here instead of in
-  //    provisioning or teardown, and the next cron picks up what it missed.
-  //    Reuses step A's runner list — zero extra API cost — so a failed read there
-  //    skips this too.
+  //    one. Deliberately LATE: it is less critical than provisioning/teardown, so
+  //    if the Free-plan subrequest budget runs out it starves here rather than
+  //    there, and the next cron picks up what it missed. Reuses step A's runner
+  //    list — zero extra API cost — so a failed read there skips this too.
   if (runners) {
     try {
       await sweepOrphanedRunners(env, github, runners);
     } catch (err) {
       console.error(`reconcile: orphaned-runner sweep failed: ${String(err)}`);
     }
+  }
+
+  // D. Destroy the microVMs no row owns. LAST, but unlike (C) this reclaims real
+  //    capacity: a leaked VM's runner never launched, so it never self-deletes.
+  //    Independent of (A)/(B) — it must still run when GitHub is down, since the
+  //    leaks it cleans up have nothing to do with GitHub.
+  try {
+    await sweepOrphanedSandboxes(env, config, deps);
+  } catch (err) {
+    console.error(`reconcile: orphaned-sandbox sweep failed: ${String(err)}`);
   }
 }

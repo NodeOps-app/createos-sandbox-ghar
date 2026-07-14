@@ -101,6 +101,8 @@ export interface SandboxRecordDecision {
 
 /** DO → Worker after a provision failure: the next pending job to boot, if any. */
 export interface ProvisionFailedResult {
+  /** Set when the failure left a live VM behind — destroy it, then confirm. */
+  toDestroy: TeardownTask | null;
   nextPending: PendingJob | null;
 }
 

@@ -18,6 +18,26 @@ describe("scaffold", () => {
   });
 });
 
+const ids = (r: { toDestroy: { sandboxId: string }[] }) => r.toDestroy.map((t) => t.sandboxId);
+const singleton = () => env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
+
+/** POSTs a signed `queued` webhook for `jobId` and drains the waitUntil work. */
+async function postQueued(jobId: number, deps: object) {
+  const body = workflowJobPayload({ action: "queued", jobId });
+  const req = new Request("https://ctrl.local/webhook", {
+    method: "POST",
+    headers: {
+      "X-Hub-Signature-256": await sign(env.GITHUB_WEBHOOK_SECRET as string, body),
+      "X-GitHub-Delivery": `dlv-${jobId}`,
+    },
+    body,
+  });
+  const ctx = createExecutionContext();
+  const res = await handleWebhook(req, env as any, ctx, deps as any);
+  await waitOnExecutionContext(ctx);
+  return res;
+}
+
 const realFetch = globalThis.fetch;
 function patchGitHub() {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -48,7 +68,12 @@ describe("full provision flow", () => {
     // fetch (listShapes) and teardown (getSandbox) — even though this job's
     // bare label and happy-path boot never reach either at runtime.
     const deps = {
-      makeClient: () => ({ createSandbox, getSandbox: vi.fn(), listShapes: vi.fn() }),
+      makeClient: () => ({
+        createSandbox,
+        getSandbox: vi.fn(),
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
     };
 
     const body = workflowJobPayload({ action: "queued", jobId: 500 });
@@ -79,7 +104,12 @@ describe("full provision flow", () => {
     // Ambiguous-label short-circuits before any client call, but the type
     // still requires the full capability set handleWebhook can reach.
     const deps = {
-      makeClient: () => ({ createSandbox, getSandbox: vi.fn(), listShapes: vi.fn() }),
+      makeClient: () => ({
+        createSandbox,
+        getSandbox: vi.fn(),
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
     };
 
     const body = workflowJobPayload({
@@ -114,5 +144,84 @@ describe("full provision flow", () => {
     });
     const res = await worker.fetch(req, env as any, createExecutionContext());
     expect(res.status).toBe(401);
+  });
+});
+
+/**
+ * Once createSandbox returns, a VM EXISTS — and its runner has not launched, so
+ * it will never self-delete. Every failure from that point on must still dispose
+ * of it. These drive the real webhook path and assert on the destroy call, so a
+ * regression that drops the sandbox id shows up as a VM nobody destroyed.
+ */
+describe("a provision that fails after the VM exists never leaks it", () => {
+  it("destroys the VM when the runner fails to launch", async () => {
+    patchGitHub();
+    const destroy = vi.fn().mockResolvedValue({ id: "sb_launchfail", status: "destroying" });
+    const createSandbox = vi.fn().mockResolvedValue({
+      id: "sb_launchfail",
+      runCommand: vi.fn().mockRejectedValue(new Error("exec refused")),
+    });
+    const getSandbox = vi.fn().mockResolvedValue({ destroy });
+
+    await postQueued(510, {
+      makeClient: () => ({
+        createSandbox,
+        getSandbox,
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
+    });
+
+    expect(createSandbox).toHaveBeenCalledOnce();
+    expect(destroy).toHaveBeenCalledOnce(); // the VM is gone, not orphaned
+    expect(await singleton().liveJobIds()).not.toContain(510); // teardown confirmed → row cleared
+    globalThis.fetch = realFetch;
+  });
+
+  it("keeps a destroying row for the reaper when the destroy ALSO fails", async () => {
+    patchGitHub();
+    const createSandbox = vi.fn().mockResolvedValue({
+      id: "sb_stuck",
+      runCommand: vi.fn().mockRejectedValue(new Error("exec refused")),
+    });
+    // Both the launch and the compensating destroy fail — the worst case, and the
+    // one that used to leak: the row was deleted and the VM left running.
+    const getSandbox = vi.fn().mockRejectedValue(new Error("createos down"));
+
+    await postQueued(511, {
+      makeClient: () => ({
+        createSandbox,
+        getSandbox,
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
+    });
+
+    // The VM survives as a durable teardown task, so the next sweep retries it.
+    expect(ids(await singleton().sweep(Date.now(), 3_600_000))).toContain("sb_stuck");
+  });
+
+  it("destroys the VM when the job is cancelled mid-create", async () => {
+    patchGitHub();
+    const destroy = vi.fn().mockResolvedValue({ id: "sb_cancelled", status: "destroying" });
+    const getSandbox = vi.fn().mockResolvedValue({ destroy });
+    // The job completes WHILE createSandbox is in flight — so by the time we go to
+    // record the VM, its row is already gone. The VM is real and must still die.
+    const createSandbox = vi.fn().mockImplementation(async () => {
+      await singleton().onCompleted(512);
+      return { id: "sb_cancelled", runCommand: vi.fn() };
+    });
+
+    await postQueued(512, {
+      makeClient: () => ({
+        createSandbox,
+        getSandbox,
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
+    });
+
+    expect(destroy).toHaveBeenCalled();
+    globalThis.fetch = realFetch;
   });
 });

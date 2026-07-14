@@ -64,6 +64,7 @@ describe("shape labels end-to-end", () => {
         createSandbox,
         listShapes: async () => shapeCatalog(),
         getSandbox: vi.fn(),
+        listSandboxes: async () => [],
       }),
     };
 
@@ -87,6 +88,7 @@ describe("shape labels end-to-end", () => {
         createSandbox,
         listShapes: async () => shapeCatalog(),
         getSandbox: vi.fn(),
+        listSandboxes: async () => [],
       }),
     };
 
@@ -124,6 +126,7 @@ describe("shape labels end-to-end", () => {
         createSandbox,
         listShapes: async () => shapeCatalog(),
         getSandbox: async () => ({ destroy }),
+        listSandboxes: async () => [],
       }),
     };
     await post(
@@ -145,6 +148,7 @@ describe("shape labels end-to-end", () => {
           throw new Error("503");
         },
         getSandbox: async () => ({ destroy }),
+        listSandboxes: async () => [],
       }),
     };
     const res = await post(
@@ -180,6 +184,7 @@ describe("shape labels end-to-end", () => {
         createSandbox: fillerCreate,
         listShapes: async () => shapeCatalog(),
         getSandbox: vi.fn(),
+        listSandboxes: async () => [],
       }),
     };
 
@@ -239,6 +244,7 @@ describe("shape labels end-to-end", () => {
         getSandbox: async () => ({ destroy }),
         createSandbox: promoteCreate,
         listShapes: async () => shapeCatalog(),
+        listSandboxes: async () => [],
       }),
     };
     const completedRes = await post(
@@ -280,6 +286,7 @@ describe("shape labels end-to-end", () => {
           throw new Error("503");
         },
         getSandbox: vi.fn(),
+        listSandboxes: async () => [],
       }),
     };
 
@@ -308,7 +315,12 @@ describe("shape labels end-to-end", () => {
     const createSandbox = vi.fn();
     const listShapes = vi.fn().mockResolvedValue(shapeCatalog());
     const deps = {
-      makeClient: () => ({ createSandbox, listShapes, getSandbox: vi.fn() }),
+      makeClient: () => ({
+        createSandbox,
+        listShapes,
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
     };
     const blockedEnv = {
       ...env,
@@ -342,7 +354,12 @@ describe("shape labels end-to-end", () => {
     const createSandbox = vi.fn();
     const listShapes = vi.fn().mockResolvedValue(shapeCatalog());
     const deps = {
-      makeClient: () => ({ createSandbox, listShapes, getSandbox: vi.fn() }),
+      makeClient: () => ({
+        createSandbox,
+        listShapes,
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
     };
     const blockedEnv = {
       ...env,

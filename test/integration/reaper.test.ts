@@ -68,12 +68,80 @@ describe("reaper", () => {
     // for any pending job a freed slot promotes — none here, so this never
     // fires, but the type still requires createSandbox/listShapes present.
     const createSandbox = vi.fn();
-    const deps = { makeClient: () => ({ getSandbox, createSandbox, listShapes: vi.fn() }) };
+    const deps = {
+      makeClient: () => ({
+        getSandbox,
+        createSandbox,
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
+    };
 
     await expect(runReaper(env as any, deps)).resolves.toBeUndefined();
     expect(destroy).toHaveBeenCalled();
     // Confirmed teardown clears the row; a second sweep finds nothing.
     expect(ids(await singleton.sweep(Date.now(), 3_600_000))).not.toContain("sb_902");
+  });
+});
+
+/**
+ * A provision that fails AFTER its VM exists must leave a durable teardown
+ * record. Deleting the row instead — as this used to — threw away the only trace
+ * of a live VM, and since its runner never launched it never self-deletes: the
+ * VM would burn capacity forever, invisibly. `destroying` is the retry state the
+ * reaper already knows how to drain.
+ */
+async function queued(s: Stub, jobId: number) {
+  await s.onQueued(
+    { jobId, runId: jobId, repoFullName: "nodeops-app/api", label: "createos" },
+    `pf-${jobId}`,
+  );
+}
+
+describe("markProvisionFailed disposes of the VM it left behind", () => {
+  it("parks a row that owns a VM in destroying, and frees its slot", async () => {
+    const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("pf1-" + Math.random()));
+    await queued(s, 940);
+    await s.recordSandboxCreated(940, "sb_940", runnerName(940));
+
+    const { toDestroy } = await s.markProvisionFailed(940, "sb_940");
+
+    expect(toDestroy).toEqual({ jobId: 940, sandboxId: "sb_940" });
+    expect(await s.activeCount()).toBe(0); // destroying does not hold a slot
+    // The row survives, so an unconfirmed teardown is retried rather than lost.
+    expect(ids(await s.sweep(Date.now(), 3_600_000))).toContain("sb_940");
+  });
+
+  it("persists a VM the DO never learned about (recordSandboxCreated is what failed)", async () => {
+    const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("pf2-" + Math.random()));
+    await queued(s, 941); // row exists, but sandbox_id was never recorded
+
+    const { toDestroy } = await s.markProvisionFailed(941, "sb_941");
+
+    expect(toDestroy).toEqual({ jobId: 941, sandboxId: "sb_941" });
+    expect(ids(await s.sweep(Date.now(), 3_600_000))).toContain("sb_941");
+  });
+
+  it("still drops a row that never got a VM", async () => {
+    const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("pf3-" + Math.random()));
+    await queued(s, 942);
+
+    const { toDestroy } = await s.markProvisionFailed(942);
+
+    expect(toDestroy).toBeNull();
+    expect(await s.activeCount()).toBe(0);
+    expect(await s.liveJobIds()).not.toContain(942);
+  });
+
+  it("hands back a VM whose row a raced completed already dropped", async () => {
+    const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("pf4-" + Math.random()));
+    await queued(s, 943);
+    await s.onCompleted(943); // cancelled mid-create → row gone, no VM known
+
+    // The Worker still holds a live VM. Nothing to persist against, but it must
+    // come back to be destroyed rather than be silently forgotten.
+    const { toDestroy } = await s.markProvisionFailed(943, "sb_943");
+    expect(toDestroy).toEqual({ jobId: 943, sandboxId: "sb_943" });
   });
 });
 

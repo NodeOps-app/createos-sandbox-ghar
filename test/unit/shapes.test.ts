@@ -35,9 +35,16 @@ const CATALOG = [
 ];
 
 function depsWith(listShapes: () => Promise<Shape[]>) {
-  // CreateosClient is a flat interface (all 3 methods); createSandbox/getSandbox
-  // are unused by usableShapes/fetchCatalog but must be present to typecheck.
-  return { makeClient: () => ({ createSandbox: vi.fn(), getSandbox: vi.fn(), listShapes }) };
+  // CreateosClient is a flat interface (all 4 methods); createSandbox/getSandbox/
+  // listSandboxes are unused by usableShapes/fetchCatalog but must be present to typecheck.
+  return {
+    makeClient: () => ({
+      createSandbox: vi.fn(),
+      getSandbox: vi.fn(),
+      listShapes,
+      listSandboxes: vi.fn().mockResolvedValue([]),
+    }),
+  };
 }
 
 beforeEach(() => {

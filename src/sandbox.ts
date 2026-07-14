@@ -54,6 +54,72 @@ function clampSandboxName(name: string): string {
 }
 
 /**
+ * The VM's name. Cosmetic to provisioning (teardown keys on sandbox_id and
+ * runner identity, never on this) but load-bearing to the orphaned-sandbox
+ * sweep, which has nothing else to go on: a leaked VM is by definition one the
+ * Coordinator has no row for, so its name is the only thing tying it back to a
+ * job id.
+ */
+export function sandboxNameFor(jobId: number, runnerName: string, config: Config): string {
+  return clampSandboxName(
+    config.sandboxNamePrefix ? `${config.sandboxNamePrefix}-${jobId}` : runnerName,
+  );
+}
+
+/**
+ * The widest job id we assume GitHub will ever mint. It is at 11 digits today;
+ * 13 is the same headroom the runner-name budget is sized against.
+ */
+const MAX_JOB_ID_DIGITS = 13;
+
+/**
+ * Whether a VM's name can prove which job it belongs to under this config — the
+ * precondition for the orphaned-sandbox sweep being safe to run at all.
+ *
+ * It fails when `SANDBOX_NAME_PREFIX` is long enough that `clampSandboxName` can
+ * truncate a minted name, because truncation is IRREVERSIBLE and silently
+ * plausible. With prefix `gha-ci-nodeops-app`, job 86749416515 mints
+ * `gha-ci-nodeops-app-86749416515`, which clamps to `gha-ci-nodeops-app-867` —
+ * and that parses cleanly as job **867**, even round-tripping back to itself. A
+ * sweep reading that name would conclude the VM belongs to a job it has no row
+ * for and destroy it, WHILE JOB 86749416515 IS STILL RUNNING ON IT. No parser can
+ * recover the lost digits, so the only safe answer is to not sweep on such names.
+ * (The deployed prefix `gha-ci` is 6 chars and never clamps.)
+ */
+export function sandboxNamesAreSweepable(config: Config): boolean {
+  // No prefix → the VM name IS the runner name, whose grammar is self-describing
+  // and length-budgeted already.
+  if (!config.sandboxNamePrefix) return true;
+  return `${config.sandboxNamePrefix}-`.length + MAX_JOB_ID_DIGITS <= MAX_SANDBOX_NAME;
+}
+
+/**
+ * The job id a VM name was minted for, or null if we did not mint it. The
+ * orphaned-sandbox sweep's ownership test — whatever this returns gets fed to a
+ * destroy call, so a false positive destroys someone else's VM.
+ *
+ * With no prefix the VM name IS the runner name, so ownership is the runner-name
+ * grammar and nothing else. With a prefix the name must be exactly
+ * `<prefix>-<digits>` — a loose `/(\d+)/` search would be catastrophic here,
+ * happily reading `123` out of a stranger's `staging-db-123`.
+ */
+export function jobIdFromSandboxName(name: string, config: Config): number | null {
+  if (!config.sandboxNamePrefix) return jobIdFromRunnerName(name);
+  if (!sandboxNamesAreSweepable(config)) return null; // names may be truncated → cannot prove ownership
+
+  const prefix = `${config.sandboxNamePrefix}-`;
+  if (!name.startsWith(prefix)) return null;
+  const rest = name.slice(prefix.length);
+  if (!/^\d+$/.test(rest)) return null;
+  const jobId = Number(rest);
+  if (!Number.isSafeInteger(jobId)) return null;
+
+  // Re-mint and compare, so a name that only *looks* like ours (leading zeros,
+  // stray padding) cannot slip through.
+  return `${prefix}${jobId}` === name ? jobId : null;
+}
+
+/**
  * Step 1 of provisioning: mint JIT config and create the microVM from the
  * pre-baked runner template. Returns the handle + runner name so the caller can
  * record ownership in the Coordinator BEFORE launching the runner — closing the
@@ -86,13 +152,12 @@ export async function createRunnerSandbox(
   const runnerName = runnerNameFor(job.jobId, attemptId());
   const jitConfig = await github.generateJitConfig(runnerName, job.label);
 
-  // The createos VM name is cosmetic (teardown keys on sandbox_id + runner
-  // identity, not this). Keep it short + stable per job (`gha-ci-<jobId>`, no
-  // per-attempt suffix): collisions are harmless here, and dropping the runner's
-  // `cos-`/attempt token keeps it under the createos name cap for dashboard use.
-  const sandboxName = clampSandboxName(
-    config.sandboxNamePrefix ? `${config.sandboxNamePrefix}-${job.jobId}` : runnerName,
-  );
+  // Short + stable per job (`gha-ci-<jobId>`, no per-attempt suffix): collisions
+  // are harmless, and dropping the runner's `cos-`/attempt token keeps it under
+  // the createos name cap for dashboard use. Minted through the same function
+  // the orphan sweep parses with — drift here and the sweep stops recognising
+  // our own VMs.
+  const sandboxName = sandboxNameFor(job.jobId, runnerName, config);
 
   const c = makeSandboxClient(config, deps);
   const sandbox = await c.createSandbox({

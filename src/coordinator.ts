@@ -233,17 +233,42 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   /**
-   * Provisioning failed (JIT mint / createSandbox / launch threw). Drops the
-   * row so the slot frees immediately instead of being held until the reaper,
-   * and hands back the next pending job to boot. Leaves a `destroying` row
-   * alone — a raced `completed` already claimed that teardown.
+   * Provisioning failed (JIT mint / createSandbox / launch threw). Frees the
+   * slot immediately rather than holding it until the reaper, and hands back the
+   * next pending job to boot.
+   *
+   * If the failure happened AFTER a VM was created, the row is not dropped: it
+   * flips to `destroying` (carrying `sandboxId`, which the row may not have
+   * learned yet if recordSandboxCreated is what failed) and the teardown is
+   * returned for the Worker to run. Deleting it instead — as this used to —
+   * threw away the only durable record of a live VM, so a destroy that then
+   * failed leaked it forever, invisibly: the runner never launched, so the VM
+   * never self-deletes either. `destroying` is retried by the reaper until it
+   * confirms, and does not count against the cap, so the slot still frees at
+   * once. Leaves an existing `destroying` row alone — a raced `completed`
+   * already claimed that teardown.
    */
-  async markProvisionFailed(jobId: number): Promise<ProvisionFailedResult> {
-    this.#sql.exec(
-      `DELETE FROM jobs WHERE job_id = ? AND state IN ('provisioning','pending')`,
-      jobId,
-    );
-    return { nextPending: this.#dequeuePending() };
+  async markProvisionFailed(jobId: number, sandboxId?: string): Promise<ProvisionFailedResult> {
+    const row = this.#rowByJob(jobId);
+    let toDestroy: TeardownTask | null = null;
+    const vm = sandboxId ?? row?.sandbox_id ?? null;
+
+    if (row && row.state !== "destroying" && vm) {
+      this.#sql.exec(
+        `UPDATE jobs SET state = 'destroying', sandbox_id = ? WHERE job_id = ?`,
+        vm,
+        jobId,
+      );
+      toDestroy = { jobId, sandboxId: vm };
+    } else if (row && row.state !== "destroying") {
+      this.#sql.exec(`DELETE FROM jobs WHERE job_id = ?`, jobId); // never got a VM
+    } else if (!row && vm) {
+      // A raced `completed` already dropped the row, but we hold a live VM. There
+      // is nothing left to persist the teardown against, so hand it back to be
+      // destroyed now and let the orphaned-sandbox sweep backstop a failure.
+      toDestroy = { jobId, sandboxId: vm };
+    }
+    return { toDestroy, nextPending: this.#dequeuePending() };
   }
 
   /**
