@@ -141,9 +141,14 @@ For local `wrangler dev`, copy `.dev.vars.example` → `.dev.vars` and fill the 
 
 ### 5. Deploy
 
-```bash
-bun run deploy      # bunx wrangler@latest deploy
-```
+The repo is connected to **Cloudflare Workers Builds**, so **a push to `main` deploys it**. No
+CLI step, no deploy workflow in `.github/workflows/` — Cloudflare builds from the connected
+repo. Watch the build in the Cloudflare dashboard (Workers → this Worker → Deployments).
+
+`bun run deploy` (`bunx wrangler@latest deploy`) still works and is the escape hatch for a
+hotfix when you cannot push, but it deploys your **working tree**, not `main` — so it can
+quietly ship uncommitted local changes, and a push landing behind it will overwrite whatever
+it shipped. Prefer the push.
 
 Point the GitHub App's webhook URL at the deployed Worker (`https://<worker>.workers.dev/webhook`).
 
