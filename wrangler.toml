@@ -18,7 +18,7 @@ crons = ["*/5 * * * *"]
 GITHUB_ORG = "NodeOps-app"
 CREATEOS_BASE_URL = "https://api.sb.createos.sh"
 RUNNER_LABEL = "createos"
-RUNNER_TEMPLATE = "ghar-runner"
+RUNNER_TEMPLATE = "ghar-runner-next"
 SANDBOX_NAME_PREFIX = "gha-ci"
 RUNNER_SHAPE = "s-4vcpu-4gb"
 # Shapes below this are discovered from /v1/shapes but never offered as runner
