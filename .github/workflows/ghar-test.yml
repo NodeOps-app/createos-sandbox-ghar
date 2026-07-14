@@ -46,6 +46,74 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends redis-tools
           test "$(redis-cli -h 127.0.0.1 -p 6379 ping)" = "PONG"
 
+  # The template ships no language runtimes on purpose — every repo pins its own version,
+  # so the toolchains arrive at job time via setup-* / asdf. This job is the contract test
+  # for that bet: it fails if the microVM ever loses the substrate those installers need
+  # (/dev/fd for asdf's checksum, /dev/shm for shared memory, a C toolchain for cgo, and a
+  # tool cache at the path setup-python's RUNPATH is hard-linked to).
+  smoke-toolchain:
+    runs-on: [createos]
+    steps:
+      - name: Prove the ubuntu-latest baseline is present
+        run: |
+          for b in gh gcc g++ make python3 wget zip bzip2 zstd file unzip xz jq openssl ssh git; do
+            command -v "$b" >/dev/null || { echo "missing from template: $b"; exit 1; }
+          done
+          gh --version | head -1
+
+      # Without /dev/fd this dies with "sha256sum: /dev/fd/63: No such file or directory",
+      # which is how asdf's golang plugin failed before start-runner.sh symlinked it.
+      - name: Prove process substitution and /dev/shm work
+        run: |
+          test "$(cat <(echo ok))" = ok
+          diff <(echo same) <(echo same)
+          python3 -c "import multiprocessing as mp; q = mp.Queue(); q.put('shm'); assert q.get() == 'shm'"
+
+      - name: Prove gh is authenticated against the API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api /rate_limit --jq '.rate.limit'
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.3"
+      - name: Prove cgo and the race detector work
+        run: |
+          mkdir -p /tmp/cgo && cd /tmp/cgo
+          go mod init smoke >/dev/null
+          printf 'package smoke\n\n/*\n#include <stdlib.h>\n*/\nimport "C"\n\nfunc Nothing() { _ = C.int(0) }\n' > smoke.go
+          printf 'package smoke\n\nimport "testing"\n\nfunc TestSmoke(t *testing.T) { Nothing() }\n' > smoke_test.go
+          CGO_ENABLED=1 go test -race ./...
+
+      # setup-python only resolves because start-runner.sh makes the box claim Ubuntu 22.04
+      # (see the Dockerfile). Assert the whole chain: the action must resolve a version, and
+      # the interpreter it drops must actually load libpython — which only happens if
+      # RUNNER_TOOL_CACHE matches the RUNPATH those binaries were linked against. The org
+      # asks for 3.11, 3.12 and 3.13, so prove the span rather than one lucky version.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: |
+            3.11
+            3.12
+            3.13
+      - name: Prove setup-python's interpreters can actually load libpython
+        run: |
+          for v in 3.11 3.12 3.13; do
+            py="$(command -v python$v)"
+            "$py" -VV
+            "$py" -c "import ssl, sqlite3, ctypes, lzma; print('stdlib ok')"
+          done
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+      - run: bun --version
+
+      - uses: asdf-vm/actions/install@v4
+        with:
+          tool_versions: golang 1.26.3
+      - run: go version
+
   smoke-shaped:
     runs-on: [createos-2vcpu-2gb]
     steps:
