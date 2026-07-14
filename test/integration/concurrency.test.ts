@@ -1,4 +1,5 @@
 import { env, runInDurableObject } from "cloudflare:test";
+import { runnerName } from "../helpers/mocks";
 import { describe, it, expect } from "vitest";
 
 function stub(name: string) {
@@ -12,7 +13,7 @@ const job = (id: number) => ({
 });
 
 async function boot(s: ReturnType<typeof stub>, jobId: number, sandboxId: string) {
-  await s.recordSandboxCreated(jobId, sandboxId, `ghar-${jobId}`);
+  await s.recordSandboxCreated(jobId, sandboxId, runnerName(jobId));
   await s.markRunning(jobId);
 }
 
@@ -26,7 +27,7 @@ describe("concurrency cap (MAX_CONCURRENT=2)", () => {
     expect((await s.onQueued(job(3), "d3")).action).toBe("queued"); // at cap
     expect(await s.activeCount()).toBe(2);
 
-    const res = await s.onCompleted(1, "ghar-1");
+    const res = await s.onCompleted(1, runnerName(1));
     expect(res.toDestroy).toEqual({ jobId: 1, sandboxId: "sb1" });
     expect(res.nextPending?.jobId).toBe(3); // slot freed → dequeue pending
   });
@@ -93,7 +94,7 @@ describe("concurrency cap (MAX_CONCURRENT=2)", () => {
     });
 
     // Free a slot; the seeded row must be the one promoted (oldest pending).
-    const res = await s.onCompleted(51, "ghar-51");
+    const res = await s.onCompleted(51, runnerName(51));
     expect(res.nextPending?.jobId).toBe(53);
     expect(res.nextPending?.label).toBe("createos"); // coalesced from RUNNER_LABEL
     expect(res.nextPending?.label).not.toBeNull();

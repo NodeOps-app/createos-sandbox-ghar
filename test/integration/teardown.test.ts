@@ -1,4 +1,5 @@
 import { env } from "cloudflare:test";
+import { runnerName } from "../helpers/mocks";
 import { describe, it, expect } from "vitest";
 
 function stub(name: string) {
@@ -19,7 +20,7 @@ const job = (id: number) => ({
  * backlog need not be the job whose webhook provisioned that runner's VM. So
  * the `completed` payload can pair job B with the runner that job A booted.
  *
- * Every other suite boots with `runner_name = ghar-<jobId>`, which makes
+ * Every other suite boots each job with its own runner, which makes
  * #rowByRunner and #rowByJob resolve to the SAME row — the one condition under
  * which keying on the wrong one is invisible. These tests cross the wires so
  * the two lookups return DIFFERENT rows, which is the only way the invariant
@@ -29,19 +30,19 @@ describe("teardown by runner identity (ADR-0003)", () => {
   it("destroys the VM whose runner ran the job, not the VM that job provisioned", async () => {
     const s = stub("backlog-" + Math.random());
 
-    // Two jobs, two VMs: runner ghar-1 lives on sb-1, runner ghar-2 on sb-2.
+    // Two jobs, two VMs: job 1's runner lives on sb-1, job 2's on sb-2.
     await s.onQueued(job(1), "d1");
-    await s.recordSandboxCreated(1, "sb-1", "ghar-1");
+    await s.recordSandboxCreated(1, "sb-1", runnerName(1));
     await s.markRunning(1);
 
     await s.onQueued(job(2), "d2");
-    await s.recordSandboxCreated(2, "sb-2", "ghar-2");
+    await s.recordSandboxCreated(2, "sb-2", runnerName(2));
     await s.markRunning(2);
 
-    // Backlog reassignment: runner ghar-1 (on sb-1) picks up job 2's work, so
-    // GitHub's completed payload pairs jobId 2 with runner ghar-1.
-    // #rowByRunner("ghar-1") → row 1; #rowByJob(2) → row 2. They diverge here.
-    const res = await s.onCompleted(2, "ghar-1");
+    // Backlog reassignment: job 1's runner (on sb-1) picks up job 2's work, so
+    // GitHub's completed payload pairs jobId 2 with job 1's runner.
+    // #rowByRunner(runnerName(1)) → row 1; #rowByJob(2) → row 2. They diverge here.
+    const res = await s.onCompleted(2, runnerName(1));
 
     // Must tear down sb-1 — the VM that actually ran job 2.
     expect(res.toDestroy).toEqual({ jobId: 1, sandboxId: "sb-1" });
@@ -55,22 +56,22 @@ describe("teardown by runner identity (ADR-0003)", () => {
     const s = stub("backlog-full-" + Math.random());
 
     await s.onQueued(job(1), "c1");
-    await s.recordSandboxCreated(1, "sb-1", "ghar-1");
+    await s.recordSandboxCreated(1, "sb-1", runnerName(1));
     await s.markRunning(1);
 
     await s.onQueued(job(2), "c2");
-    await s.recordSandboxCreated(2, "sb-2", "ghar-2");
+    await s.recordSandboxCreated(2, "sb-2", runnerName(2));
     await s.markRunning(2);
 
-    // Wires crossed both ways: ghar-1 ran job 2, ghar-2 ran job 1.
-    const first = await s.onCompleted(2, "ghar-1");
+    // Wires crossed both ways: job 1's runner ran job 2, job 2's ran job 1.
+    const first = await s.onCompleted(2, runnerName(1));
     expect(first.toDestroy).toEqual({ jobId: 1, sandboxId: "sb-1" });
     await s.markDestroyed(1);
 
     // sb-2 must still be tracked — completing job 2 must not have freed it.
     expect(await s.activeCount()).toBe(1);
 
-    const second = await s.onCompleted(1, "ghar-2");
+    const second = await s.onCompleted(1, runnerName(2));
     expect(second.toDestroy).toEqual({ jobId: 2, sandboxId: "sb-2" });
     await s.markDestroyed(2);
 
@@ -82,7 +83,7 @@ describe("teardown by runner identity (ADR-0003)", () => {
     const s = stub("no-runner-" + Math.random());
 
     await s.onQueued(job(7), "n1");
-    await s.recordSandboxCreated(7, "sb-7", "ghar-7");
+    await s.recordSandboxCreated(7, "sb-7", runnerName(7));
     await s.markRunning(7);
 
     // Cancelled-before-pickup: GitHub sends no runner_name, so job id is the

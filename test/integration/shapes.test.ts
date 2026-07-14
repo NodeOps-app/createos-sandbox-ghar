@@ -10,7 +10,7 @@ import { handleWebhook } from "../../src/handler";
 import type { SandboxDeps } from "../../src/createos";
 import { resetShapeCacheForTests } from "../../src/shapes";
 import { sign, workflowJobPayload } from "../helpers/fixtures";
-import { shapeCatalog } from "../helpers/mocks";
+import { shapeCatalog, runnerName } from "../helpers/mocks";
 
 const realFetch = globalThis.fetch;
 function patchGitHub() {
@@ -152,7 +152,7 @@ describe("shape labels end-to-end", () => {
         action: "completed",
         jobId: 702,
         labels: ["createos-2vcpu-2gb"],
-        runnerName: "ghar-702-aa",
+        runnerName: runnerName(702),
       }),
       "dlv-t2",
       down,

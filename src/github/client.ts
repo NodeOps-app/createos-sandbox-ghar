@@ -1,11 +1,11 @@
-import type { Config, QueuedJob } from "../types";
+import type { Config, QueuedJob, Runner } from "../types";
 import { TokenCache } from "./auth";
 
 type FetchLike = typeof fetch;
 const UA = "createos-sandbox-ghar";
 const MAX_PAGES = 20; // runaway guard for paginated list endpoints
 
-type RunnerLite = { name?: string; status?: string };
+type RunnerLite = { id?: number; name?: string; status?: string; busy?: boolean };
 type RepoLite = { full_name?: string };
 type RunLite = { id?: number; status?: string };
 type JobLite = { id?: number; status?: string; labels?: string[] };
@@ -101,8 +101,14 @@ export class GitHubClient {
    * `body[key]`, so a backlog spanning pages is never silently truncated —
    * exactly the high-volume case the reconciler exists to serve. Caps at
    * MAX_PAGES as a runaway guard.
+   *
+   * `strict` is for callers that test for ABSENCE. A truncated list is a lie by
+   * omission to them: the runner-liveness oracle would read a live runner's
+   * missing page as "runner gone" and destroy its VM mid-job. They get an error
+   * and skip the step rather than act on a half-view. Callers that merely
+   * enumerate (queued jobs) keep the warn-and-return-partial behaviour.
    */
-  async #getPaged<T>(path: string, key: string): Promise<T[]> {
+  async #getPaged<T>(path: string, key: string, strict = false): Promise<T[]> {
     const sep = path.includes("?") ? "&" : "?";
     const out: T[] = [];
     let page = 1;
@@ -117,27 +123,51 @@ export class GitHubClient {
     // Full last page at the page cap → more results likely exist but were dropped.
     // Never truncate coverage silently: surface the bound so it can be raised.
     if (page > MAX_PAGES) {
-      console.warn(
-        `getPaged: hit MAX_PAGES=${MAX_PAGES} for ${path} — results may be truncated (${out.length} items collected)`,
-      );
+      const msg = `getPaged: hit MAX_PAGES=${MAX_PAGES} for ${path} — results truncated (${out.length} items collected)`;
+      if (strict) throw new Error(msg);
+      console.warn(msg);
     }
     return out;
   }
 
   /**
-   * Names of org runners GitHub reports as `online` right now — the reconciler's
-   * liveness oracle. A tracked VM whose recorded `ghar-…` runner is absent here
-   * booted but never registered (or has already exited), so its slot is dead.
-   * Offline (stale) runners are treated as absent.
+   * Every org runner GitHub knows about. Serves both reconciler reads off one
+   * call: `status` is the liveness oracle (a tracked VM whose recorded `cos-…`
+   * runner is not `online` booted but never registered, or has already exited,
+   * so its slot is dead), and `id` is what an orphaned registration is deleted
+   * by. Strict paging — see #getPaged.
    */
-  async listOnlineRunners(): Promise<string[]> {
+  async listRunners(): Promise<Runner[]> {
     const runners = await this.#getPaged<RunnerLite>(
       `/orgs/${this.config.githubOrg}/actions/runners`,
       "runners",
+      true,
     );
-    const names: string[] = [];
-    for (const r of runners) if (r.status === "online" && r.name) names.push(r.name);
-    return names;
+    const out: Runner[] = [];
+    for (const r of runners) {
+      if (typeof r.id !== "number" || !r.name) continue;
+      out.push({ id: r.id, name: r.name, status: r.status ?? "offline", busy: r.busy === true });
+    }
+    return out;
+  }
+
+  /**
+   * Deletes a runner registration. GitHub auto-removes an ephemeral runner only
+   * once it has COMPLETED a job; every registration we mint for a job that never
+   * ran one (createSandbox failed, job cancelled mid-boot, VM reaped before
+   * pickup) is ours to clean up or it lingers `offline` forever.
+   *
+   * 404 is success: GitHub, a self-completing runner, or a concurrent sweep
+   * already removed it. Keeps the sweeper idempotent across overlapping crons.
+   */
+  async deleteRunner(id: number): Promise<void> {
+    const res = await this.fetchImpl(
+      `${this.config.githubApiUrl}/orgs/${this.config.githubOrg}/actions/runners/${id}`,
+      { method: "DELETE", headers: await this.#headers() },
+    );
+    if (!res.ok && res.status !== 404) {
+      throw new Error(`delete runner ${id} failed: ${res.status} ${await res.text()}`);
+    }
   }
 
   /**

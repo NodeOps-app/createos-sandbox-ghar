@@ -41,6 +41,19 @@ export interface QueuedDecision {
 }
 
 /**
+ * An org self-hosted runner as GitHub reports it. `status`/`busy` are the
+ * reconciler's liveness oracle; `id` is what deleting an orphaned registration
+ * keys on (the name is how we tell ours from anyone else's — see
+ * `jobIdFromRunnerName`).
+ */
+export interface Runner {
+  id: number;
+  name: string;
+  status: string; // "online" | "offline"
+  busy: boolean;
+}
+
+/**
  * A queued workflow_job as GitHub reports it. Raw labels; no policy applied —
  * `GitHubClient.listQueuedJobs` is transport, not an admission decision, so it
  * hands back exactly what GitHub said and lets the caller (label selection)

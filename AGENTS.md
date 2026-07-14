@@ -33,6 +33,8 @@ completed webhook → DO.onCompleted(jobId, runner_name) → destroy the VM that
   (by runner identity; NotFound if self-delete beat it) → DO.markDestroyed → dequeue next pending
 
 cron (*/5) → src/index.ts scheduled → handler.runReconciler → handler.runReaper → DO.sweep
+  runReconciler: (A) reap VMs whose runner isn't online → (B) re-drive still-queued jobs
+                 → (C) delete orphaned GitHub runner registrations (sweepOrphanedRunners)
 ```
 
 ## File responsibilities
@@ -51,7 +53,7 @@ Each file does one thing. Keep files under 1100 lines.
 | `src/shapes.ts` | Label ↔ shape mapping and the cached (5 min), floored shape catalog from `GET /v1/shapes`. Label admission is two pure, **silent** functions (the caller has the job id and does the logging): `resolveRequestedLabel` (`none`/`ambiguous`/`one`) and `validateShape`, which is **total** — a bare label short-circuits before touching the catalog. Only `fetchCatalog` hits the network. Callers check policy *before* fetching a catalog, and even then only lazily. |
 | `src/createos.ts` | Builds the CreateOS SDK client; owns the `CreateosClient` capability interface and `SandboxDeps`. Exists to break the `sandbox.ts` ↔ `shapes.ts` import cycle. |
 | `src/coordinator.ts` | The `Coordinator` **Durable Object**. ALL state (SQLite): job rows (owning their VM by `runner_name`, and their requested `label`), concurrency counter, pending queue, delivery dedup, `sweep`. Rows: `pending`→`provisioning`→`running`→`destroying`. Stays passive; never imports `shapes.ts`. |
-| `src/github/{jwt,auth,client}.ts` | Zero-dep GitHub App auth: RS256 JWT (Web Crypto) → installation-token cache → `GitHubClient`. |
+| `src/github/{jwt,auth,client}.ts` | Zero-dep GitHub App auth: RS256 JWT (Web Crypto) → installation-token cache → `GitHubClient`. `listRunners` pages **strictly** (a truncated read throws rather than under-reporting live runners — see gotchas); `deleteRunner` is 404-tolerant so the sweep is idempotent. |
 | `src/notify.ts` | Optional Slack-style failure webhook. No-op if unset; never throws. |
 | `template/` | Pre-baked runner rootfs (`Dockerfile` + `build.ts`). Not part of the Worker bundle. |
 
@@ -76,8 +78,11 @@ bun run build:template   # rebuild the ghar-runner rootfs (needs CREATEOS_* env)
 - `vitest.config.ts` `miniflare.bindings` holds a **throwaway test-only PKCS#8 key** — not a secret. Real secrets live in `.dev.vars` (gitignored) or `wrangler secret`.
 - The runner launch script is embedded in `template/Dockerfile` via `printf` (the template builder permits `RUN` only — no `COPY`/heredoc). That Dockerfile is its single source of truth.
 - **Changing `RUNNER_LABEL` while jobs are in flight strands rows.** A job's requested label is persisted in `jobs.label` at `onQueued` and re-mapped to a shape at provision time against the *current* `config.runnerLabel`. Rename the var mid-flight and an old row's label no longer matches — `shapeForLabel` throws rather than slicing a garbage shape out of it, which routes to `markProvisionFailed` (logged, alerted, slot freed). Loud and safe, but expect a provision-failure alert per row queued before the rename.
+- **The runner-name prefix (`cos-`) is short because the JIT blob is ~4085 of 4096 bytes.** GitHub's `encoded_jit_config` is injected via a createos `envs` value that caps at 4096 bytes, and it is nearly all credential — the runner name is the only part we control, so **name length is the entire safety margin**. Measured against the live API: a 20-char name → 4088 bytes (8 spare); a 24-char name → exactly 4096 (none). This is also why the attempt token is a cramped 2 chars. Lengthening the prefix looks harmless and is not: `createos-` (4 chars longer than `cos-`) overflows the cap once GitHub job ids reach 12 digits — they are at 11 today — and an overflow fails **every** provision, it does not degrade. Verify any name-format change against `generate-jitconfig` for real before shipping it.
 - **The shape catalog is only consulted on `queued`.** A `completed` webhook must never depend on `GET /v1/shapes` — teardown keys on runner identity, and gating it on the catalog would leak every shaped VM during a shapes outage.
 - **`src/shapes.ts` holds a module-level cache.** Tests that stub `listShapes` must call `resetShapeCacheForTests()` in `beforeEach`, or the first suite's catalog leaks into the next.
+- **The orphaned-runner sweep must never key on the `cos-` prefix alone.** A JIT registration exists from the moment it is minted, but its VM needs ~30s to boot — so for that whole window a perfectly healthy runner is `offline` and not busy, i.e. *indistinguishable from an orphan by name and status*. Only `Coordinator.liveJobIds()` tells them apart: `onQueued` inserts the job row **before** `createRunnerSandbox` mints the JIT, so a booting runner always has a row and a true orphan never does. Drop that check and the sweeper eats live boots. Equally: mint (`runnerNameFor`) and parse (`jobIdFromRunnerName`) live together in `sandbox.ts` on purpose — let them drift and the sweeper either strands our orphans or deletes another system's runners (the org also hosts ARC runners).
+- **The GitHub runner list is a shared, capped resource.** `#getPaged` stops at `MAX_PAGES` (2000 runners). The reconciler's liveness oracle tests for *absence*, so a silently truncated list would read a live runner as gone and destroy its VM mid-job — which is why `listRunners` throws on truncation instead of warning. Orphaned registrations accumulating toward that cap is therefore a correctness risk, not just clutter.
 
 ## Conventions
 

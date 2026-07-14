@@ -11,9 +11,15 @@ import {
 } from "./shapes";
 import { shouldProvision } from "./policy";
 import { GitHubClient } from "./github/client";
-import { createRunnerSandbox, launchRunner, teardownSandbox, type SandboxDeps } from "./sandbox";
+import {
+  createRunnerSandbox,
+  jobIdFromRunnerName,
+  launchRunner,
+  teardownSandbox,
+  type SandboxDeps,
+} from "./sandbox";
 import { notify } from "./notify";
-import type { PendingJob, Config, QueuedJob } from "./types";
+import type { PendingJob, Config, QueuedJob, Runner } from "./types";
 
 function coordinator(env: Bindings) {
   return env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
@@ -196,6 +202,71 @@ async function destroyAndConfirm(
   }
 }
 
+/**
+ * Deletes at most this many orphaned runner registrations per cron tick.
+ *
+ * The Free plan caps a Worker invocation at 50 subrequests, and `scheduled` runs
+ * the reconciler AND the reaper inside one — a backlog of orphans must not eat
+ * the budget that provisioning and teardown need. On the five-minute cron this
+ * still clears 120 orphans/hour, far above any plausible leak rate; the
+ * remainder waits a tick.
+ */
+const MAX_RUNNER_DELETES_PER_TICK = 10;
+
+/**
+ * Deletes the GitHub runner registrations we minted for jobs that never
+ * completed one — createSandbox failed, the job was cancelled mid-boot, the VM
+ * was reaped before GitHub assigned it work. GitHub auto-removes an ephemeral
+ * runner only when it FINISHES a job, so these linger `offline` forever, and
+ * nothing else cleans them up. Left alone they grow without bound until the org
+ * runner list crosses #getPaged's page cap — at which point `listRunners` starts
+ * refusing to read (strict paging), and the reconciler goes blind rather than
+ * reaping healthy VMs off a truncated liveness view.
+ *
+ * Ownership is proven, never guessed. A registration is deleted only if:
+ *   1. its name parses as `cos-<jobId>-<xx>` — ARC runners and hand-registered
+ *      boxes don't parse, so they are never touched;
+ *   2. GitHub reports it offline and not busy — a live runner is never a target;
+ *   3. the Coordinator holds NO row for that job id.
+ *
+ * (3) is what makes this safe against deleting a runner that is merely booting.
+ * A JIT registration exists from the moment it is minted, but its VM takes ~30s
+ * to come up, so a healthy boot looks exactly like an orphan to (1) and (2). The
+ * DO is what tells them apart: `onQueued` inserts the job row BEFORE the mint,
+ * so a booting runner always has a row and an orphan never does. Listing GitHub
+ * BEFORE reading the DO closes the other direction — a job that queues mid-sweep
+ * isn't in the runner list we're deciding over.
+ */
+async function sweepOrphanedRunners(
+  env: Bindings,
+  github: GitHubClient,
+  runners: Runner[],
+): Promise<void> {
+  const live = new Set(await coordinator(env).liveJobIds());
+
+  const orphans = runners.filter((r) => {
+    if (r.status !== "offline" || r.busy) return false;
+    const jobId = jobIdFromRunnerName(r.name);
+    return jobId !== null && !live.has(jobId);
+  });
+  if (orphans.length === 0) return;
+
+  const batch = orphans.slice(0, MAX_RUNNER_DELETES_PER_TICK);
+  if (batch.length < orphans.length) {
+    console.warn(
+      `runner sweep: ${orphans.length} orphaned registrations found, deleting ${batch.length} this tick ` +
+        `(MAX_RUNNER_DELETES_PER_TICK=${MAX_RUNNER_DELETES_PER_TICK}); the rest follow next cron`,
+    );
+  }
+
+  const results = await Promise.allSettled(batch.map((r) => github.deleteRunner(r.id)));
+  const failed = results.filter((r) => r.status === "rejected");
+  for (const f of failed) console.error(`runner sweep: delete failed: ${String(f.reason)}`);
+  console.log(
+    `runner sweep: deleted ${batch.length - failed.length}/${batch.length} orphaned runner registration(s)`,
+  );
+}
+
 export async function runReaper(env: Bindings, deps: SandboxDeps = {}): Promise<void> {
   const config = loadConfig(env as Record<string, unknown>);
   const co = coordinator(env);
@@ -225,9 +296,12 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
   const co = coordinator(env);
 
   // A. Reap VMs whose runner is not live. Skipped entirely if the runner list is
-  //    unavailable — never reap on a partial/failed view.
+  //    unavailable — never reap on a partial/failed view. The list is held for
+  //    step C, which deletes the registrations of runners this step never sees.
+  let runners: Runner[] | null = null;
   try {
-    const online = await github.listOnlineRunners();
+    runners = await github.listRunners();
+    const online = runners.filter((r) => r.status === "online").map((r) => r.name);
     const { toDestroy, nextPending } = await co.reapUnregistered(
       Date.now(),
       online,
@@ -316,4 +390,18 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
     if (decision.action === "provision") toProvision.push(job);
   }
   await Promise.allSettled(toProvision.map((job) => provisionAndRecord(env, job, deps)));
+
+  // C. Delete the GitHub runner registrations left behind by jobs that never ran
+  //    one. Deliberately LAST: it is the least critical work in the tick, so if
+  //    the Free-plan subrequest budget runs out it starves here instead of in
+  //    provisioning or teardown, and the next cron picks up what it missed.
+  //    Reuses step A's runner list — zero extra API cost — so a failed read there
+  //    skips this too.
+  if (runners) {
+    try {
+      await sweepOrphanedRunners(env, github, runners);
+    } catch (err) {
+      console.error(`reconcile: orphaned-runner sweep failed: ${String(err)}`);
+    }
+  }
 }

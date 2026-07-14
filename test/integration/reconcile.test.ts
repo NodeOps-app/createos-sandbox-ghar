@@ -1,8 +1,9 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { runReconciler } from "../../src/handler";
+import { RUNNER_PREFIX } from "../../src/sandbox";
 import { resetShapeCacheForTests } from "../../src/shapes";
-import { shapeCatalog } from "../helpers/mocks";
+import { shapeCatalog, runnerName } from "../helpers/mocks";
 
 // The shapes.ts catalog cache is module-level and outlives any single test —
 // without this, whichever suite runs first (bare-label fallback here vs. a
@@ -20,7 +21,7 @@ const job = (id: number) => ({
   label: "createos",
 });
 async function boot(s: Stub, jobId: number, sandboxId: string) {
-  await s.recordSandboxCreated(jobId, sandboxId, `ghar-${jobId}`);
+  await s.recordSandboxCreated(jobId, sandboxId, runnerName(jobId));
   await s.markRunning(jobId);
 }
 
@@ -29,7 +30,7 @@ describe("reapUnregistered (runner-identity liveness)", () => {
     const s = stub("ru-online-" + Math.random());
     await s.onQueued(job(8001), "d1");
     await boot(s, 8001, "sb8001");
-    const res = await s.reapUnregistered(Date.now() + 1, ["ghar-8001"], 0);
+    const res = await s.reapUnregistered(Date.now() + 1, [runnerName(8001)], 0);
     expect(res.toDestroy).toEqual([]);
     expect(await s.activeCount()).toBe(1);
   });
@@ -69,7 +70,7 @@ describe("reapUnregistered (runner-identity liveness)", () => {
     expect((await s.onQueued(job(8103), "d7")).action).toBe("queued"); // 8103 parked pending
 
     // 8101's runner is gone; 8102 still online → only 8101 reaped, freeing one slot.
-    const res = await s.reapUnregistered(Date.now() + 1, ["ghar-8102"], 0);
+    const res = await s.reapUnregistered(Date.now() + 1, [runnerName(8102)], 0);
     expect(res.toDestroy).toContainEqual({ jobId: 8101, sandboxId: "sb8101" });
     expect(res.nextPending).toContainEqual(job(8103)); // pending pulled into the freed slot
     expect(await s.activeCount()).toBe(2); // 8102 running + 8103 now provisioning
@@ -77,10 +78,14 @@ describe("reapUnregistered (runner-identity liveness)", () => {
 });
 
 const realFetch = globalThis.fetch;
-/** Routes the GitHub reads runReconciler makes; everything else 404s. */
+type MockRunner = { id: number; name: string; status: string; busy?: boolean };
+/**
+ * Routes the GitHub reads runReconciler makes; everything else 404s. Returns the
+ * ids the reconciler DELETEd, which is how the orphaned-runner sweep is asserted.
+ */
 function patchGitHub(
   over: {
-    runners?: { name: string; status: string }[];
+    runners?: MockRunner[];
     jobs?: { id: number; status: string; labels: string[] }[];
     // Multi-repo installations: which repos the app sees, and each repo's own
     // queued jobs. Falls back to the single-repo `jobs` list above when
@@ -88,10 +93,11 @@ function patchGitHub(
     repos?: string[];
     jobsByRepo?: Record<string, { id: number; status: string; labels: string[] }[]>;
   } = {},
-) {
+): { deleted: number[] } {
   const runners = over.runners ?? [];
   const repos = over.repos ?? ["nodeops-app/api"];
   const jobs = over.jobs ?? [];
+  const deleted: number[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const req = new Request(input, init);
     const u = req.url;
@@ -99,6 +105,10 @@ function patchGitHub(
     if (u.includes("/access_tokens"))
       return json({ token: "t", expires_at: new Date(Date.now() + 3.6e6).toISOString() }, 201);
     if (u.includes("generate-jitconfig")) return json({ encoded_jit_config: "BLOB" }, 201);
+    if (req.method === "DELETE" && u.includes("/actions/runners/")) {
+      deleted.push(Number(u.split("/actions/runners/")[1]));
+      return new Response(null, { status: 204 });
+    }
     if (req.method === "GET" && u.includes("/actions/runners")) return json({ runners });
     if (u.includes("/installation/repositories"))
       return json({ repositories: repos.map((full_name) => ({ full_name })) });
@@ -110,6 +120,7 @@ function patchGitHub(
       return json({ workflow_runs: [{ id: 9000, status: "in_progress" }] });
     return new Response("unmocked " + u, { status: 404 });
   }) as typeof fetch;
+  return { deleted };
 }
 
 describe("runReconciler", () => {
@@ -259,6 +270,80 @@ describe("runReconciler", () => {
     expect(listShapes).toHaveBeenCalledTimes(1);
     expect(createSandbox).toHaveBeenCalledTimes(1);
     expect(createSandbox).toHaveBeenCalledWith(expect.objectContaining({ shape: "s-2vcpu-2gb" }));
+    globalThis.fetch = realFetch;
+  });
+});
+
+/**
+ * The sweep deletes GitHub runner registrations for jobs that never completed
+ * one — GitHub only auto-removes an ephemeral runner that finished a job, so
+ * without this they pile up `offline` forever.
+ *
+ * It runs against the SINGLETON Coordinator (that is the DO runReconciler talks
+ * to), so these seed `stub("singleton")`. Job ids are 97xx to stay clear of the
+ * rows earlier tests in this file leave behind on that same singleton.
+ */
+describe("runReconciler — orphaned runner sweep", () => {
+  const deps = () => ({
+    makeClient: () => ({
+      createSandbox: vi.fn(),
+      listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
+      getSandbox: vi.fn().mockResolvedValue({ destroy: vi.fn() }),
+    }),
+  });
+
+  it("deletes an offline runner whose job the DO no longer tracks", async () => {
+    // No row for 9701 anywhere → nothing is coming to claim this registration.
+    const gh = patchGitHub({
+      runners: [{ id: 41, name: runnerName(9701), status: "offline" }],
+    });
+    await runReconciler(env as any, deps());
+    expect(gh.deleted).toEqual([41]);
+    globalThis.fetch = realFetch;
+  });
+
+  it("spares an offline runner whose job the DO still tracks — the mid-boot window", async () => {
+    // THE safety property. onQueued inserts the row before the JIT is minted, and
+    // the VM takes ~30s to boot, so a perfectly healthy runner looks exactly like
+    // an orphan to GitHub (offline, not busy) for that whole window. Only the DO
+    // row tells them apart. Get this wrong and the sweeper eats live boots.
+    const singleton = stub("singleton");
+    await singleton.onQueued(job(9702), "sweep-inflight"); // provisioning, no VM yet
+    const gh = patchGitHub({
+      runners: [{ id: 42, name: runnerName(9702, "bb"), status: "offline" }],
+    });
+    await runReconciler(env as any, deps());
+    expect(gh.deleted).toEqual([]);
+    globalThis.fetch = realFetch;
+  });
+
+  it("never deletes a runner it did not mint", async () => {
+    // An ARC runner (or any hand-registered box) is offline and untracked — it
+    // passes every test except ownership. The name is the only thing standing
+    // between it and deletion, so this is the guard that keeps us out of other
+    // people's runner pools.
+    const gh = patchGitHub({
+      runners: [
+        { id: 43, name: "arc-runner-set-bvlbx-runner-c7n4v", status: "offline" },
+        { id: 44, name: "some-bare-metal-box", status: "offline" },
+        { id: 45, name: `not-a-job-id`, status: "offline" },
+        { id: 46, name: runnerName(9703, "cc"), status: "offline" }, // ours → the control
+      ],
+    });
+    await runReconciler(env as any, deps());
+    expect(gh.deleted).toEqual([46]);
+    globalThis.fetch = realFetch;
+  });
+
+  it("spares online and busy runners", async () => {
+    const gh = patchGitHub({
+      runners: [
+        { id: 47, name: runnerName(9704, "dd"), status: "online" },
+        { id: 48, name: runnerName(9705, "ee"), status: "offline", busy: true },
+      ],
+    });
+    await runReconciler(env as any, deps());
+    expect(gh.deleted).toEqual([]);
     globalThis.fetch = realFetch;
   });
 });

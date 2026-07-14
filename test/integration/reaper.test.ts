@@ -1,10 +1,11 @@
 import { env } from "cloudflare:test";
+import { runnerName } from "../helpers/mocks";
 import { describe, it, expect, vi } from "vitest";
 import { runReaper } from "../../src/handler";
 
 type Stub = ReturnType<typeof env.COORDINATOR.get>;
 async function boot(s: Stub, jobId: number, sandboxId: string) {
-  await s.recordSandboxCreated(jobId, sandboxId, `ghar-${jobId}`);
+  await s.recordSandboxCreated(jobId, sandboxId, runnerName(jobId));
   await s.markRunning(jobId);
 }
 const ids = (r: { toDestroy: { sandboxId: string }[] }) => r.toDestroy.map((t) => t.sandboxId);
@@ -44,7 +45,7 @@ describe("reaper", () => {
       "d4",
     );
     await boot(s, 903, "sb_903");
-    await s.onCompleted(903, "ghar-903"); // → destroying, but teardown NOT confirmed
+    await s.onCompleted(903, runnerName(903)); // → destroying, but teardown NOT confirmed
     // Even a fresh cutoff must re-surface the un-torn-down VM for retry.
     const res = await s.sweep(Date.now(), 3_600_000);
     expect(ids(res)).toContain("sb_903");
@@ -58,7 +59,7 @@ describe("reaper", () => {
     );
     await boot(singleton, 902, "sb_902");
     // Force staleness: park it in destroying so runReaper (default 1h cutoff) still acts.
-    await singleton.onCompleted(902, "ghar-902");
+    await singleton.onCompleted(902, runnerName(902));
 
     const destroy = vi.fn().mockResolvedValue({ id: "sb_902", status: "destroying" });
     const getSandbox = vi.fn().mockResolvedValue({ destroy });

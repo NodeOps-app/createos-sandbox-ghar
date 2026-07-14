@@ -11,6 +11,38 @@ export type { SandboxDeps, SandboxHandle };
 /** createos-sandbox rejects names longer than this (API returns 400). */
 const MAX_SANDBOX_NAME = 22;
 
+/**
+ * Runner names are `cos-<jobId>-<xx>` (`xx` = the 2-char base36 attempt token).
+ * Mint and parse are defined together because the sweeper's ownership test IS
+ * this format: a name that parses is one we minted and may delete; a name that
+ * does not (an ARC runner, a hand-registered box) is someone else's and is never
+ * touched. Let the two drift and the sweeper either strands our orphans or
+ * deletes a stranger's runner.
+ *
+ * The prefix is kept SHORT on purpose. The JIT blob is ~4085 bytes of GitHub
+ * credentials against the 4096-byte cap on a createos `envs` value, and the
+ * runner name is the only part of it we control — so the name length is the
+ * entire safety margin. Measured against the live API: a 20-char name encodes to
+ * 4088 bytes (8 spare), while a 24-char one hits exactly 4096 and leaves none.
+ * At `cos-` a 13-digit job id still has 8 bytes of headroom; at `createos-` a
+ * 12-digit job id (GitHub is at 11 today) would overflow and fail EVERY
+ * provision. Lengthen this prefix and you re-arm that bomb.
+ */
+export const RUNNER_PREFIX = "cos-";
+const RUNNER_NAME_RE = new RegExp(`^${RUNNER_PREFIX}(\\d+)-[a-z0-9]{2}$`);
+
+export function runnerNameFor(jobId: number, attemptId: string): string {
+  return `${RUNNER_PREFIX}${jobId}-${attemptId}`;
+}
+
+/** The job id a runner name was minted for, or null if we did not mint it. */
+export function jobIdFromRunnerName(name: string): number | null {
+  const m = RUNNER_NAME_RE.exec(name);
+  if (!m) return null;
+  const jobId = Number(m[1]);
+  return Number.isSafeInteger(jobId) ? jobId : null;
+}
+
 /** Clamp the cosmetic VM name to the createos cap; warn when it actually binds. */
 function clampSandboxName(name: string): string {
   if (name.length <= MAX_SANDBOX_NAME) return name;
@@ -26,13 +58,14 @@ function clampSandboxName(name: string): string {
  * pre-baked runner template. Returns the handle + runner name so the caller can
  * record ownership in the Coordinator BEFORE launching the runner — closing the
  * window where a `completed` webhook arriving mid-boot would leak the VM. The
- * runner is named `ghar-<jobId>-<xx>` where `xx` is a 2-char random token that
- * makes every provision attempt a fresh name, so re-driving a job whose earlier
- * attempt orphaned its JIT registration can't collide (409 "already exists").
- * Kept to 2 chars: the JIT blob is injected via the createos `envs` value which
- * caps at 4096 bytes, and the blob (base64-nested) is already ~4084 for the base
- * name — a longer suffix overruns it. That name is recorded in the DO and is how
- * a later `completed` webhook (`runner_name`) maps back to the VM that ran it.
+ * runner is named `cos-<jobId>-<xx>` (see `runnerNameFor`) where `xx` is a 2-char
+ * random token that makes every provision attempt a fresh name, so re-driving a
+ * job whose earlier attempt orphaned its JIT registration can't collide (409
+ * "already exists"). Kept to 2 chars for the same reason the prefix is short: the
+ * JIT blob is injected via the createos `envs` value, which caps at 4096 bytes,
+ * and the blob is already ~4085 without the name. That name is recorded in the DO
+ * and is how a later `completed` webhook (`runner_name`) maps back to the VM that
+ * ran it.
  *
  * The VM's shape comes from the label the job requested (`shapeForLabel`), and
  * the runner registers under that same single label — the two must agree or a
@@ -50,13 +83,13 @@ export async function createRunnerSandbox(
       Math.floor(Math.random() * 1296)
         .toString(36)
         .padStart(2, "0"));
-  const runnerName = `ghar-${job.jobId}-${attemptId()}`;
+  const runnerName = runnerNameFor(job.jobId, attemptId());
   const jitConfig = await github.generateJitConfig(runnerName, job.label);
 
   // The createos VM name is cosmetic (teardown keys on sandbox_id + runner
   // identity, not this). Keep it short + stable per job (`gha-ci-<jobId>`, no
   // per-attempt suffix): collisions are harmless here, and dropping the runner's
-  // `ghar-`/timestamp keeps it under the createos name cap for dashboard use.
+  // `cos-`/attempt token keeps it under the createos name cap for dashboard use.
   const sandboxName = clampSandboxName(
     config.sandboxNamePrefix ? `${config.sandboxNamePrefix}-${job.jobId}` : runnerName,
   );

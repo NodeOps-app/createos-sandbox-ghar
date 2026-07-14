@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { runnerName } from "../helpers/mocks";
 import { verifySignature, parseWorkflowJob } from "../../src/webhook";
 import { sign, workflowJobPayload } from "../helpers/fixtures";
 
@@ -38,9 +39,9 @@ describe("parseWorkflowJob", () => {
   });
   it("carries runner_name from a completed job", () => {
     const job = parseWorkflowJob(
-      workflowJobPayload({ action: "completed", jobId: 7, runnerName: "ghar-7" }),
+      workflowJobPayload({ action: "completed", jobId: 7, runnerName: runnerName(7) }),
     );
-    expect(job?.runnerName).toBe("ghar-7");
+    expect(job?.runnerName).toBe(runnerName(7));
   });
   it("returns null for non-workflow_job / bad json", () => {
     expect(parseWorkflowJob("{}")).toBeNull();

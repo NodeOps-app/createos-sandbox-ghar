@@ -1,7 +1,45 @@
 import { describe, it, expect, vi } from "vitest";
-import { createRunnerSandbox, launchRunner, teardownSandbox } from "../../src/sandbox";
+import {
+  createRunnerSandbox,
+  jobIdFromRunnerName,
+  launchRunner,
+  RUNNER_PREFIX,
+  runnerNameFor,
+  teardownSandbox,
+} from "../../src/sandbox";
 import { CreateosSandboxNotFoundError } from "@nodeops-createos/sandbox";
 import type { Config, PendingJob } from "../../src/types";
+
+describe("jobIdFromRunnerName", () => {
+  // The orphaned-runner sweep's ownership test. A name that parses is one we
+  // minted and may be deleted from the org; anything else belongs to someone
+  // else and is untouchable. Both directions matter: a false positive deletes a
+  // stranger's runner, a false negative strands our own leak forever.
+  it("round-trips every name createRunnerSandbox mints", () => {
+    expect(jobIdFromRunnerName(runnerNameFor(86749416515, "ow"))).toBe(86749416515);
+  });
+
+  // Malformed cases are built from RUNNER_PREFIX, never spelled out: renaming the
+  // prefix must not touch this file. The literals below are the names we must
+  // NOT own, so they are literal on purpose.
+  it.each([
+    ["arc-runner-set-bvlbx-runner-c7n4v", "an Actions Runner Controller runner"],
+    ["ghar-runner", "the template name, not a runner name"],
+    // The prefix was `ghar-` before it was shortened to fit the 4096-byte JIT
+    // cap. Legacy names deliberately do NOT parse, so the sweeper leaves them
+    // alone rather than guessing — any left on GitHub at the rename are cleaned
+    // up once, by hand.
+    ["ghar-86749416515-ow", "a runner minted under the pre-rename prefix"],
+    [`${RUNNER_PREFIX}123`, "no attempt suffix"],
+    [`${RUNNER_PREFIX}-aa`, "no job id"],
+    [`${RUNNER_PREFIX}abc-aa`, "non-numeric job id"],
+    [`${RUNNER_PREFIX}123-toolong`, "suffix is not the 2-char token we mint"],
+    [`prefix-${RUNNER_PREFIX}123-aa`, "not anchored at the start"],
+    ["", "empty"],
+  ])("refuses %j — %s", (name) => {
+    expect(jobIdFromRunnerName(name)).toBeNull();
+  });
+});
 
 const config = {
   runnerLabel: "createos",
@@ -29,7 +67,7 @@ describe("createRunnerSandbox", () => {
     });
 
     // Runner name carries a 2-char attempt token so a re-driven job can't collide.
-    expect(github.generateJitConfig).toHaveBeenCalledWith("ghar-100-k3", "createos");
+    expect(github.generateJitConfig).toHaveBeenCalledWith(runnerNameFor(100, "k3"), "createos");
     expect(createSandbox).toHaveBeenCalledWith(
       expect.objectContaining({
         shape: "s-4vcpu-4gb",
@@ -42,7 +80,7 @@ describe("createRunnerSandbox", () => {
     // Does NOT launch the runner — that is a separate step, after ownership is recorded.
     expect(runCommand).not.toHaveBeenCalled();
     expect(res.sandboxId).toBe("sb_1");
-    expect(res.runnerName).toBe("ghar-100-k3");
+    expect(res.runnerName).toBe(runnerNameFor(100, "k3"));
   });
 
   it("gives each provision attempt of the same job a distinct runner name", async () => {
@@ -70,7 +108,7 @@ describe("createRunnerSandbox", () => {
     });
 
     const name = github.generateJitConfig.mock.calls[0]![0] as string;
-    expect(name).toMatch(/^ghar-100-[0-9a-z]{2}$/);
+    expect(name).toMatch(new RegExp(`^${RUNNER_PREFIX}100-[0-9a-z]{2}$`));
   });
 
   it("clamps the VM name to the createos 22-char cap", async () => {
@@ -110,7 +148,7 @@ describe("createRunnerSandbox", () => {
     });
 
     expect(createSandbox.mock.calls[0]![0].shape).toBe("s-8vcpu-16gb");
-    expect(github.generateJitConfig).toHaveBeenCalledWith("ghar-7-aa", "createos-8vcpu-16gb");
+    expect(github.generateJitConfig).toHaveBeenCalledWith(runnerNameFor(7, "aa"), "createos-8vcpu-16gb");
   });
 });
 

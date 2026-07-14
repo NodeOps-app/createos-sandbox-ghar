@@ -102,6 +102,24 @@ export class Coordinator extends DurableObject<Env> {
     return this.#active();
   }
 
+  /**
+   * Every job id the Coordinator holds a row for, in ANY state — the runner
+   * sweeper's safety oracle.
+   *
+   * onQueued inserts the row BEFORE the Worker mints that job's JIT runner
+   * (handler → provisionAndRecord → createRunnerSandbox), so a runner that is
+   * merely mid-boot — offline to GitHub for the ~30s its VM takes to come up —
+   * always has a row here. A runner name whose job id is absent therefore has no
+   * VM coming for it and never will: its registration is garbage and can be
+   * deleted. Any row at all (even `pending`, even `destroying`) means hands off.
+   */
+  async liveJobIds(): Promise<number[]> {
+    return this.#sql
+      .exec<{ job_id: number }>(`SELECT job_id FROM jobs`)
+      .toArray()
+      .map((r) => r.job_id);
+  }
+
   #rowByJob(jobId: number): Row | undefined {
     return this.#sql.exec<Row>(`SELECT * FROM jobs WHERE job_id = ?`, jobId).toArray()[0];
   }

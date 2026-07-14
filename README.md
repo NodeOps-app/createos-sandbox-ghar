@@ -33,7 +33,7 @@ jobs:
 | **Zero idle cost** | Nothing is running between jobs. No warm pool, no idle runner VMs, no autoscaler to babysit. |
 | **Fast teardown** | The guest self-deletes its own VM the moment the runner exits — it doesn't wait for a webhook round trip. |
 | **Free-plan control plane** | Cloudflare Workers Free + one SQLite Durable Object. No Kubernetes, no controller VM, no database to run. |
-| **Self-healing** | A 5-minute cron reconciles against GitHub: re-drives jobs whose webhook was lost, reaps VMs whose runner never came online. |
+| **Self-healing** | A 5-minute cron reconciles against GitHub: re-drives jobs whose webhook was lost, reaps VMs whose runner never came online, deletes runner registrations orphaned by jobs that never ran. |
 
 This repo is both a working autoscaler and a reference example of building on the CreateOS Sandbox SDK.
 
@@ -158,7 +158,7 @@ Set in `wrangler.toml [vars]` unless marked secret (`wrangler secret put`).
 | `CREATEOS_API_KEY` | ✅ | — | CreateOS API key. |
 | `RUNNER_LABEL` | | `createos` | The opt-in `runs-on` label. Also the prefix for shaped labels (`createos-8vcpu-16gb`) — see [Choosing a runner size](#choosing-a-runner-size). |
 | `RUNNER_TEMPLATE` | | `ghar-runner` | Rootfs template built in step 3. |
-| `SANDBOX_NAME_PREFIX` | | — | Cosmetic VM name prefix (`<prefix>-ghar-<jobId>`). |
+| `SANDBOX_NAME_PREFIX` | | — | Cosmetic VM name prefix (`<prefix>-<jobId>`). |
 | `RUNNER_SHAPE` | | `s-4vcpu-4gb` | VM size for the bare `RUNNER_LABEL`. |
 | `MIN_RUNNER_MEM_MIB` | | `2048` | Floor on shapes offered as shaped labels — smaller shapes can't run an Actions runner. |
 | `RUNNER_DISK_MIB` | | `30720` | Overlay disk — **must be ≤ your plan's disk cap** or `createSandbox` 403s. |
@@ -201,6 +201,7 @@ The same 5-minute cron runs a **reconciler** before the reaper, treating GitHub 
 
 1. **Runner-liveness reap** — lists the org's `online` runners; any tracked VM older than `RECONCILE_GRACE_MS` whose runner isn't online is destroyed. Keys on live runner identity, so long-running jobs are spared. Fails safe: an API error skips the step.
 2. **Queued-job re-drive** — lists every still-`queued` labelled job across installed repos and replays it through the normal provisioning path, reusing the same cap and dedup logic. Jobs already being provisioned are ignored.
+3. **Orphaned-runner sweep** — deletes the GitHub runner registrations left behind by jobs that never completed one. GitHub auto-removes an ephemeral runner only *after* it finishes a job, so every attempt that dies after the JIT mint (createSandbox failed, job cancelled mid-boot, VM reaped before pickup) leaves a registration listed `offline` forever. A registration is deleted only if its name parses as ours (`cos-<jobId>-<xx>`), GitHub reports it offline and not busy, **and** the coordinator holds no row for that job id — so a runner that is merely booting (offline for the ~30s its VM takes to come up) is never touched, and runners this controller didn't mint are out of scope entirely. Capped at 10 deletes per tick to stay inside the Free-plan subrequest budget; the rest follow next tick.
 
 ## Keeping the runner current
 

@@ -1,3 +1,4 @@
+import { runnerNameFor } from "../../src/sandbox";
 type Handler = (req: Request) => Response | Promise<Response>;
 
 /** A fetch double that routes by `METHOD url-substring` → handler. */
@@ -45,4 +46,15 @@ export function shapeCatalog(): {
     { id: "s-4vcpu-4gb", vcpu: 4, mem_mib: 4096, default_disk_mib: 10240 },
     { id: "s-8vcpu-16gb", vcpu: 8, mem_mib: 16384, default_disk_mib: 10240 },
   ];
+}
+
+/**
+ * A runner name for a job, built by the SAME function production mints with —
+ * so the format lives in exactly one place (`RUNNER_PREFIX` in sandbox.ts) and
+ * renaming the prefix never touches a test again. Tests that only need an opaque
+ * runner identity (a DO row's owner) should still use this rather than inventing
+ * a literal, so nothing in the suite hardcodes the wire format.
+ */
+export function runnerName(jobId: number, attemptId = "aa"): string {
+  return runnerNameFor(jobId, attemptId);
 }

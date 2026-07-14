@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { GitHubClient } from "../../src/github/client";
-import { mockFetch, githubRoutes } from "../helpers/mocks";
+import { mockFetch, githubRoutes, runnerName } from "../helpers/mocks";
 import type { Config } from "../../src/types";
 
 async function cfg(): Promise<Config> {
@@ -52,7 +52,7 @@ describe("GitHubClient.generateJitConfig", () => {
       },
     });
     const client = new GitHubClient(await cfg(), mockFetch(routes));
-    expect(await client.generateJitConfig("ghar-1-aa", "createos")).toBe("ENCODED_JIT_BLOB");
+    expect(await client.generateJitConfig(runnerName(1), "createos")).toBe("ENCODED_JIT_BLOB");
     expect((body as { labels: string[] }).labels).toEqual(["createos"]);
   });
   it("throws on failure", async () => {
@@ -61,6 +61,79 @@ describe("GitHubClient.generateJitConfig", () => {
     });
     const client = new GitHubClient(await cfg(), mockFetch(routes));
     await expect(client.generateJitConfig("x", "createos")).rejects.toThrow(/422/);
+  });
+});
+
+describe("GitHubClient.deleteRunner", () => {
+  it("DELETEs the org-scoped runner id", async () => {
+    let seen = "";
+    const routes = githubRoutes({
+      "DELETE /actions/runners/": (req) => {
+        seen = new URL(req.url).pathname;
+        return new Response(null, { status: 204 });
+      },
+    });
+    const client = new GitHubClient(await cfg(), mockFetch(routes));
+    await expect(client.deleteRunner(41)).resolves.toBeUndefined();
+    expect(seen).toBe("/orgs/nodeops-app/actions/runners/41");
+  });
+
+  it("treats 404 as success", async () => {
+    // GitHub auto-removes a runner the moment it completes a job, so the sweep
+    // routinely races a registration that is already gone. Idempotent or the
+    // reaper alerts on its own healthy no-ops.
+    const routes = githubRoutes({
+      "DELETE /actions/runners/": () => new Response("Not Found", { status: 404 }),
+    });
+    const client = new GitHubClient(await cfg(), mockFetch(routes));
+    await expect(client.deleteRunner(41)).resolves.toBeUndefined();
+  });
+
+  it("throws on a real failure", async () => {
+    const routes = githubRoutes({
+      "DELETE /actions/runners/": () => new Response("nope", { status: 403 }),
+    });
+    const client = new GitHubClient(await cfg(), mockFetch(routes));
+    await expect(client.deleteRunner(41)).rejects.toThrow(/403/);
+  });
+});
+
+describe("GitHubClient.listRunners", () => {
+  it("returns id, name, status and busy", async () => {
+    const routes = githubRoutes({
+      "GET /actions/runners": () =>
+        new Response(
+          JSON.stringify({
+            runners: [
+              { id: 1, name: runnerName(7), status: "online", busy: true },
+              { id: 2, name: runnerName(8, "bb"), status: "offline" },
+              { name: "no-id-so-unusable", status: "offline" }, // can't be deleted → dropped
+            ],
+          }),
+          { status: 200 },
+        ),
+    });
+    const client = new GitHubClient(await cfg(), mockFetch(routes));
+    expect(await client.listRunners()).toEqual([
+      { id: 1, name: runnerName(7), status: "online", busy: true },
+      { id: 2, name: runnerName(8, "bb"), status: "offline", busy: false },
+    ]);
+  });
+
+  it("refuses a truncated read rather than under-reporting live runners", async () => {
+    // The liveness oracle tests for ABSENCE: a runner missing from a truncated
+    // page reads as "runner gone", and reapUnregistered would destroy its VM
+    // mid-job. A full page at the cap must fail the whole read, not half-answer.
+    const full = Array.from({ length: 100 }, (_, i) => ({
+      id: i,
+      name: runnerName(i),
+      status: "online",
+    }));
+    const routes = githubRoutes({
+      "GET /actions/runners": () => new Response(JSON.stringify({ runners: full }), { status: 200 }),
+    });
+    const client = new GitHubClient(await cfg(), mockFetch(routes));
+    await expect(client.listRunners()).rejects.toThrow(/MAX_PAGES/);
   });
 });
 
