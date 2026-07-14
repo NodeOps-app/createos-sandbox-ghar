@@ -177,4 +177,18 @@ describe("GitHubClient.isForkJob", () => {
     const client = new GitHubClient(await cfg(), mockFetch(routes));
     expect(await client.isForkJob("nodeops-app/api", 1)).toBe(true);
   });
+
+  // A 200 that never names the head owner used to read as "same org" and admit
+  // the job — the one unknown in this function that failed OPEN.
+  it("fails closed when the head owner is unreadable", async () => {
+    const client = async (head: unknown) =>
+      new GitHubClient(
+        await cfg(),
+        mockFetch(githubRoutes({ "GET /actions/runs/": run({ head_repository: head }) })),
+      );
+    expect(await (await client({ fork: false })).isForkJob("nodeops-app/api", 1)).toBe(true);
+    expect(await (await client({ fork: false, owner: {} })).isForkJob("nodeops-app/api", 1)).toBe(
+      true,
+    );
+  });
 });

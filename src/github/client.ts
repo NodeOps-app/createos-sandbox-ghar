@@ -84,7 +84,11 @@ export class GitHubClient {
     if (!head) return true;
     if (head.fork === true) return true;
     const login = head.owner?.login;
-    return login !== undefined && login.toLowerCase() !== this.config.githubOrg.toLowerCase();
+    // An owner we cannot read is an owner we cannot vouch for. Same-org is the
+    // ONLY answer that admits a job, so it must be the one we prove, never the
+    // one we assume: every other unknown here already fails closed.
+    if (!login) return true;
+    return login.toLowerCase() !== this.config.githubOrg.toLowerCase();
   }
 
   async #get<T>(path: string): Promise<T> {
