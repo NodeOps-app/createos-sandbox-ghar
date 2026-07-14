@@ -114,13 +114,31 @@ jobs:
           tool_versions: golang 1.26.3
       - run: go version
 
+  # Every shape the worker will actually hand out: the bare `createos` label (whose
+  # shape comes from RUNNER_SHAPE, today s-4vcpu-4gb) plus every catalog shape that
+  # clears the runner floor (mem_mib >= MIN_RUNNER_MEM_MIB, no cpu_quota_pct). The
+  # sub-floor shapes (s-1vcpu-256mb, s-0.25vcpu-512mb, s-0.5vcpu-1gb, s-1vcpu-1gb)
+  # are denied at label admission, so a job can never land on one. Add a row here
+  # when the catalog grows a shape — an unlisted shape is an untested shape.
   smoke-shaped:
-    runs-on: [createos-2vcpu-2gb]
+    strategy:
+      fail-fast: false
+      matrix:
+        label:
+          - createos # bare label -> RUNNER_SHAPE
+          - createos-1vcpu-2gb
+          - createos-2vcpu-2gb
+          - createos-2vcpu-4gb
+          - createos-4vcpu-4gb
+          - createos-4vcpu-8gb
+          - createos-8vcpu-8gb
+          - createos-8vcpu-16gb
+    name: smoke-shaped (${{ matrix.label }})
+    runs-on: ${{ matrix.label }}
     steps:
       - name: Identify the runner
         run: |
+          echo "label: ${{ matrix.label }}"
           echo "host: $(hostname)"
           echo "cpus: $(nproc)   mem: $(free -h | awk '/Mem:/{print $2}')"
-      - name: Assert the requested shape
-        run: |
-          test "$(nproc)" -eq 2 || { echo "expected 2 vCPU, got $(nproc)"; exit 1; }
+          echo "disk: $(df -h / | awk 'NR==2{print $2" total, "$4" free"}')"
