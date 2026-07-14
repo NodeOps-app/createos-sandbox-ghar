@@ -97,10 +97,23 @@ openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in app.pem -out app.pkcs
 
 ### 3. Build the runner template
 
-Bakes a rootfs with the Actions runner + git + Docker (docker-ce, with the buildx and
-compose plugins, so `docker/build-push-action`, `docker compose` and `services:` all
-work), named `ghar-runner`. The microVM has no init system, so `start-runner.sh` starts
-`dockerd` itself and waits for the socket before the runner accepts a job:
+Bakes a rootfs named `ghar-runner`: the Actions runner, Docker (docker-ce with the buildx
+and compose plugins, so `docker/build-push-action`, `docker compose` and `services:` all
+work), and the slice of `ubuntu-latest` that workflows assume is always there — `gh`, a C
+toolchain (`gcc`/`g++`/`make`, for cgo, `go test -race` and node-gyp), `python3`, `zstd`
+(the codec `actions/cache` reaches for), and the usual archivers (`wget zip bzip2 xz
+unzip file`). The microVM has no init system, so `start-runner.sh` starts `dockerd` itself
+and waits for the socket before the runner accepts a job.
+
+**Language runtimes are deliberately not baked in.** Go, Node, Bun and Python arrive at job
+time via `actions/setup-*` and `asdf-vm/actions/install`, because every repo pins its own
+version — baking one in means rebuilding this template on every bump and still missing what
+the repo asked for. The image instead ships what those installers need to work, including
+two fixups `start-runner.sh` applies at boot: `/dev/fd` + `/dev/shm` (absent from the
+microVM's devtmpfs, and without them bash process substitution and shared memory both fail),
+and a tool cache pinned to `/opt/hostedtoolcache`. It also makes the box report itself as
+Ubuntu 22.04, because `actions/setup-python` refuses to run on Debian — see the gotchas in
+`AGENTS.md` before you touch any of that.
 
 ```bash
 CREATEOS_BASE_URL=https://api.sb.createos.sh \
