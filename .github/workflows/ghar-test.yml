@@ -85,19 +85,24 @@ jobs:
           printf 'package smoke\n\nimport "testing"\n\nfunc TestSmoke(t *testing.T) { Nothing() }\n' > smoke_test.go
           CGO_ENABLED=1 go test -race ./...
 
-      # KNOWN GAP, tracked separately: actions/setup-python publishes Ubuntu builds only and
-      # refuses outright on Debian ("version 3.12 ... not found for debian 12"), so it fails
-      # before RUNNER_TOOL_CACHE ever matters. Non-blocking until the base image question is
-      # settled — everything after it must still be proven green.
+      # setup-python only resolves because start-runner.sh makes the box claim Ubuntu 22.04
+      # (see the Dockerfile). Assert the whole chain: the action must resolve a version, and
+      # the interpreter it drops must actually load libpython — which only happens if
+      # RUNNER_TOOL_CACHE matches the RUNPATH those binaries were linked against. The org
+      # asks for 3.11, 3.12 and 3.13, so prove the span rather than one lucky version.
       - uses: actions/setup-python@v6
-        continue-on-error: true
         with:
-          python-version: "3.12"
-      - name: Prove setup-python's interpreter can actually load libpython
-        continue-on-error: true
+          python-version: |
+            3.11
+            3.12
+            3.13
+      - name: Prove setup-python's interpreters can actually load libpython
         run: |
-          python -VV
-          python -c "import ssl, sqlite3, ctypes; print('stdlib ok')"
+          for v in 3.11 3.12 3.13; do
+            py="$(command -v python$v)"
+            "$py" -VV
+            "$py" -c "import ssl, sqlite3, ctypes, lzma; print('stdlib ok')"
+          done
 
       - uses: oven-sh/setup-bun@v2
         with:

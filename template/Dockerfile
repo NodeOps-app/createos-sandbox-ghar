@@ -81,6 +81,23 @@ RUN mkdir -p /opt/actions-runner /opt/hostedtoolcache && cd /opt/actions-runner 
 # _work/_tool, so the interpreter cannot find libpython and every setup-python job dies.
 # Pinning both env vars to the path the binaries were linked against is the whole fix.
 #
+# os-release: THE BOX LIES ABOUT ITS DISTRO, ON PURPOSE. actions/python-versions publishes
+# Ubuntu builds only, and setup-python gates on the running distro before it ever consults
+# the tool cache — on Debian it hard-fails with "version 3.12 ... not found for debian 12",
+# so every setup-python job in the org dies. The base image allowlist is
+# {nodeops/sandbox:debian, nodeops/sandbox:alpine}, so we cannot simply be Ubuntu; claiming
+# to be is the only zero-cost fix that works for every Python version, now and later.
+#
+# 22.04 and not 24.04: the 24.04 python builds link glibc 2.39, this box has 2.36, so they
+# would download and then refuse to run. The 22.04 builds (glibc 2.35) run clean here —
+# verified: Python 3.12.13 + 3.13.14, ssl/sqlite3/lzma/ctypes all import.
+#
+# The lie is load-bearing but narrow: apt reads sources.list, not os-release, so package
+# installs are unaffected. What it WILL break is a workflow step that derives an apt repo
+# from the codename (`. /etc/os-release; ... $VERSION_CODENAME`) — that now yields `jammy`
+# on a bookworm box and apt will fail. Loudly, at least. The truth is kept at
+# /etc/os-release.debian for anything that needs to know what it is really running on.
+#
 # Docker: the microVM has no init, so the script starts dockerd itself and blocks until the
 # socket answers (~1.4s measured, cold) before handing control to the runner — the runner
 # must never accept a job it cannot serve `docker` to. The wait is bounded at 30s and says
@@ -92,5 +109,5 @@ RUN mkdir -p /opt/actions-runner /opt/hostedtoolcache && cd /opt/actions-runner 
 # without waiting on the `completed` webhook. It is best-effort (`|| true`): if the agent
 # predates self-signal or the call fails, the `completed` webhook + reaper cron still tear
 # the VM down. The trailing halt/poweroff/sysrq is a last-ditch fallback.
-RUN printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'ln -sfn /proc/self/fd /dev/fd; ln -sfn /proc/self/fd/0 /dev/stdin; ln -sfn /proc/self/fd/1 /dev/stdout; ln -sfn /proc/self/fd/2 /dev/stderr' 'mkdir -p /dev/shm; grep -q " /dev/shm " /proc/mounts || mount -t tmpfs -o rw,nosuid,nodev,size=1g tmpfs /dev/shm || echo "WARN: no /dev/shm; shared-memory workloads will fail" >&2' 'export RUNNER_TOOL_CACHE=/opt/hostedtoolcache AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache' 'dockerd >/var/log/dockerd.log 2>&1 &' 'for i in $(seq 1 60); do if docker info >/dev/null 2>&1; then break; fi; sleep 0.5; done' 'docker info >/dev/null 2>&1 || echo "WARN: dockerd not ready after 30s; docker steps will fail — see /var/log/dockerd.log" >&2' 'cd /opt/actions-runner' 'RUNNER_ALLOW_RUNASROOT=1 ./run.sh --jitconfig "${JIT_CONFIG}" || true' 'curl -fsS -m 5 -X POST "http://127.0.0.1:1029/self/delete?reason=job-done" || true' 'halt -f 2>/dev/null || poweroff -f 2>/dev/null || echo o > /proc/sysrq-trigger' > /opt/start-runner.sh \
+RUN printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'ln -sfn /proc/self/fd /dev/fd; ln -sfn /proc/self/fd/0 /dev/stdin; ln -sfn /proc/self/fd/1 /dev/stdout; ln -sfn /proc/self/fd/2 /dev/stderr' 'mkdir -p /dev/shm; grep -q " /dev/shm " /proc/mounts || mount -t tmpfs -o rw,nosuid,nodev,size=1g tmpfs /dev/shm || echo "WARN: no /dev/shm; shared-memory workloads will fail" >&2' 'cp -L /etc/os-release /etc/os-release.debian' 'printf "%s\n" "NAME=\"Ubuntu\"" "VERSION=\"22.04 LTS (Jammy Jellyfish)\"" "ID=ubuntu" "ID_LIKE=debian" "PRETTY_NAME=\"Ubuntu 22.04 LTS\"" "VERSION_ID=\"22.04\"" "VERSION_CODENAME=jammy" "UBUNTU_CODENAME=jammy" > /etc/os-release' 'export RUNNER_TOOL_CACHE=/opt/hostedtoolcache AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache' 'dockerd >/var/log/dockerd.log 2>&1 &' 'for i in $(seq 1 60); do if docker info >/dev/null 2>&1; then break; fi; sleep 0.5; done' 'docker info >/dev/null 2>&1 || echo "WARN: dockerd not ready after 30s; docker steps will fail — see /var/log/dockerd.log" >&2' 'cd /opt/actions-runner' 'RUNNER_ALLOW_RUNASROOT=1 ./run.sh --jitconfig "${JIT_CONFIG}" || true' 'curl -fsS -m 5 -X POST "http://127.0.0.1:1029/self/delete?reason=job-done" || true' 'halt -f 2>/dev/null || poweroff -f 2>/dev/null || echo o > /proc/sysrq-trigger' > /opt/start-runner.sh \
  && chmod +x /opt/start-runner.sh
