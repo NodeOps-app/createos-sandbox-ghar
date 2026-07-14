@@ -1,7 +1,6 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { runReconciler } from "../../src/handler";
-import { RUNNER_PREFIX } from "../../src/sandbox";
 import { resetShapeCacheForTests } from "../../src/shapes";
 import { shapeCatalog, runnerName } from "../helpers/mocks";
 
