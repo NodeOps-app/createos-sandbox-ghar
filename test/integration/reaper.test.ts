@@ -9,6 +9,7 @@ async function boot(s: Stub, jobId: number, sandboxId: string) {
   await s.markRunning(jobId);
 }
 const ids = (r: { toDestroy: { sandboxId: string }[] }) => r.toDestroy.map((t) => t.sandboxId);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("reaper", () => {
   it("sweep returns VMs of jobs older than the cutoff", async () => {
@@ -73,5 +74,69 @@ describe("reaper", () => {
     expect(destroy).toHaveBeenCalled();
     // Confirmed teardown clears the row; a second sweep finds nothing.
     expect(ids(await singleton.sweep(Date.now(), 3_600_000))).not.toContain("sb_902");
+  });
+});
+
+/**
+ * Age is measured from the moment a row is committed to boot, NOT from when its
+ * job was queued. A job that waits out the cap accrues queue age it must not be
+ * punished for: it would be reaped before its VM could finish booting, the
+ * reconciler would re-drive it off GitHub's still-`queued` view, and it would be
+ * reaped again — a livelock that only appears under the backlog the queue exists
+ * to absorb. Every test here parks a job behind the cap (MAX_CONCURRENT=2) for
+ * longer than the cutoff it is later judged against, so it FAILS if the age test
+ * reads `created_at`.
+ */
+describe("age is measured from provisioning, not from queueing", () => {
+  /** Fills the cap, queues `jobId` behind it, waits `waitMs`, then frees a slot. */
+  async function promoteAfterWaiting(s: Stub, jobId: number, waitMs: number) {
+    for (const filler of [jobId + 100, jobId + 200]) {
+      await s.onQueued(
+        { jobId: filler, runId: filler, repoFullName: "nodeops-app/api", label: "createos" },
+        `fill-${filler}`,
+      );
+      await boot(s, filler, `sb_fill_${filler}`);
+    }
+    await s.onQueued(
+      { jobId, runId: jobId, repoFullName: "nodeops-app/api", label: "createos" },
+      `d-${jobId}`,
+    );
+    expect(await s.activeCount()).toBe(2); // the job is pending, not active
+
+    await sleep(waitMs);
+
+    // Completing a filler frees the slot the pending job is promoted into.
+    const { nextPending } = await s.onCompleted(jobId + 100, runnerName(jobId + 100));
+    expect(nextPending?.jobId).toBe(jobId);
+  }
+
+  it("reapUnregistered spares a just-promoted job that waited out the grace window", async () => {
+    const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("age1-" + Math.random()));
+    await promoteAfterWaiting(s, 910, 300);
+    // Mid-boot: the VM exists, its runner has not registered yet.
+    await s.recordSandboxCreated(910, "sb_910", runnerName(910));
+
+    // Grace 200ms: the job queued 300ms ago but has been provisioning for ~0ms.
+    const res = await s.reapUnregistered(Date.now(), [], 200);
+    expect(ids(res)).not.toContain("sb_910");
+  });
+
+  it("sweep spares a just-promoted job that waited out the max-age window", async () => {
+    const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("age2-" + Math.random()));
+    await promoteAfterWaiting(s, 920, 300);
+    await boot(s, 920, "sb_920");
+
+    const res = await s.sweep(Date.now(), 200);
+    expect(ids(res)).not.toContain("sb_920");
+  });
+
+  it("still reaps a promoted job once it is genuinely stale", async () => {
+    const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("age3-" + Math.random()));
+    await promoteAfterWaiting(s, 930, 10);
+    await boot(s, 930, "sb_930");
+
+    // The clock reset must not make a promoted row immortal, only younger.
+    const res = await s.sweep(Date.now() + 1, 0);
+    expect(ids(res)).toContain("sb_930");
   });
 });

@@ -23,6 +23,7 @@ type Row = {
   label: string | null;
   state: string;
   created_at: number;
+  provision_started_at: number | null;
   booted_at: number | null;
 };
 
@@ -41,6 +42,27 @@ type Row = {
  */
 const ACTIVE_STATES = "('provisioning','running')";
 
+/**
+ * How old a VM-bearing row is, for BOTH destructive age tests (reconcile grace,
+ * reaper max-age) — measured from the moment the row was committed to boot, not
+ * from when its job was first seen.
+ *
+ * `created_at` is queue-entry time and is wrong here: a job that sits `pending`
+ * at the cap keeps it, so promoting it to `provisioning` yields a row that is
+ * already "old" the instant it starts booting. With RECONCILE_GRACE_MS=180s a
+ * job that waited >3 min for a slot would be reaped mid-boot (its runner cannot
+ * be online yet), the reconciler would re-drive it off GitHub's still-`queued`
+ * view, and it would be reaped again — a livelock that only bites under exactly
+ * the backlog the queue exists to absorb. The hour-scale reaper has the same
+ * flaw: a job that waited 55 min then ran for 5 would be destroyed mid-job.
+ *
+ * COALESCE keeps rows written by the previous schema (NULL column) on their old
+ * created_at behaviour rather than reading them as age zero, so a deploy that
+ * rolls back mid-flight degrades to what shipped before instead of stranding
+ * live rows. `created_at` stays the FIFO key and the pending-expiry key.
+ */
+const ROW_AGE = "COALESCE(provision_started_at, created_at)";
+
 export class Coordinator extends DurableObject<Env> {
   #sql: SqlStorage;
 
@@ -49,15 +71,16 @@ export class Coordinator extends DurableObject<Env> {
     this.#sql = ctx.storage.sql;
     this.#sql.exec(`
       CREATE TABLE IF NOT EXISTS jobs (
-        job_id      INTEGER PRIMARY KEY,
-        run_id      INTEGER NOT NULL,
-        repo        TEXT NOT NULL,
-        sandbox_id  TEXT,
-        runner_name TEXT,
-        label       TEXT,
-        state       TEXT NOT NULL,
-        created_at  INTEGER NOT NULL,
-        booted_at   INTEGER
+        job_id               INTEGER PRIMARY KEY,
+        run_id               INTEGER NOT NULL,
+        repo                 TEXT NOT NULL,
+        sandbox_id           TEXT,
+        runner_name          TEXT,
+        label                TEXT,
+        state                TEXT NOT NULL,
+        created_at           INTEGER NOT NULL,
+        provision_started_at INTEGER,
+        booted_at            INTEGER
       );
       CREATE TABLE IF NOT EXISTS deliveries (
         delivery_id TEXT PRIMARY KEY,
@@ -66,11 +89,18 @@ export class Coordinator extends DurableObject<Env> {
     `);
     // Migrate DOs created before a column existed: CREATE TABLE IF NOT EXISTS
     // won't add one to a live table. A NULL `label` is a row from before shape
-    // labels, which by definition asked for the bare label.
+    // labels, which by definition asked for the bare label; a NULL
+    // `provision_started_at` is a row from before ROW_AGE, which COALESCEs it
+    // back to created_at. Both migrations are additive, so a Worker rollback
+    // (which does NOT revert DO SQLite) leaves the old code reading rows it
+    // still understands.
     const cols = this.#sql.exec(`PRAGMA table_info(jobs)`).toArray() as { name: string }[];
     const has = (c: string) => cols.some((col) => col.name === c);
     if (!has("runner_name")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN runner_name TEXT`);
     if (!has("label")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN label TEXT`);
+    if (!has("provision_started_at")) {
+      this.#sql.exec(`ALTER TABLE jobs ADD COLUMN provision_started_at INTEGER`);
+    }
   }
 
   #maxConcurrent(): number {
@@ -153,15 +183,18 @@ export class Coordinator extends DurableObject<Env> {
     const cap = this.#maxConcurrent();
     const atCap = cap > 0 && this.#active() >= cap;
     const state = atCap ? "pending" : "provisioning";
+    // A row that boots immediately starts its provisioning clock now; one that
+    // queues has no clock until #dequeuePending promotes it (see ROW_AGE).
     this.#sql.exec(
-      `INSERT INTO jobs (job_id, run_id, repo, sandbox_id, runner_name, label, state, created_at, booted_at)
-       VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, NULL)`,
+      `INSERT INTO jobs (job_id, run_id, repo, sandbox_id, runner_name, label, state, created_at, provision_started_at, booted_at)
+       VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, NULL)`,
       job.jobId,
       job.runId,
       job.repoFullName,
       job.label,
       state,
       now,
+      atCap ? null : now,
     );
     return { action: atCap ? "queued" : "provision", jobId: job.jobId };
   }
@@ -246,7 +279,12 @@ export class Coordinator extends DurableObject<Env> {
     this.#sql.exec(`DELETE FROM jobs WHERE job_id = ? AND state = 'destroying'`, jobId);
   }
 
-  /** Promotes the oldest pending job to provisioning; returns it, or null. */
+  /**
+   * Promotes the oldest pending job (FIFO on `created_at`) to provisioning and
+   * starts its provisioning clock; returns it, or null. Without that clock reset
+   * the job inherits the age it accrued waiting for a slot and is eligible for
+   * reaping before its VM can finish booting — see ROW_AGE.
+   */
   #dequeuePending(): PendingJob | null {
     const cap = this.#maxConcurrent();
     if (cap > 0 && this.#active() >= cap) return null;
@@ -255,7 +293,11 @@ export class Coordinator extends DurableObject<Env> {
       .toArray();
     const row = rows[0];
     if (!row) return null;
-    this.#sql.exec(`UPDATE jobs SET state = 'provisioning' WHERE job_id = ?`, row.job_id);
+    this.#sql.exec(
+      `UPDATE jobs SET state = 'provisioning', provision_started_at = ? WHERE job_id = ?`,
+      Date.now(),
+      row.job_id,
+    );
     return this.#toPending(row);
   }
 
@@ -300,7 +342,7 @@ export class Coordinator extends DurableObject<Env> {
     const online = new Set(onlineRunners);
     const toDestroy: TeardownTask[] = [];
     for (const r of this.#sql
-      .exec<Row>(`SELECT * FROM jobs WHERE state IN ${ACTIVE_STATES} AND created_at < ?`, cutoff)
+      .exec<Row>(`SELECT * FROM jobs WHERE state IN ${ACTIVE_STATES} AND ${ROW_AGE} < ?`, cutoff)
       .toArray()) {
       if (r.runner_name && online.has(r.runner_name)) continue; // runner live → healthy
       if (r.sandbox_id) {
@@ -336,7 +378,7 @@ export class Coordinator extends DurableObject<Env> {
     }
 
     const stale = this.#sql
-      .exec<Row>(`SELECT * FROM jobs WHERE state IN ${ACTIVE_STATES} AND created_at < ?`, cutoff)
+      .exec<Row>(`SELECT * FROM jobs WHERE state IN ${ACTIVE_STATES} AND ${ROW_AGE} < ?`, cutoff)
       .toArray();
     for (const r of stale) {
       if (r.sandbox_id) {
