@@ -23,17 +23,6 @@ export function resetShapeCacheForTests(): void {
 }
 
 /**
- * The createos labels in a job's `runs-on`: the bare label plus anything
- * prefixed with it. GitHub AND-matches `runs-on` against a runner's label set,
- * so a job's other labels (`self-hosted`, `linux`, `x64`) are carried
- * implicitly by any JIT runner and are irrelevant to shape selection.
- */
-export function createosLabels(labels: string[], config: Config): string[] {
-  const prefix = `${config.runnerLabel}-`;
-  return labels.filter((l) => l === config.runnerLabel || l.startsWith(prefix));
-}
-
-/**
  * The createos shape a label names. The bare label means whatever the operator
  * configured; a shaped label carries the id in its suffix. Pure — needs no
  * catalog, so teardown and re-provision never depend on the shapes API.
@@ -152,64 +141,7 @@ export async function usableShapes(
 export type Catalog = { ok: true; usable: Set<string> } | { ok: false };
 
 /**
- * Which createos label, if any, a job's `runs-on` requests. Pure and silent —
- * it never logs, because it doesn't know the job id; the caller does, and the
- * caller is the one who should name it in a warning.
- */
-export type RequestedLabel =
-  | { kind: "none" }
-  | { kind: "ambiguous"; labels: string[] }
-  | { kind: "one"; label: string };
-
-export function resolveRequestedLabel(labels: string[], config: Config): RequestedLabel {
-  const ours = createosLabels(labels, config);
-  if (ours.length === 0) return { kind: "none" };
-  if (ours.length > 1) return { kind: "ambiguous", labels: ours };
-  return { kind: "one", label: ours[0]! };
-}
-
-/**
- * Whether `label` names a shape rather than the bare `config.runnerLabel`. A
- * bare label's shape comes from config and needs no catalog; only a shaped
- * label is worth fetching one for.
- */
-export function isShapedLabel(label: string, config: Config): boolean {
-  return label !== config.runnerLabel;
-}
-
-/**
- * The outcome of checking a SHAPED label against the live catalog. Two
- * distinct reasons rather than one boolean because a caller building an alert
- * or a log line needs to say *which* of these happened — an unknown shape and
- * an unreachable shapes API are not the same 202.
- */
-export type ShapeCheck =
-  | { ok: true }
-  | { ok: false; reason: "unknown-shape" | "catalog-unavailable" };
-
-/**
- * Whether `label` names a shape actually offered by the live catalog. Pure
- * and silent, like `resolveRequestedLabel`.
- *
- * Total, not partial: the bare `config.runnerLabel` short-circuits to
- * `{ok: true}` before `catalog` is ever touched. Its shape comes from config,
- * not the catalog, so a shapes-API outage must never be able to block it —
- * that is the load-bearing invariant of this whole feature. Callers still
- * gate the catalog *fetch* behind `isShapedLabel` (fetching one for a bare
- * label would be wasted work either way), but a caller who forgets that gate
- * now gets the correct answer instead of a silently wrong one.
- */
-export function validateShape(label: string, config: Config, catalog: Catalog): ShapeCheck {
-  if (label === config.runnerLabel) return { ok: true };
-  if (!catalog.ok) return { ok: false, reason: "catalog-unavailable" };
-  if (!catalog.usable.has(shapeForLabel(label, config))) {
-    return { ok: false, reason: "unknown-shape" };
-  }
-  return { ok: true };
-}
-
-/**
- * Fetches the live shape catalog for `validateShape`, converting a failed
+ * Fetches the live shape catalog for the admission check, converting a failed
  * fetch into `{ok: false}` rather than throwing — the caller (webhook
  * handler, reconciler) decides what an unavailable catalog means for the job
  * in front of it (202 + retry via the cron reconciler), not this function.

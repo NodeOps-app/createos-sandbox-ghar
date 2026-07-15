@@ -6,11 +6,11 @@ import {
 } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CreateosSandboxValidationError } from "@nodeops-createos/sandbox";
-import { handleWebhook } from "../../src/handler";
+import { handleWebhook, runReconciler } from "../../src/handler";
 import type { SandboxDeps } from "../../src/createos";
 import { resetShapeCacheForTests } from "../../src/shapes";
 import { sign, workflowJobPayload } from "../helpers/fixtures";
-import { shapeCatalog, runnerName } from "../helpers/mocks";
+import { shapeCatalog, runnerName, mockFetch, githubRoutes } from "../helpers/mocks";
 
 const realFetch = globalThis.fetch;
 function patchGitHub() {
@@ -382,5 +382,48 @@ describe("shape labels end-to-end", () => {
     expect(listShapes).not.toHaveBeenCalled();
     expect(createSandbox).not.toHaveBeenCalled();
     expect(await co.activeCount()).toBe(before);
+  });
+
+  it("returns the same refusal for shaped webhook and Reconciler intake", async () => {
+    // Both intake paths run the one admission module, so a shapes outage must
+    // refuse a shaped job identically from either. The two listShapes calls are
+    // intentional: a failed catalog read is not cached, so the webhook and the
+    // later Reconciler tick each attempt it once.
+    const listShapes = vi.fn().mockRejectedValue(new Error("catalog down"));
+    const deps: SandboxDeps = {
+      makeClient: () => ({
+        createSandbox: vi.fn(),
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+        listShapes,
+      }),
+    };
+
+    const webhook = await post(
+      workflowJobPayload({ action: "queued", jobId: 790, labels: ["createos-2vcpu-2gb"] }),
+      "admission-parity-webhook",
+      deps,
+    );
+    expect(await webhook.text()).toBe("catalog-unavailable");
+
+    globalThis.fetch = mockFetch({
+      ...githubRoutes(),
+      "GET /actions/runners": () => new Response(JSON.stringify({ runners: [] })),
+      "GET /installation/repositories": () =>
+        new Response(JSON.stringify({ repositories: [{ full_name: "nodeops-app/api" }] })),
+      "GET /actions/runs?status=queued": () =>
+        new Response(JSON.stringify({ workflow_runs: [{ id: 990 }] })),
+      "GET /actions/runs?status=in_progress": () =>
+        new Response(JSON.stringify({ workflow_runs: [] })),
+      "GET /actions/runs/990/jobs": () =>
+        new Response(
+          JSON.stringify({
+            jobs: [{ id: 791, status: "queued", labels: ["createos-2vcpu-2gb"] }],
+          }),
+        ),
+    });
+
+    await runReconciler(env as never, deps);
+    expect(listShapes).toHaveBeenCalledTimes(2);
   });
 });

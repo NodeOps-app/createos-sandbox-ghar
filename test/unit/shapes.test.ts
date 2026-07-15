@@ -2,14 +2,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Shape } from "@nodeops-createos/sandbox";
 import { loadConfig } from "../../src/config";
 import {
-  createosLabels,
   shapeForLabel,
   usableShapes,
-  resolveRequestedLabel,
-  validateShape,
   fetchCatalog,
   resetShapeCacheForTests,
-  type Catalog,
 } from "../../src/shapes";
 import type { Config } from "../../src/types";
 
@@ -50,16 +46,6 @@ function depsWith(listShapes: () => Promise<Shape[]>) {
 beforeEach(() => {
   resetShapeCacheForTests();
   vi.restoreAllMocks();
-});
-
-describe("createosLabels", () => {
-  it("keeps the bare label and shaped labels, drops everything else", () => {
-    expect(createosLabels(["self-hosted", "linux", "createos-2vcpu-2gb"], config)).toEqual([
-      "createos-2vcpu-2gb",
-    ]);
-    expect(createosLabels(["createos"], config)).toEqual(["createos"]);
-    expect(createosLabels(["ubuntu-latest"], config)).toEqual([]);
-  });
 });
 
 describe("shapeForLabel", () => {
@@ -204,76 +190,6 @@ describe("usableShapes", () => {
     const lowerFloor: Config = { ...config, minRunnerMemMib: 256 };
     await usableShapes(lowerFloor, depsWith(listShapes), 1_000_050); // well inside the TTL
     expect(listShapes).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe("resolveRequestedLabel", () => {
-  it("returns none for a job naming no createos label", () => {
-    expect(resolveRequestedLabel(["ubuntu-latest"], config)).toEqual({ kind: "none" });
-  });
-
-  it("returns ambiguous for two createos labels", () => {
-    expect(resolveRequestedLabel(["createos", "createos-2vcpu-2gb"], config)).toEqual({
-      kind: "ambiguous",
-      labels: ["createos", "createos-2vcpu-2gb"],
-    });
-  });
-
-  it("returns one for the bare label", () => {
-    expect(resolveRequestedLabel(["createos"], config)).toEqual({ kind: "one", label: "createos" });
-  });
-
-  it("returns one for a shaped label, ignoring incidental labels", () => {
-    expect(resolveRequestedLabel(["self-hosted", "linux", "createos-2vcpu-2gb"], config)).toEqual({
-      kind: "one",
-      label: "createos-2vcpu-2gb",
-    });
-  });
-
-  it("never logs — the caller owns the job id and does the logging", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    resolveRequestedLabel(["createos", "createos-2vcpu-2gb"], config);
-    resolveRequestedLabel(["ubuntu-latest"], config);
-    expect(warn).not.toHaveBeenCalled();
-  });
-});
-
-describe("validateShape", () => {
-  const usable = new Set(["s-2vcpu-2gb", "s-4vcpu-4gb"]);
-  const healthy: Catalog = { ok: true, usable };
-  const down: Catalog = { ok: false };
-
-  it("admits a shaped label present in a healthy catalog", () => {
-    expect(validateShape("createos-2vcpu-2gb", config, healthy)).toEqual({ ok: true });
-  });
-
-  it("returns unknown-shape for a shaped label absent from a healthy catalog", () => {
-    expect(validateShape("createos-99vcpu-1tb", config, healthy)).toEqual({
-      ok: false,
-      reason: "unknown-shape",
-    });
-  });
-
-  it("returns catalog-unavailable when the catalog could not be fetched", () => {
-    expect(validateShape("createos-2vcpu-2gb", config, down)).toEqual({
-      ok: false,
-      reason: "catalog-unavailable",
-    });
-  });
-
-  // Fix 1: validateShape must be total. Both call sites gate it behind
-  // isShapedLabel, but a caller that forgets the gate must still get the
-  // right answer — a bare label's shape comes from config, so a shapes-API
-  // outage must never be able to block it.
-  it("admits the bare label even when the catalog is unavailable", () => {
-    expect(validateShape(config.runnerLabel, config, down)).toEqual({ ok: true });
-  });
-
-  it("never logs — the caller owns the job id and does the logging", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    validateShape("createos-99vcpu-1tb", config, healthy);
-    validateShape("createos-2vcpu-2gb", config, down);
-    expect(warn).not.toHaveBeenCalled();
   });
 });
 

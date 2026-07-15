@@ -189,6 +189,62 @@ describe("runReconciler", () => {
     globalThis.fetch = realFetch;
   });
 
+  it("aborts the tick without stranding a row when a later admission throws", async () => {
+    // fork-gated admission does a GitHub fork check per job. If a LATER job's
+    // check throws after an earlier job was admitted, the earlier job must NOT
+    // be left as a `provisioning` row with no VM: the admit phase has to finish
+    // before any Coordinator mutation. Run 9601's job admits; run 9602's fork
+    // lookup returns a 200 with a non-JSON body, so isForkJob's res.json()
+    // rejects and admission throws mid-tick. Runners list 500s so step A is
+    // skipped and cannot itself move the active count.
+    const singleton = stub("singleton");
+    const before = await singleton.activeCount();
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = new Request(input, init);
+      const u = req.url;
+      if (u.includes("/access_tokens"))
+        return new Response(
+          JSON.stringify({ token: "t", expires_at: new Date(Date.now() + 3.6e6).toISOString() }),
+          { status: 201 },
+        );
+      if (req.method === "GET" && u.includes("/actions/runners"))
+        return new Response("boom", { status: 500 });
+      if (u.includes("/installation/repositories"))
+        return new Response(JSON.stringify({ repositories: [{ full_name: "nodeops-app/api" }] }));
+      if (u.includes("/actions/runs/9601/jobs"))
+        return new Response(
+          JSON.stringify({ jobs: [{ id: 96011, status: "queued", labels: ["createos"] }] }),
+        );
+      if (u.includes("/actions/runs/9602/jobs"))
+        return new Response(
+          JSON.stringify({ jobs: [{ id: 96022, status: "queued", labels: ["createos"] }] }),
+        );
+      if (u.includes("status=queued"))
+        return new Response(JSON.stringify({ workflow_runs: [{ id: 9601 }, { id: 9602 }] }));
+      if (u.includes("status=in_progress"))
+        return new Response(JSON.stringify({ workflow_runs: [] }));
+      if (u.includes("/actions/runs/9602")) return new Response("<<not json>>", { status: 200 });
+      if (u.includes("/actions/runs/9601"))
+        return new Response(
+          JSON.stringify({ head_repository: { fork: false, owner: { login: "nodeops-app" } } }),
+        );
+      return new Response("unmocked " + u, { status: 404 });
+    }) as typeof fetch;
+
+    await expect(
+      runReconciler({ ...env, PROVISION_POLICY: "fork-gated" } as any, {
+        makeClient: () => ({
+          createSandbox: vi.fn(),
+          listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
+          getSandbox: vi.fn(),
+          listSandboxes: vi.fn().mockResolvedValue([]),
+        }),
+      }),
+    ).rejects.toThrow();
+    expect(await singleton.activeCount()).toBe(before); // job 96011 not stranded
+    globalThis.fetch = realFetch;
+  });
+
   it("skips the runner sweep when the runner list is unavailable", async () => {
     const singleton = stub("singleton");
     await singleton.onQueued(job(9200), "seed2");

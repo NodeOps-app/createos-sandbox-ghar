@@ -1,13 +1,16 @@
-import type { Config, WorkflowJob } from "./types";
+import type { Config } from "./types";
+
+export interface PolicyJob {
+  repoFullName: string;
+}
 
 /**
- * Decides whether a job is eligible for a sandbox, per the configured policy.
- * `isFork` is a lazy callback (a GitHub API round-trip); it is only awaited
- * under the `fork-gated` policy so the default org-wide path stays cheap.
+ * Decides whether a job is eligible for a Sandbox. `isFork` is lazy and is
+ * awaited only by fork-gated policy, so org-wide admission stays network-free.
  */
 export async function shouldProvision(
   config: Config,
-  job: WorkflowJob,
+  job: PolicyJob,
   isFork: () => Promise<boolean>,
 ): Promise<boolean> {
   const [org] = job.repoFullName.split("/");

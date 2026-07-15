@@ -1,15 +1,8 @@
 import type { Bindings } from "./index";
 import { loadConfig } from "./config";
 import { verifySignature, parseWorkflowJob } from "./webhook";
-import {
-  resolveRequestedLabel,
-  isShapedLabel,
-  validateShape,
-  fetchCatalog,
-  shapeForLabel,
-  type Catalog,
-} from "./shapes";
-import { shouldProvision } from "./policy";
+import { createJobAdmission, identifyJob, type AdmissionDecision } from "./admission";
+import { fetchCatalog } from "./shapes";
 import { GitHubClient } from "./github/client";
 import {
   createRunnerSandbox,
@@ -143,6 +136,41 @@ async function destroyUnrecorded(
   }
 }
 
+/**
+ * The single place a refused admission becomes a log line. `admitted`,
+ * `no-label` (someone else's job) and `policy-skip` (a permanent, expected
+ * rejection) are silent by design; only the outcomes an operator should see —
+ * an ambiguous label, an unknown shape, an unreachable catalog — warn, and the
+ * caller names its scope (`""` for webhook, `"reconcile: "` for the cron) so
+ * both sources read the same rule off one function.
+ */
+function warnAdmission(
+  scope: string,
+  candidate: { jobId: number; repoFullName: string },
+  decision: AdmissionDecision,
+): void {
+  if (
+    decision.kind === "admitted" ||
+    decision.reason === "no-label" ||
+    decision.reason === "policy-skip"
+  ) {
+    return;
+  }
+  if (decision.reason === "ambiguous-label") {
+    console.warn(
+      `${scope}job ${candidate.jobId} (${candidate.repoFullName}) names ${decision.labels.length} createos labels (${decision.labels.join(", ")})`,
+    );
+    return;
+  }
+  if (decision.reason === "unknown-shape") {
+    console.warn(
+      `${scope}job ${candidate.jobId} (${candidate.repoFullName}): label "${decision.label}" names shape "${decision.shape}", which is not offered`,
+    );
+    return;
+  }
+  console.warn(`${scope}job ${candidate.jobId} (${candidate.repoFullName}): catalog-unavailable`);
+}
+
 export async function handleWebhook(
   req: Request,
   env: Bindings,
@@ -159,63 +187,41 @@ export async function handleWebhook(
   const job = parseWorkflowJob(body);
   if (!job) return new Response("ignored", { status: 202 });
 
-  // "Is this ours" is a pure label question for every action — the catalog and
-  // policy are only consulted for a `queued` job below. Gating teardown on
-  // either would leak every shaped VM during a shapes outage or a policy that
-  // has since changed.
-  const requested = resolveRequestedLabel(job.labels, config);
-  if (requested.kind === "none") return new Response("no-label", { status: 202 });
-  if (requested.kind === "ambiguous") {
-    console.warn(
-      `job ${job.jobId} names ${requested.labels.length} createos labels (${requested.labels.join(", ")})`,
-    );
-    return new Response("ambiguous-label", { status: 202 });
-  }
-  const label = requested.label;
-
   const co = coordinator(env);
-  const pending: PendingJob = {
-    jobId: job.jobId,
-    runId: job.runId,
-    repoFullName: job.repoFullName,
-    label,
-  };
 
+  // A queued job runs the full admission rule (identify → policy → catalog);
+  // every other action keys on label identity ALONE. Gating a completed job on
+  // policy or the catalog would leak every shaped VM during a shapes outage or a
+  // policy that has since changed — teardown must depend only on who the job is.
   if (job.action === "queued") {
-    // Policy first: a job the policy rejects must never cost a catalog fetch,
-    // and must be reported as policy-skip rather than as whatever the catalog
-    // fetch would have said (see the Fix-1 review finding: a policy-blocked
-    // shaped job used to return catalog-unavailable during an outage, which
-    // both lied about the reason and never reached the policy that would have
-    // permanently rejected it anyway).
     const github = new GitHubClient(config);
-    const eligible = await shouldProvision(config, job, () =>
-      github.isForkJob(job.repoFullName, job.runId),
-    );
-    if (!eligible) return new Response("policy-skip", { status: 202 });
-
-    // Only a shaped label needs the catalog: a bare label's shape comes from
-    // config, so a shapes-API outage can never stop the jobs that work today.
-    if (isShapedLabel(label, config)) {
-      const catalog: Catalog = await fetchCatalog(config, deps);
-      const check = validateShape(label, config, catalog);
-      if (!check.ok) {
-        if (check.reason === "unknown-shape") {
-          console.warn(
-            `job ${job.jobId}: label "${label}" names shape "${shapeForLabel(label, config)}", which is not offered`,
-          );
-        } else {
-          console.warn(`job ${job.jobId}: ${check.reason}`);
-        }
-        return new Response(check.reason, { status: 202 });
-      }
+    const admit = createJobAdmission(config, {
+      isForkJob: (repoFullName, runId) => github.isForkJob(repoFullName, runId),
+      loadCatalog: () => fetchCatalog(config, deps),
+    });
+    const admission = await admit(job);
+    if (admission.kind === "refused") {
+      warnAdmission("", job, admission);
+      return new Response(admission.reason, { status: 202 });
     }
 
-    const decision = await co.onQueued(pending, delivery);
+    const decision = await co.onQueued(admission.job, delivery);
     if (decision.action === "provision") {
-      ctx.waitUntil(provisionAndRecord(env, pending, deps));
+      ctx.waitUntil(provisionAndRecord(env, admission.job, deps));
     }
     return new Response(decision.action, { status: 202 });
+  }
+
+  const identified = identifyJob(job, config);
+  if (identified.kind === "none") return new Response("no-label", { status: 202 });
+  if (identified.kind === "ambiguous") {
+    const refusal: AdmissionDecision = {
+      kind: "refused",
+      reason: "ambiguous-label",
+      labels: identified.labels,
+    };
+    warnAdmission("", job, refusal);
+    return new Response("ambiguous-label", { status: 202 });
   }
 
   if (job.action === "completed") {
@@ -453,70 +459,43 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
     console.error(`reconcile: queued-job poll failed: ${String(err)}`);
   }
 
-  // Pure prefilter — no network. Each candidate's requested label is resolved
-  // once here. Jobs that aren't ours are skipped silently: "not ours" isn't a
-  // bound binding, it's just someone else's job. An ambiguous job is malformed
-  // regardless of policy, so it's disposed of here too, before either policy
-  // or the catalog are ever consulted.
-  const candidates: { job: QueuedJob; label: string }[] = [];
-  for (const j of queued) {
-    const requested = resolveRequestedLabel(j.labels, config);
-    if (requested.kind === "none") continue;
-    if (requested.kind === "ambiguous") {
-      console.warn(
-        `reconcile: job ${j.jobId} (${j.repoFullName}) skipped: ambiguous (${requested.labels.join(", ")})`,
-      );
+  // One admission factory per tick: identify → policy → catalog, the shaped
+  // catalog lazily loaded on first need and shared across every job this tick
+  // admits, so a matrix burst pays for at most one shapes fetch. Jobs that
+  // aren't ours (no-label) and policy rejections are skipped silently; only an
+  // ambiguous label or a shape problem warns. Same rule as the webhook — the
+  // reconciler reconstructs nothing.
+  const admit = createJobAdmission(config, {
+    isForkJob: (repoFullName, runId) => github.isForkJob(repoFullName, runId),
+    loadCatalog: () => fetchCatalog(config, deps),
+  });
+
+  // Admit every candidate BEFORE mutating the Coordinator. An admission can
+  // throw — a fork-gated policy check is a GitHub round-trip that rejects on a
+  // token or JSON failure — and if it threw *between* two onQueued calls it would
+  // strand the rows already promoted this tick in `provisioning` with no VM,
+  // burning concurrency until the reaper catches them. Do all the throwing work
+  // first: a mid-loop throw then aborts the tick before any row is touched, as
+  // the pre-refactor phased flow did.
+  const admitted: PendingJob[] = [];
+  for (const candidate of queued) {
+    const admission = await admit(candidate);
+    if (admission.kind === "refused") {
+      warnAdmission("reconcile: ", candidate, admission);
       continue;
     }
-    candidates.push({ job: j, label: requested.label });
+    admitted.push(admission.job);
   }
-
-  // Policy next, still before the catalog: a job the policy rejects must
-  // never cost a catalog fetch (see the Fix-1 review finding). One
-  // shouldProvision call per candidate, same as before this reordering —
-  // moving it earlier only changes *when* its (possibly network) fork check
-  // runs, not how many times.
-  const eligible: { job: QueuedJob; label: string }[] = [];
-  for (const { job: j, label } of candidates) {
-    const admitted = await shouldProvision(
-      config,
-      {
-        action: "queued",
-        jobId: j.jobId,
-        runId: j.runId,
-        repoFullName: j.repoFullName,
-        labels: [label],
-      },
-      () => github.isForkJob(j.repoFullName, j.runId),
-    );
-    if (admitted) eligible.push({ job: j, label });
-  }
-
-  // Only pay for the catalog if some POLICY-ELIGIBLE candidate actually names
-  // a shaped label — a tick whose only shaped jobs are all policy-blocked, or
-  // where every eligible job is bare-label, must never touch the shapes API.
-  const needsCatalog = eligible.some(({ label }) => isShapedLabel(label, config));
-  let catalog: Catalog | undefined;
-  if (needsCatalog) catalog = await fetchCatalog(config, deps);
 
   const toProvision: PendingJob[] = [];
-  for (const { job: j, label } of eligible) {
-    if (isShapedLabel(label, config)) {
-      // needsCatalog is exactly "some eligible candidate is shaped", so
-      // catalog was fetched above whenever this branch runs.
-      const check = validateShape(label, config, catalog!);
-      if (!check.ok) {
-        console.warn(`reconcile: job ${j.jobId} (${j.repoFullName}) skipped: ${check.reason}`);
-        continue;
-      }
-    }
-    const job: PendingJob = { jobId: j.jobId, runId: j.runId, repoFullName: j.repoFullName, label };
+  for (const job of admitted) {
     // Same job_id → onQueued returns `ignore` for anything we're already
     // tracking (fresh boot / at-cap pending); only untracked jobs provision.
     const decision = await co.onQueued(job, `reconcile-${job.jobId}`);
     if (decision.action === "provision") toProvision.push(job);
   }
-  await Promise.allSettled(toProvision.map((job) => provisionAndRecord(env, job, deps)));
+
+  await Promise.allSettled(toProvision.map((pending) => provisionAndRecord(env, pending, deps)));
 
   // C. Delete the GitHub runner registrations left behind by jobs that never ran
   //    one. Deliberately LATE: it is less critical than provisioning/teardown, so
