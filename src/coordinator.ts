@@ -158,6 +158,24 @@ export class Coordinator extends DurableObject<Env> {
     return this.#sql.exec<Row>(`SELECT * FROM jobs WHERE runner_name = ?`, runnerName).toArray()[0];
   }
 
+  /**
+   * Canonical Job-row retirement. A row with a live VM becomes Destroying and
+   * returns the durable teardown effect; a VM-less row is deleted immediately.
+   * Reapplying this to an existing Destroying row is idempotent.
+   */
+  #retireRow(row: Row, sandboxId: string | null = row.sandbox_id): TeardownTask | null {
+    if (!sandboxId) {
+      this.#sql.exec(`DELETE FROM jobs WHERE job_id = ?`, row.job_id);
+      return null;
+    }
+    this.#sql.exec(
+      `UPDATE jobs SET state = 'destroying', sandbox_id = ? WHERE job_id = ?`,
+      sandboxId,
+      row.job_id,
+    );
+    return { jobId: row.job_id, sandboxId };
+  }
+
   /** Deduplicates by webhook delivery id. Returns true if this delivery is new. */
   #firstSeen(deliveryId: string, nowMs: number): boolean {
     const cur = this.#sql.exec(
@@ -253,15 +271,8 @@ export class Coordinator extends DurableObject<Env> {
     let toDestroy: TeardownTask | null = null;
     const vm = sandboxId ?? row?.sandbox_id ?? null;
 
-    if (row && row.state !== "destroying" && vm) {
-      this.#sql.exec(
-        `UPDATE jobs SET state = 'destroying', sandbox_id = ? WHERE job_id = ?`,
-        vm,
-        jobId,
-      );
-      toDestroy = { jobId, sandboxId: vm };
-    } else if (row && row.state !== "destroying") {
-      this.#sql.exec(`DELETE FROM jobs WHERE job_id = ?`, jobId); // never got a VM
+    if (row && row.state !== "destroying") {
+      toDestroy = this.#retireRow(row, vm);
     } else if (!row && vm) {
       // A raced `completed` already dropped the row, but we hold a live VM. There
       // is nothing left to persist the teardown against, so hand it back to be
@@ -288,14 +299,7 @@ export class Coordinator extends DurableObject<Env> {
       return { toDestroy: null, nextPending: this.#dequeuePending() };
     }
 
-    let toDestroy: TeardownTask | null = null;
-    if (row.sandbox_id) {
-      this.#sql.exec(`UPDATE jobs SET state = 'destroying' WHERE job_id = ?`, row.job_id);
-      toDestroy = { jobId: row.job_id, sandboxId: row.sandbox_id };
-    } else {
-      // Never booted a VM (still pending / provisioning) → just drop the row.
-      this.#sql.exec(`DELETE FROM jobs WHERE job_id = ?`, row.job_id);
-    }
+    const toDestroy = this.#retireRow(row);
     return { toDestroy, nextPending: this.#dequeuePending() };
   }
 
@@ -370,12 +374,8 @@ export class Coordinator extends DurableObject<Env> {
       .exec<Row>(`SELECT * FROM jobs WHERE state IN ${ACTIVE_STATES} AND ${ROW_AGE} < ?`, cutoff)
       .toArray()) {
       if (r.runner_name && online.has(r.runner_name)) continue; // runner live → healthy
-      if (r.sandbox_id) {
-        this.#sql.exec(`UPDATE jobs SET state = 'destroying' WHERE job_id = ?`, r.job_id);
-        toDestroy.push({ jobId: r.job_id, sandboxId: r.sandbox_id });
-      } else {
-        this.#sql.exec(`DELETE FROM jobs WHERE job_id = ?`, r.job_id); // never booted a VM
-      }
+      const task = this.#retireRow(r);
+      if (task) toDestroy.push(task);
     }
     return { toDestroy, nextPending: this.#drainPending() };
   }
@@ -395,23 +395,18 @@ export class Coordinator extends DurableObject<Env> {
     const cutoff = nowMs - maxAgeMs;
     const toDestroy: TeardownTask[] = [];
 
-    for (const r of this.#sql
+    for (const row of this.#sql
       .exec<Row>(`SELECT * FROM jobs WHERE state = 'destroying'`)
       .toArray()) {
-      if (r.sandbox_id) toDestroy.push({ jobId: r.job_id, sandboxId: r.sandbox_id });
-      else this.#sql.exec(`DELETE FROM jobs WHERE job_id = ?`, r.job_id);
+      const task = this.#retireRow(row);
+      if (task) toDestroy.push(task);
     }
 
-    const stale = this.#sql
+    for (const row of this.#sql
       .exec<Row>(`SELECT * FROM jobs WHERE state IN ${ACTIVE_STATES} AND ${ROW_AGE} < ?`, cutoff)
-      .toArray();
-    for (const r of stale) {
-      if (r.sandbox_id) {
-        this.#sql.exec(`UPDATE jobs SET state = 'destroying' WHERE job_id = ?`, r.job_id);
-        toDestroy.push({ jobId: r.job_id, sandboxId: r.sandbox_id });
-      } else {
-        this.#sql.exec(`DELETE FROM jobs WHERE job_id = ?`, r.job_id); // never got a VM
-      }
+      .toArray()) {
+      const task = this.#retireRow(row);
+      if (task) toDestroy.push(task);
     }
 
     this.#sql.exec(`DELETE FROM jobs WHERE state = 'pending' AND created_at < ?`, cutoff);
