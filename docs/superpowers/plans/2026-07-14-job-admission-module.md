@@ -445,25 +445,33 @@ Delete the `candidates`, `eligible`, `needsCatalog`, `catalog`, and Shape-valida
     isForkJob: (repoFullName, runId) => github.isForkJob(repoFullName, runId),
     loadCatalog: () => fetchCatalog(config, deps),
   });
-  const toProvision: PendingJob[] = [];
 
+  // Admit every candidate BEFORE mutating the Coordinator. An admission can
+  // throw (a fork-gated policy check is a GitHub round-trip that rejects on a
+  // token or JSON failure); interleaving `admit` with `onQueued` in one loop
+  // would let a later throw strand the rows already promoted this tick in
+  // `provisioning` with no VM. Two phases keep the pre-refactor atomicity: a
+  // mid-admit throw aborts the tick before any row is touched.
+  const admitted: PendingJob[] = [];
   for (const candidate of queued) {
     const admission = await admit(candidate);
     if (admission.kind === "refused") {
       warnAdmission("reconcile: ", candidate, admission);
       continue;
     }
-    const decision = await co.onQueued(
-      admission.job,
-      `reconcile-${admission.job.jobId}`,
-    );
-    if (decision.action === "provision") toProvision.push(admission.job);
+    admitted.push(admission.job);
+  }
+
+  const toProvision: PendingJob[] = [];
+  for (const job of admitted) {
+    const decision = await co.onQueued(job, `reconcile-${job.jobId}`);
+    if (decision.action === "provision") toProvision.push(job);
   }
 
   await Promise.allSettled(toProvision.map((pending) => provisionAndRecord(env, pending, deps)));
 ```
 
-This factory is created once per Reconciler tick, so every policy-eligible shaped Job shares one catalog promise.
+This factory is created once per Reconciler tick, so every policy-eligible shaped Job shares one catalog promise. The admit phase runs strictly before the Coordinator-mutation phase so a policy throw can never strand a promoted row (regression test: reconcile "aborts the tick without stranding a row").
 
 - [ ] **Step 5: Add an external parity assertion**
 
