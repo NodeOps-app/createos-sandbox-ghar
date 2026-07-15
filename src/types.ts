@@ -11,6 +11,12 @@ export interface Config {
   createosBaseUrl: string;
   createosApiKey: string;
   runnerLabel: string; // "createos"
+  // GitHub runner group the JIT runner registers into. Default 1 = the org-wide
+  // "Default" group. Which repos may actually schedule onto the runner is that
+  // GROUP's GitHub policy (selected/all repos), not the controller's
+  // repo-allowlist — so the allowlist is a COST control (which repos we spend a
+  // VM on) until this points at a group whose policy scopes it to them.
+  runnerGroupId: number;
   runnerTemplate: string; // template id/name
   sandboxNamePrefix: string; // createos VM name prefix (cosmetic, e.g. "gha-ci"); "" = none
   runnerShape: string; // "s-4vcpu-4gb" — the shape the bare `createos` label means

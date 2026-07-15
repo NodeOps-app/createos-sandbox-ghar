@@ -18,6 +18,25 @@ function num(env: Record<string, unknown>, key: string, fallback: number): numbe
   return n;
 }
 
+// A GitHub id (runner group). Must be a positive integer — 0, fractions,
+// whitespace-as-zero and unsafe integers all mint fine but 404 at
+// generate-jitconfig, which would fail every admitted job asynchronously and
+// have the reconciler retry it forever. Fail fast at startup instead.
+function posInt(env: Record<string, unknown>, key: string, fallback: number): number {
+  const v = env[key];
+  if (v === undefined || v === "") return fallback;
+  // Whitelist canonical decimal, never coerce. `Number()` alone would accept
+  // `true`→1, `[7]`→7, `"1e2"`→100, `"0x10"`→16 — each landing on a group the
+  // operator never named. This one is a trust boundary, so anything but a plain
+  // positive-integer string fails loud. (`.test` stringifies, so the typeof
+  // guard is what blocks `[7]`; isSafeInteger caps an oversized digit run.)
+  const n = typeof v === "string" && /^[1-9]\d*$/.test(v) ? Number(v) : NaN;
+  if (!Number.isSafeInteger(n) || n < 1) {
+    throw new Error(`invalid env: ${key}=${String(v)} (want a positive integer)`);
+  }
+  return n;
+}
+
 export function loadConfig(env: Record<string, unknown>): Config {
   const policy = (env.PROVISION_POLICY as string) || "org-wide";
   if (!POLICIES.includes(policy as ProvisionPolicy)) {
@@ -38,6 +57,7 @@ export function loadConfig(env: Record<string, unknown>): Config {
     createosBaseUrl: req(env, "CREATEOS_BASE_URL"),
     createosApiKey: req(env, "CREATEOS_API_KEY"),
     runnerLabel: (env.RUNNER_LABEL as string) || "createos",
+    runnerGroupId: posInt(env, "RUNNER_GROUP_ID", 1),
     runnerTemplate: req(env, "RUNNER_TEMPLATE"),
     sandboxNamePrefix: (env.SANDBOX_NAME_PREFIX as string) || "",
     runnerShape: (env.RUNNER_SHAPE as string) || "s-4vcpu-4gb",

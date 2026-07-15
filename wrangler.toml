@@ -28,6 +28,13 @@ RUNNER_DISK_MIB = "10240"
 MAX_CONCURRENT = "50"
 PROVISION_POLICY = "org-wide"
 REPO_ALLOWLIST = ""
+# GitHub runner group the JIT runner registers into. 1 = the org-wide "Default"
+# group. PROVISION_POLICY/REPO_ALLOWLIST only decide which repos we spend a VM
+# on; which repos may schedule onto the runner is the GROUP's GitHub policy, not
+# ours. To make the allowlist an actual execution boundary, create a runner
+# group whose policy scopes it to those repos (org Actions settings) and set
+# this to its id.
+RUNNER_GROUP_ID = "1"
 REAPER_MAX_AGE_MS = "1800000"
 RECONCILE_GRACE_MS = "180000"
 

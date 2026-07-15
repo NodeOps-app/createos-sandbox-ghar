@@ -27,6 +27,7 @@ async function cfg(): Promise<Config> {
     createosBaseUrl: "https://c",
     createosApiKey: "k",
     runnerLabel: "createos",
+    runnerGroupId: 1,
     runnerTemplate: "ghar-runner",
     sandboxNamePrefix: "gha-ci",
     runnerShape: "s-4vcpu-4gb",
@@ -54,6 +55,21 @@ describe("GitHubClient.generateJitConfig", () => {
     const client = new GitHubClient(await cfg(), mockFetch(routes));
     expect(await client.generateJitConfig(runnerName(1), "createos")).toBe("ENCODED_JIT_BLOB");
     expect((body as { labels: string[] }).labels).toEqual(["createos"]);
+    expect((body as { runner_group_id: number }).runner_group_id).toBe(1); // default group
+  });
+  it("registers the runner into the configured runner group", async () => {
+    // The group is the GitHub-side execution boundary; the controller's policy is
+    // not. A non-default RUNNER_GROUP_ID must reach generate-jitconfig verbatim.
+    let body: unknown;
+    const routes = githubRoutes({
+      "POST /generate-jitconfig": async (req) => {
+        body = await req.json();
+        return new Response(JSON.stringify({ encoded_jit_config: "X" }), { status: 201 });
+      },
+    });
+    const client = new GitHubClient({ ...(await cfg()), runnerGroupId: 7 }, mockFetch(routes));
+    await client.generateJitConfig(runnerName(1), "createos");
+    expect((body as { runner_group_id: number }).runner_group_id).toBe(7);
   });
   it("throws on failure", async () => {
     const routes = githubRoutes({

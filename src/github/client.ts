@@ -54,7 +54,7 @@ export class GitHubClient {
         headers: await this.#headers(),
         body: JSON.stringify({
           name: runnerName,
-          runner_group_id: 1,
+          runner_group_id: this.config.runnerGroupId,
           labels: [label],
           work_folder: "_work",
         }),

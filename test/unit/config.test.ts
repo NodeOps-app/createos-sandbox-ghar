@@ -24,6 +24,26 @@ describe("loadConfig", () => {
     expect(c.reaperMaxAgeMs).toBe(3_600_000);
     expect(c.reconcileGraceMs).toBe(180_000);
     expect(c.sandboxNamePrefix).toBe(""); // no prefix unless SANDBOX_NAME_PREFIX set
+    expect(c.runnerGroupId).toBe(1); // org-wide Default group
+  });
+
+  it("parses a non-default runner group", () => {
+    expect(loadConfig({ ...base, RUNNER_GROUP_ID: "7" }).runnerGroupId).toBe(7);
+  });
+
+  it("rejects a non-positive-integer runner group", () => {
+    // A bad group id mints fine but 404s at generate-jitconfig, failing every
+    // job async — must fail loud at startup instead.
+    // Only a canonical positive-decimal string is admitted; exponent and hex
+    // forms coerce to a *different* group under Number() and must be rejected.
+    for (const bad of ["0", "-1", "1.5", "abc", " ", "1e30", "1e2", "0x10", "07", "+1"]) {
+      expect(() => loadConfig({ ...base, RUNNER_GROUP_ID: bad })).toThrow(/RUNNER_GROUP_ID/);
+    }
+    // Non-string bindings must not coerce (Number(true)=1, Number([7])=7) onto a
+    // group the operator never named.
+    for (const bad of [true, [7], {}]) {
+      expect(() => loadConfig({ ...base, RUNNER_GROUP_ID: bad })).toThrow(/RUNNER_GROUP_ID/);
+    }
   });
 
   it("prefixes sandbox name when SANDBOX_NAME_PREFIX set", () => {

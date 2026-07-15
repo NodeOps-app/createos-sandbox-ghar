@@ -181,8 +181,9 @@ Set in `wrangler.toml [vars]` unless marked secret (`wrangler secret put`).
 | `MIN_RUNNER_MEM_MIB` | | `2048` | Floor on shapes offered as shaped labels — smaller shapes can't run an Actions runner. |
 | `RUNNER_DISK_MIB` | | `30720` | Overlay disk — **must be ≤ your plan's disk cap** or `createSandbox` 403s. |
 | `MAX_CONCURRENT` | | `0` | `0` = unlimited; `N` = cap + pending queue. Set a finite value in production. |
-| `PROVISION_POLICY` | | `org-wide` | `org-wide` \| `repo-allowlist` \| `fork-gated`. |
+| `PROVISION_POLICY` | | `org-wide` | `org-wide` \| `repo-allowlist` \| `fork-gated`. A **cost** control (which repos get a VM), not a GitHub-side execution boundary — see `RUNNER_GROUP_ID`. |
 | `REPO_ALLOWLIST` | | — | CSV of `owner/repo`, used when policy is `repo-allowlist`. |
+| `RUNNER_GROUP_ID` | | `1` | GitHub runner group the JIT runner joins. `1` = org-wide Default. Which repos may schedule onto the runner is that group's GitHub policy — point this at a group scoped to your repos to make the allowlist an actual execution boundary. |
 | `REAPER_MAX_AGE_MS` | | `3600000` | Orphan-VM cutoff — keep **above your longest job**. |
 | `RECONCILE_GRACE_MS` | | `180000` | Boot grace before a runner-less VM is reaped — keep **above VM boot + runner registration**. |
 | `ALERT_WEBHOOK_URL` | ✅ | — | Optional Slack-compatible webhook for provision/teardown failures. |
@@ -235,6 +236,7 @@ Failures are logged (`wrangler tail`). For pushed alerts, set the optional `ALER
 ## Security notes
 
 - **`PROVISION_POLICY=org-wide` serves every repo in the org, including fork PRs.** Safety then rests on VM isolation + ephemerality (each job gets a throwaway KVM VM; GitHub withholds secrets from fork PRs unless approved) and on `MAX_CONCURRENT` to bound the blast radius — **set it to a finite value in production**. For tighter control use `repo-allowlist`, or `fork-gated` (checks the run's head repo via the API).
+- **`PROVISION_POLICY`/`REPO_ALLOWLIST` gate what we spend a VM on, not what GitHub will schedule onto our runners.** The JIT runners register into `RUNNER_GROUP_ID` (default `1` = the org-wide Default group); which repos may schedule onto a runner is that **group's** GitHub policy (`selected`/`all` repos), not our allowlist. So the allowlist is a cost control, not an execution boundary. To make it one, create a runner group whose GitHub policy is scoped to the allowlisted repos and set `RUNNER_GROUP_ID` to it.
 - The webhook is authenticated with `X-Hub-Signature-256` HMAC; unsigned or invalid requests get `401`.
 - Secrets belong in `wrangler secret`, never in `wrangler.toml`. `.dev.vars` and `.env*` are gitignored.
 - Found a vulnerability? See [SECURITY.md](SECURITY.md).
