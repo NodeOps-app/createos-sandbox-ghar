@@ -106,8 +106,7 @@ describe("GitHubClient.listRunners", () => {
           JSON.stringify({
             runners: [
               { id: 1, name: runnerName(7), status: "online", busy: true },
-              { id: 2, name: runnerName(8, "bb"), status: "offline" },
-              { name: "no-id-so-unusable", status: "offline" }, // can't be deleted → dropped
+              { id: 2, name: runnerName(8, "bb"), status: "offline" }, // busy omitted → false
             ],
           }),
           { status: 200 },
@@ -120,6 +119,131 @@ describe("GitHubClient.listRunners", () => {
     ]);
   });
 
+  it("refuses a malformed record rather than under-reporting a live runner", async () => {
+    // The liveness oracle tests for ABSENCE: a dropped or offline-defaulted live
+    // runner reads as "gone" and reapUnregistered destroys its VM mid-job. A
+    // record missing id/name/status must fail the whole read, like a truncated
+    // page — never a silent drop or a defaulted status.
+    const listWith = async (rec: unknown) =>
+      new GitHubClient(
+        await cfg(),
+        mockFetch(
+          githubRoutes({
+            "GET /actions/runners": () =>
+              new Response(JSON.stringify({ runners: [rec] }), { status: 200 }),
+          }),
+        ),
+      ).listRunners();
+    await expect(listWith({ name: "n", status: "online" })).rejects.toThrow(/malformed/); // no id
+    await expect(listWith({ id: 1, status: "online" })).rejects.toThrow(/malformed/); // no name
+    await expect(listWith({ id: 1, name: "n" })).rejects.toThrow(/malformed/); // no status
+    // A status that isn't online/offline would fail step A's `=== "online"` and
+    // read as absent → must throw, not pass through as not-online.
+    await expect(listWith({ id: 1, name: "n", status: "provisioning" })).rejects.toThrow(
+      /malformed/,
+    );
+    // A truthy non-string name can't equal any stored runner name, so a live
+    // runner carrying one reads as absent → throw, don't pass it through.
+    await expect(listWith({ id: 1, name: 123, status: "online" })).rejects.toThrow(/malformed/);
+  });
+
+  it("refuses a page whose runners key is missing or not an array", async () => {
+    // #getPaged coercing a keyless 200 to [] would read as "no runners at all"
+    // and reap every live VM at once — the widest-blast-radius form of the same
+    // under-report. Strict callers must throw, not return an empty list.
+    const listBody = async (body: unknown) =>
+      new GitHubClient(
+        await cfg(),
+        mockFetch(
+          githubRoutes({
+            "GET /actions/runners": () => new Response(JSON.stringify(body), { status: 200 }),
+          }),
+        ),
+      ).listRunners();
+    await expect(listBody({ total_count: 0 })).rejects.toThrow(/under-report/); // no runners key
+    await expect(listBody({ runners: null })).rejects.toThrow(/under-report/);
+    await expect(listBody({ runners: "nope" })).rejects.toThrow(/under-report/);
+    await expect(listBody({ total_count: 0, runners: [] })).resolves.toEqual([]); // real empty list
+  });
+
+  it("refuses a page that returns fewer runners than it declares", async () => {
+    // `{total_count:1, runners:[]}` is a well-formed array that still proves a
+    // runner was omitted — every tracked VM would read as absent. The declared
+    // total is the only evidence of the omission, so a shortfall must throw.
+    const client = async (body: unknown) =>
+      new GitHubClient(
+        await cfg(),
+        mockFetch(
+          githubRoutes({
+            "GET /actions/runners": () => new Response(JSON.stringify(body), { status: 200 }),
+          }),
+        ),
+      ).listRunners();
+    await expect(client({ total_count: 1, runners: [] })).rejects.toThrow(/1 declared/);
+    // Collecting MORE than declared (a runner registered mid-scan) is not a
+    // teardown risk and must NOT throw.
+    await expect(
+      client({ total_count: 0, runners: [{ id: 1, name: "cos-1-aa", status: "online" }] }),
+    ).resolves.toHaveLength(1);
+  });
+
+  it("fails closed when offset pagination shrinks mid-scan", async () => {
+    // 101 runners: page 1 returns r1–r100 (total 101). A runner deregisters, so
+    // page 2 comes back empty with total 100 — still-live r101 shifted into an
+    // already-read page and is now omitted. Keying on the LAST total (100 ≥ 100)
+    // would rubber-stamp that omission and reap r101's VM; keying on the MAX
+    // (101) makes the short read throw.
+    const page1 = Array.from({ length: 100 }, (_, i) => ({
+      id: i + 1,
+      name: runnerName(i + 1),
+      status: "online",
+    }));
+    const routes = githubRoutes({
+      "GET /actions/runners": (req) => {
+        const page = new URL(req.url).searchParams.get("page");
+        return page === "1"
+          ? new Response(JSON.stringify({ total_count: 101, runners: page1 }), { status: 200 })
+          : new Response(JSON.stringify({ total_count: 100, runners: [] }), { status: 200 });
+      },
+    });
+    const client = new GitHubClient(await cfg(), mockFetch(routes));
+    await expect(client.listRunners()).rejects.toThrow(/100 of 101 declared/);
+  });
+
+  it("KNOWN RESIDUAL: balanced mid-scan turnover is not caught by count alone", async () => {
+    // Documents the boundary loudly (no silent bound). id 1 leaves AND id 102
+    // joins between pages, so the total stays 101 while live id 101 shifts out of
+    // page 1 and is omitted. Count equality can't see it, and no amount of
+    // list-level parsing can — it is structural to offset pagination over a
+    // mutating set. Closing it belongs to the REAP path, which must confirm a
+    // specific runner's absence against GitHub before destroying (one subrequest
+    // per candidate — the subrequest-budget redesign's call). This asserts the
+    // current, inherent under-catch so the boundary is executable, not silent.
+    const page1 = Array.from({ length: 100 }, (_, i) => ({
+      id: i + 1,
+      name: runnerName(i + 1),
+      status: "online",
+    }));
+    const routes = githubRoutes({
+      "GET /actions/runners": (req) => {
+        const page = new URL(req.url).searchParams.get("page");
+        return page === "1"
+          ? new Response(JSON.stringify({ total_count: 101, runners: page1 }), { status: 200 })
+          : new Response(
+              JSON.stringify({
+                total_count: 101,
+                runners: [{ id: 102, name: runnerName(102), status: "online" }],
+              }),
+              { status: 200 },
+            );
+      },
+    });
+    const client = new GitHubClient(await cfg(), mockFetch(routes));
+    const got = await client.listRunners();
+    expect(got).toHaveLength(101); // passes despite omitting live id 101 — the residual
+    expect(got.some((r) => r.name === runnerName(101))).toBe(false);
+  });
+
   it("refuses a truncated read rather than under-reporting live runners", async () => {
     // The liveness oracle tests for ABSENCE: a runner missing from a truncated
     // page reads as "runner gone", and reapUnregistered would destroy its VM
@@ -130,7 +254,8 @@ describe("GitHubClient.listRunners", () => {
       status: "online",
     }));
     const routes = githubRoutes({
-      "GET /actions/runners": () => new Response(JSON.stringify({ runners: full }), { status: 200 }),
+      "GET /actions/runners": () =>
+        new Response(JSON.stringify({ runners: full }), { status: 200 }),
     });
     const client = new GitHubClient(await cfg(), mockFetch(routes));
     await expect(client.listRunners()).rejects.toThrow(/MAX_PAGES/);

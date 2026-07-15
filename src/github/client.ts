@@ -116,11 +116,29 @@ export class GitHubClient {
     const sep = path.includes("?") ? "&" : "?";
     const out: T[] = [];
     let page = 1;
+    let declaredTotal: number | undefined;
     for (; page <= MAX_PAGES; page++) {
-      const body = await this.#get<Record<string, T[] | undefined>>(
+      const body = await this.#get<Record<string, unknown>>(
         `${path}${sep}per_page=100&page=${page}`,
       );
-      const items = body[key] ?? [];
+      const raw = body[key];
+      // A strict caller tests for ABSENCE, so a 200 whose list key is missing or
+      // not an array is the same lie by omission as a truncated page: coercing it
+      // to `[]` reads as "nothing there" and would reap every live VM at once.
+      // Refuse it. A genuinely empty list arrives as `[]` — present, iterable —
+      // and passes cleanly.
+      if (strict && !Array.isArray(raw)) {
+        throw new Error(
+          `getPaged: ${path} page ${page} has no array "${key}" — refusing to under-report`,
+        );
+      }
+      if (typeof body.total_count === "number") {
+        declaredTotal =
+          declaredTotal === undefined
+            ? body.total_count
+            : Math.max(declaredTotal, body.total_count);
+      }
+      const items = (raw ?? []) as T[];
       out.push(...items);
       if (items.length < 100) break;
     }
@@ -130,6 +148,31 @@ export class GitHubClient {
       const msg = `getPaged: hit MAX_PAGES=${MAX_PAGES} for ${path} — results truncated (${out.length} items collected)`;
       if (strict) throw new Error(msg);
       console.warn(msg);
+    }
+    // GitHub states the full count alongside the page. For a strict caller, a
+    // total we fell short of is proof of omission the array shape alone can't
+    // show (e.g. `{total_count:1, runners:[]}`) — the same under-report, self-
+    // declared. The HIGHEST count seen across pages is the bar, not the last:
+    // offset pagination over a set that shrinks mid-scan (a runner deregisters
+    // between pages) can shift a still-live runner into an already-read page and
+    // return a short final page with a lowered total — using the last count
+    // would rubber-stamp that omission, so a destructive-absence oracle must
+    // fail closed on any shrink. A shortfall throws; collecting MORE than the max
+    // (a registration mid-scan) is not a teardown risk and passes.
+    //
+    // KNOWN RESIDUAL (not closed here, by design): count equality cannot prove
+    // SET completeness under *balanced* mid-scan turnover — one runner leaves and
+    // another joins between pages, keeping the total equal while a live runner
+    // shifts out of an already-read page and vanishes. Only reachable with >100
+    // org runners (multi-page), a degraded state the orphan sweep exists to
+    // prevent. Truly closing it means confirming a specific runner's absence
+    // against GitHub (single-runner / name-filtered GET) in the REAP path before
+    // destroying — one subrequest per candidate, which is the subrequest-budget
+    // redesign's call to make, not this transport's. Tracked with that work.
+    if (strict && declaredTotal !== undefined && out.length < declaredTotal) {
+      throw new Error(
+        `getPaged: ${path} returned ${out.length} of ${declaredTotal} declared — refusing to under-report`,
+      );
     }
     return out;
   }
@@ -149,8 +192,28 @@ export class GitHubClient {
     );
     const out: Runner[] = [];
     for (const r of runners) {
-      if (typeof r.id !== "number" || !r.name) continue;
-      out.push({ id: r.id, name: r.name, status: r.status ?? "offline", busy: r.busy === true });
+      // A record we can't read as a live/dead runner is a lie by omission to a
+      // caller that tests for ABSENCE, exactly like a truncated page: a dropped
+      // record — or a status that isn't the online/offline the oracle compares
+      // against — makes a live runner read as "gone", and reapUnregistered then
+      // destroys its VM mid-job. Refuse the whole read rather than under-report,
+      // same contract as strict paging above. `status` is validated to the two
+      // values GitHub actually returns so an unexpected one can't slip through as
+      // not-online. (`busy` stays lenient — default false: it only gates the
+      // orphan sweep, which is backstopped by the Coordinator row check, and the
+      // real API always sends it; requiring it would reject nothing GitHub emits
+      // while breaking every mock that omits it.)
+      if (
+        typeof r.id !== "number" ||
+        typeof r.name !== "string" ||
+        !r.name ||
+        (r.status !== "online" && r.status !== "offline")
+      ) {
+        throw new Error(
+          `listRunners: malformed runner record (id=${JSON.stringify(r.id)}, name=${JSON.stringify(r.name)}, status=${JSON.stringify(r.status)}) — refusing to under-report live runners`,
+        );
+      }
+      out.push({ id: r.id, name: r.name, status: r.status, busy: r.busy === true });
     }
     return out;
   }
