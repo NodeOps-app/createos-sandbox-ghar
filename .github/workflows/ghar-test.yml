@@ -132,7 +132,11 @@ jobs:
           - createos-4vcpu-4gb
           - createos-4vcpu-8gb
           - createos-8vcpu-8gb
-          - createos-8vcpu-16gb
+          # createos-8vcpu-16gb excluded: CreateOS returns 5xx "internal error"
+          # provisioning the largest shape under the simultaneous-spawn burst,
+          # cancelling the job (first seen run 29654684165, 4 consecutive failures).
+          # Re-add once shape-aware capacity (C4) paces big-shape provisioning — until
+          # then it flakes the smoke without exercising any controller code path.
     name: smoke-shaped (${{ matrix.label }})
     runs-on: ${{ matrix.label }}
     steps:
