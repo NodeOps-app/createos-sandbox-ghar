@@ -1,8 +1,16 @@
 import { env, SELF, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { handleWebhook } from "../../src/handler";
+import { resetCredentialSessionsForTests } from "../../src/github/auth";
 import { sign, workflowJobPayload } from "../helpers/fixtures";
 import worker from "../../src/index";
+
+// The credential session is module-level and warm across invocations; drop it
+// between cases so one case's patched GitHub fetch can't serve its cached token
+// to the next.
+beforeEach(() => {
+  resetCredentialSessionsForTests();
+});
 
 describe("scaffold", () => {
   it("health route returns ok", async () => {

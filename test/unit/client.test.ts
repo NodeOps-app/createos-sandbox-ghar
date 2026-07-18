@@ -1,7 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { GitHubClient } from "../../src/github/client";
+import { resetCredentialSessionsForTests } from "../../src/github/auth";
 import { mockFetch, githubRoutes, runnerName } from "../helpers/mocks";
 import type { Config } from "../../src/types";
+
+// GitHubClient shares a warm, module-level credential session keyed by config
+// identity; drop it between cases so each client's injected fetch owns its own
+// token mint instead of inheriting the previous case's cached token.
+beforeEach(() => {
+  resetCredentialSessionsForTests();
+});
 
 async function cfg(): Promise<Config> {
   const pair = (await crypto.subtle.generateKey(

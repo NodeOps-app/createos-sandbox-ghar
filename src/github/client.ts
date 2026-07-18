@@ -1,5 +1,5 @@
 import type { Config, QueuedJob, Runner } from "../types";
-import { TokenCache } from "./auth";
+import { credentialSession, type TokenCache } from "./auth";
 
 type FetchLike = typeof fetch;
 const UA = "createos-sandbox-ghar";
@@ -18,13 +18,10 @@ export class GitHubClient {
     // (Workers throws Illegal invocation otherwise).
     private fetchImpl: FetchLike = fetch.bind(globalThis),
   ) {
-    this.#tokens = new TokenCache(
-      config.githubAppId,
-      config.githubAppPrivateKeyPkcs8,
-      config.githubInstallationId,
-      config.githubApiUrl,
-      fetchImpl,
-    );
+    // Shared per-credential session (warm-isolate), not a fresh cache per client:
+    // a recovery tick minting N runners and every warm webhook provision now reuse
+    // one token + one RSA sign until it nears expiry. See credentialSession.
+    this.#tokens = credentialSession(config, fetchImpl);
   }
 
   async #headers(): Promise<HeadersInit> {

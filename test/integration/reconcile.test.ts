@@ -2,13 +2,16 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { runReconciler } from "../../src/handler";
 import { resetShapeCacheForTests } from "../../src/shapes";
+import { resetCredentialSessionsForTests } from "../../src/github/auth";
 import { shapeCatalog, runnerName } from "../helpers/mocks";
 
-// The shapes.ts catalog cache is module-level and outlives any single test —
-// without this, whichever suite runs first (bare-label fallback here vs. a
-// real catalog elsewhere) decides what every later case silently exercises.
+// Both caches are module-level and outlive any single test. The shapes catalog:
+// without the reset, whichever suite runs first decides what every later case
+// silently exercises. The credential session: a warm session created by one
+// case's patched fetch would otherwise serve its cached token to the next.
 beforeEach(() => {
   resetShapeCacheForTests();
+  resetCredentialSessionsForTests();
 });
 
 type Stub = ReturnType<typeof env.COORDINATOR.get>;
