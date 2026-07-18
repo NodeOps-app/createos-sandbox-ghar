@@ -15,7 +15,14 @@ import {
 } from "./sandbox";
 import { makeSandboxClient } from "./createos";
 import { notify } from "./notify";
-import type { PendingJob, Config, ProvisionFailedResult, QueuedJob, Runner } from "./types";
+import type {
+  PendingJob,
+  Config,
+  ProvisionFailedResult,
+  QueuedJob,
+  Runner,
+  SpawnTimeline,
+} from "./types";
 
 function coordinator(env: Bindings) {
   return env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
@@ -237,7 +244,39 @@ export async function handleWebhook(
     return new Response("completed", { status: 202 });
   }
 
+  if (job.action === "in_progress") {
+    // The real queued→started signal: GitHub sends in_progress when a runner
+    // ACCEPTS the job. Stamp it and log the spawn phase timeline — pure
+    // observation off a webhook we already receive (no lifecycle change, no
+    // extra GitHub/CreateOS call). runner_name is the VM that actually ran it,
+    // so timing is attributed to the runner even under backlog reassignment.
+    const timeline = await co.markJobStarted(job.jobId, job.runnerName);
+    if (timeline) logSpawnTimeline(timeline);
+    return new Response("in_progress", { status: 202 });
+  }
+
   return new Response("noop", { status: 202 });
+}
+
+/**
+ * Emits one greppable line per spawn: queued→started latency split into the
+ * three phases deep-spawn work optimizes against — wait (queued behind the cap),
+ * provision (JIT mint + createSandbox + ownership record + runner launch), and
+ * boot (VM/dockerd/runner-connect until GitHub dispatches the job). A phase whose
+ * start timestamp is null (skipped) prints `?` rather than a bogus number, and no
+ * credentials appear — so a run of spawns shows where the time actually goes.
+ */
+function logSpawnTimeline(t: SpawnTimeline): void {
+  const wait = t.provisionStartedAt === null ? "?" : `${t.provisionStartedAt - t.createdAt}ms`;
+  const provision =
+    t.provisionStartedAt === null || t.bootedAt === null
+      ? "?"
+      : `${t.bootedAt - t.provisionStartedAt}ms`;
+  const boot = t.bootedAt === null ? "?" : `${t.jobStartedAt - t.bootedAt}ms`;
+  console.log(
+    `spawn timeline: job=${t.jobId} runner=${t.runnerName ?? "?"} ` +
+      `queued->started=${t.jobStartedAt - t.createdAt}ms (wait=${wait} provision=${provision} boot=${boot})`,
+  );
 }
 
 /**

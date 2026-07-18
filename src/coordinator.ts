@@ -6,6 +6,7 @@ import type {
   ReapResult,
   SandboxRecordDecision,
   ProvisionFailedResult,
+  SpawnTimeline,
   TeardownTask,
 } from "./types";
 
@@ -25,6 +26,7 @@ type Row = {
   created_at: number;
   provision_started_at: number | null;
   booted_at: number | null;
+  job_started_at: number | null;
 };
 
 /**
@@ -80,7 +82,8 @@ export class Coordinator extends DurableObject<Env> {
         state                TEXT NOT NULL,
         created_at           INTEGER NOT NULL,
         provision_started_at INTEGER,
-        booted_at            INTEGER
+        booted_at            INTEGER,
+        job_started_at       INTEGER
       );
       CREATE TABLE IF NOT EXISTS deliveries (
         delivery_id TEXT PRIMARY KEY,
@@ -91,15 +94,20 @@ export class Coordinator extends DurableObject<Env> {
     // won't add one to a live table. A NULL `label` is a row from before shape
     // labels, which by definition asked for the bare label; a NULL
     // `provision_started_at` is a row from before ROW_AGE, which COALESCEs it
-    // back to created_at. Both migrations are additive, so a Worker rollback
-    // (which does NOT revert DO SQLite) leaves the old code reading rows it
-    // still understands.
+    // back to created_at; a NULL `job_started_at` is a row whose in_progress
+    // signal was never recorded (pre-migration, or a job that never started) and
+    // only feeds the spawn-timeline log, so old code ignoring it is harmless. All
+    // migrations are additive, so a Worker rollback (which does NOT revert DO
+    // SQLite) leaves the old code reading rows it still understands.
     const cols = this.#sql.exec(`PRAGMA table_info(jobs)`).toArray() as { name: string }[];
     const has = (c: string) => cols.some((col) => col.name === c);
     if (!has("runner_name")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN runner_name TEXT`);
     if (!has("label")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN label TEXT`);
     if (!has("provision_started_at")) {
       this.#sql.exec(`ALTER TABLE jobs ADD COLUMN provision_started_at INTEGER`);
+    }
+    if (!has("job_started_at")) {
+      this.#sql.exec(`ALTER TABLE jobs ADD COLUMN job_started_at INTEGER`);
     }
   }
 
@@ -248,6 +256,37 @@ export class Coordinator extends DurableObject<Env> {
       Date.now(),
       jobId,
     );
+  }
+
+  /**
+   * Records the real queued→started signal — the `in_progress` webhook GitHub
+   * sends when a runner ACCEPTS the job — as `job_started_at`, and hands the
+   * Worker the phase timestamps to log. Pure observation: it stamps once and
+   * NEVER changes `state`, so it is safe for a row in any live state and adds no
+   * network call (the webhook is one we already receive).
+   *
+   * Keyed on runner identity like onCompleted — under backlog GitHub may run a
+   * different queued job on our runner, so the runner name is the true owner —
+   * falling back to job id. Returns null when there is nothing to emit: a job we
+   * hold no row for, a redelivery (already stamped), or a row already torn down
+   * (a job so fast its `completed` beat its `in_progress`), so the Worker logs
+   * exactly one timeline per spawn and never a fake duration.
+   */
+  async markJobStarted(jobId: number, runnerName?: string): Promise<SpawnTimeline | null> {
+    let row = runnerName ? this.#rowByRunner(runnerName) : undefined;
+    if (!row) row = this.#rowByJob(jobId);
+    if (!row || row.state === "destroying" || row.job_started_at !== null) return null;
+
+    const now = Date.now();
+    this.#sql.exec(`UPDATE jobs SET job_started_at = ? WHERE job_id = ?`, now, row.job_id);
+    return {
+      jobId: row.job_id,
+      runnerName: row.runner_name,
+      createdAt: row.created_at,
+      provisionStartedAt: row.provision_started_at,
+      bootedAt: row.booted_at,
+      jobStartedAt: now,
+    };
   }
 
   /**

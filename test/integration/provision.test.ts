@@ -20,6 +20,16 @@ describe("scaffold", () => {
 
 const ids = (r: { toDestroy: { sandboxId: string }[] }) => r.toDestroy.map((t) => t.sandboxId);
 const singleton = () => env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
+// A DO instance separate from the singleton, for spawn-timeline setup rows that
+// must land in `provisioning` regardless of the singleton's shared cross-case
+// state under the MAX_CONCURRENT=2 cap.
+const iso = () => env.COORDINATOR.get(env.COORDINATOR.idFromName("spawn-timeline"));
+const pending = (jobId: number) => ({
+  jobId,
+  runId: 1,
+  repoFullName: "nodeops-app/api",
+  label: "createos",
+});
 
 /** POSTs a signed `queued` webhook for `jobId` and drains the waitUntil work. */
 async function postQueued(jobId: number, deps: object) {
@@ -223,5 +233,75 @@ describe("a provision that fails after the VM exists never leaks it", () => {
 
     expect(destroy).toHaveBeenCalled();
     globalThis.fetch = realFetch;
+  });
+});
+
+/**
+ * The `in_progress` webhook is the real queued→started signal (a runner accepted
+ * the job). It used to no-op; now it stamps `job_started_at` once and logs the
+ * spawn phase timeline. These assert the stamping contract at the DO seam plus
+ * the webhook wiring — the log line itself is Worker-side observability.
+ */
+describe("spawn timeline (markJobStarted / in_progress)", () => {
+  it("stamps job_started_at once and returns the phase timestamps", async () => {
+    const co = iso();
+    await co.onQueued(pending(600), "dlv-600");
+    await co.recordSandboxCreated(600, "sb_600", "cos-600-aa");
+    await co.markRunning(600);
+
+    const t = await co.markJobStarted(600, "cos-600-aa");
+    expect(t).not.toBeNull();
+    expect(t!.jobId).toBe(600);
+    expect(t!.runnerName).toBe("cos-600-aa");
+    expect(t!.provisionStartedAt).toBe(t!.createdAt); // booted immediately → no cap wait
+    expect(t!.bootedAt).toBeGreaterThanOrEqual(t!.provisionStartedAt!);
+    expect(t!.jobStartedAt).toBeGreaterThanOrEqual(t!.bootedAt!);
+
+    // Redelivery: already stamped → null, so the Worker logs exactly one line.
+    expect(await co.markJobStarted(600, "cos-600-aa")).toBeNull();
+  });
+
+  it("attributes timing by runner identity, not the provisioning job id", async () => {
+    const co = iso();
+    await co.onQueued(pending(601), "dlv-601");
+    await co.recordSandboxCreated(601, "sb_601", "cos-601-bb");
+    await co.markRunning(601);
+
+    // Under backlog GitHub can dispatch a different queued job to our runner; the
+    // in_progress it sends carries that other id but our runner's name.
+    const t = await co.markJobStarted(999999, "cos-601-bb");
+    expect(t?.jobId).toBe(601);
+  });
+
+  it("returns null for a job it holds no row for", async () => {
+    expect(await iso().markJobStarted(424242)).toBeNull();
+  });
+
+  it("in_progress webhook stamps the timeline and no longer no-ops", async () => {
+    const co = singleton();
+    await co.onQueued(pending(602), "dlv-602");
+    await co.recordSandboxCreated(602, "sb_602", "cos-602-cc");
+    await co.markRunning(602);
+
+    const body = workflowJobPayload({
+      action: "in_progress",
+      jobId: 602,
+      runnerName: "cos-602-cc",
+    });
+    const req = new Request("https://ctrl.local/webhook", {
+      method: "POST",
+      headers: {
+        "X-Hub-Signature-256": await sign(env.GITHUB_WEBHOOK_SECRET as string, body),
+        "X-GitHub-Delivery": "dlv-inprogress-602",
+      },
+      body,
+    });
+    const ctx = createExecutionContext();
+    const res = await handleWebhook(req, env as any, ctx, {} as any);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(202);
+    expect(await res.text()).toBe("in_progress"); // was "noop" before wiring
+    expect(await co.markJobStarted(602, "cos-602-cc")).toBeNull(); // webhook already stamped it
   });
 });

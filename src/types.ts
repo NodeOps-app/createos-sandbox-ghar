@@ -37,7 +37,7 @@ export interface WorkflowJob {
   runId: number; // workflow_job.run_id — for fork lookup
   repoFullName: string; // repository.full_name, "nodeops-app/api"
   labels: string[]; // workflow_job.labels
-  runnerName?: string; // workflow_job.runner_name — the runner that ran the job (set on completed)
+  runnerName?: string; // workflow_job.runner_name — the runner assigned the job (set once a runner picks it up: in_progress and completed)
 }
 
 /** DO → Worker decision for a queued job. */
@@ -116,6 +116,22 @@ export interface ProvisionFailedResult {
 export interface CompletedResult {
   toDestroy: TeardownTask | null;
   nextPending: PendingJob | null;
+}
+
+/**
+ * DO → Worker after markJobStarted: the phase timestamps of one spawn, returned
+ * once when the `in_progress` webhook first lands so the Worker can log the
+ * queued→started timeline. A null start marks a phase that did not happen (a job
+ * that never queued behind the cap has provisionStartedAt === createdAt, not a
+ * distinct wait). Pure observation — the Worker only logs it.
+ */
+export interface SpawnTimeline {
+  jobId: number;
+  runnerName: string | null;
+  createdAt: number;
+  provisionStartedAt: number | null;
+  bootedAt: number | null;
+  jobStartedAt: number;
 }
 
 /**
