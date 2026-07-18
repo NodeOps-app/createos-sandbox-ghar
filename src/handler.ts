@@ -47,13 +47,20 @@ async function provisionAndRecord(
   let sandboxId: string;
   let runnerName: string;
   let sandbox: Awaited<ReturnType<typeof createRunnerSandbox>>["sandbox"];
+  let timings: Awaited<ReturnType<typeof createRunnerSandbox>>["timings"];
   try {
-    ({ sandboxId, runnerName, sandbox } = await createRunnerSandbox(config, github, job, deps));
+    ({ sandboxId, runnerName, sandbox, timings } = await createRunnerSandbox(
+      config,
+      github,
+      job,
+      deps,
+    ));
   } catch (err) {
     // Nothing booted (JIT mint / createSandbox threw) → free the slot + advance.
     await failProvision(env, config, job, deps, err);
     return;
   }
+  const afterCreate = Date.now();
 
   // From here a VM EXISTS. Every exit below must account for it: the runner has
   // not launched yet, so the VM will never self-delete, and if we lose track of
@@ -73,9 +80,28 @@ async function provisionAndRecord(
     }
     await launchRunner(sandbox);
     await co.markRunning(job.jobId);
+    logProvisionBreakdown(job.jobId, timings, Date.now() - afterCreate);
   } catch (err) {
     await failProvision(env, config, job, deps, err, sandboxId);
   }
+}
+
+/**
+ * Splits the provision phase — the dominant share of spawn latency on the
+ * in_progress timeline — into its legs, so the next optimization targets the
+ * real cost: mint (GitHub token + generate-jitconfig, a cold mint per provision
+ * today — the credential-session seam), create (synchronous CreateOS host boot),
+ * post (ownership record + detached runner launch). One line per successful
+ * provision; correlate with the spawn timeline by job id.
+ */
+function logProvisionBreakdown(
+  jobId: number,
+  timings: { mintMs: number; createMs: number },
+  postMs: number,
+): void {
+  console.log(
+    `provision breakdown: job=${jobId} mint=${timings.mintMs}ms create=${timings.createMs}ms post=${postMs}ms`,
+  );
 }
 
 /**

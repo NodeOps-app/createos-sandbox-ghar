@@ -158,6 +158,9 @@ describe("createRunnerSandbox", () => {
     expect(runCommand).not.toHaveBeenCalled();
     expect(res.sandboxId).toBe("sb_1");
     expect(res.runnerName).toBe(runnerNameFor(100, "k3"));
+    // Provision sub-phase timings feed the breakdown log (mint vs create).
+    expect(typeof res.timings.mintMs).toBe("number");
+    expect(typeof res.timings.createMs).toBe("number");
   });
 
   it("gives each provision attempt of the same job a distinct runner name", async () => {

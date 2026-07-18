@@ -142,7 +142,12 @@ export async function createRunnerSandbox(
   github: GitHubClient,
   job: PendingJob,
   deps: SandboxDeps = {},
-): Promise<{ sandboxId: string; runnerName: string; sandbox: SandboxHandle }> {
+): Promise<{
+  sandboxId: string;
+  runnerName: string;
+  sandbox: SandboxHandle;
+  timings: { mintMs: number; createMs: number };
+}> {
   const attemptId =
     deps.attemptId ??
     (() =>
@@ -150,7 +155,15 @@ export async function createRunnerSandbox(
         .toString(36)
         .padStart(2, "0"));
   const runnerName = runnerNameFor(job.jobId, attemptId());
+
+  // Time the two external legs of provisioning separately. The in_progress
+  // timeline shows provision dominates spawn latency; this splits it so the next
+  // optimization targets the real cost. mint = GitHub token mint + generate-
+  // jitconfig (a fresh client per provision today, so a cold mint each burst —
+  // the credential-session seam); create = the synchronous CreateOS host boot.
+  const mintStart = Date.now();
   const jitConfig = await github.generateJitConfig(runnerName, job.label);
+  const mintMs = Date.now() - mintStart;
 
   // Short + stable per job (`gha-ci-<jobId>`, no per-attempt suffix): collisions
   // are harmless, and dropping the runner's `cos-`/attempt token keeps it under
@@ -160,6 +173,7 @@ export async function createRunnerSandbox(
   const sandboxName = sandboxNameFor(job.jobId, runnerName, config);
 
   const c = makeSandboxClient(config, deps);
+  const createStart = Date.now();
   const sandbox = await c.createSandbox({
     shape: shapeForLabel(job.label, config),
     rootfs: config.runnerTemplate,
@@ -173,8 +187,9 @@ export async function createRunnerSandbox(
     // idle auto-pause; these VMs self-delete per job anyway.
     envs: { JIT_CONFIG: jitConfig },
   });
+  const createMs = Date.now() - createStart;
 
-  return { sandboxId: sandbox.id, runnerName, sandbox };
+  return { sandboxId: sandbox.id, runnerName, sandbox, timings: { mintMs, createMs } };
 }
 
 /**
