@@ -532,7 +532,10 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
       allowlist: config.repoAllowlist,
     });
     queued = jobs;
-    await co.setRecoveryCursor(coverage.nextCursor);
+    // Only persist when the cursor actually moves. When installed repos fit in
+    // one tick's budget, nextCursor stabilizes at the last repo — writing it
+    // every tick would burn a DO row-write (Free-plan: 100k/day) for a no-op.
+    if (coverage.nextCursor !== cursor) await co.setRecoveryCursor(coverage.nextCursor);
     if (coverage.budgetBound) {
       console.warn(
         `reconcile: recovery budget bound (limit=${config.recoverySubrequestBudget} subrequests) — ` +
