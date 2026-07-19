@@ -63,12 +63,11 @@ async function provisionAndRecord(
   }
   const afterCreate = Date.now();
 
-  // From here a VM EXISTS. Every exit below must account for it: the runner has
-  // not launched yet, so the VM will never self-delete, and if we lose track of
-  // its id it leaks silently until the orphaned-sandbox sweep finds it. Hence
-  // one guard around the whole region — the failure path always carries
-  // sandboxId, so the teardown is persisted (or at minimum attempted) rather
-  // than dropped on the floor.
+  // From here a VM EXISTS but its runner has NOT launched yet: it will never
+  // self-delete, and if we lose track of its id it leaks silently until the
+  // orphaned-sandbox sweep finds it. Guard the record+launch region so any
+  // failure destroys the VM — the failure path always carries sandboxId, so the
+  // teardown is persisted (or at minimum attempted) rather than dropped.
   try {
     // Record the VM before launching it: from here a `completed` tears it down
     // via runner identity, so the runner launch below can never orphan it.
@@ -80,10 +79,24 @@ async function provisionAndRecord(
       return;
     }
     await launchRunner(sandbox);
+  } catch (err) {
+    await failProvision(env, config, job, deps, err, sandboxId);
+    return;
+  }
+
+  // The runner has launched: it registers with GitHub and can accept the job
+  // within seconds, and the VM self-deletes on runner exit. markRunning is a
+  // pure bookkeeping write (provisioning → running); its failure must NOT route
+  // through failProvision's destroy path — that would tear down a VM whose
+  // runner may already be executing the job. The row stays `provisioning`, which
+  // counts against the cap identically to `running` and is spared by
+  // reapUnregistered once its runner shows online (runner_name was recorded
+  // above), so leaving it there is safe. Log and move on.
+  try {
     await co.markRunning(job.jobId);
     logProvisionBreakdown(job.jobId, timings, Date.now() - afterCreate);
   } catch (err) {
-    await failProvision(env, config, job, deps, err, sandboxId);
+    console.error(`markRunning failed, VM left running job=${job.jobId}: ${String(err)}`);
   }
 }
 
