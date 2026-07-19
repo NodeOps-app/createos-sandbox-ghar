@@ -46,6 +46,7 @@ async function cfg(): Promise<Config> {
     repoAllowlist: [],
     reaperMaxAgeMs: 3_600_000,
     reconcileGraceMs: 180_000,
+    recoverySubrequestBudget: 30,
   };
 }
 

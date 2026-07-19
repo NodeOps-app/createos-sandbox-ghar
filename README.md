@@ -186,6 +186,7 @@ Set in `wrangler.toml [vars]` unless marked secret (`wrangler secret put`).
 | `RUNNER_GROUP_ID` | | `1` | GitHub runner group the JIT runner joins. `1` = org-wide Default. Which repos may schedule onto the runner is that group's GitHub policy — point this at a group scoped to your repos to make the allowlist an actual execution boundary. |
 | `REAPER_MAX_AGE_MS` | | `3600000` | Orphan-VM cutoff — keep **above your longest job**. |
 | `RECONCILE_GRACE_MS` | | `180000` | Boot grace before a runner-less VM is reaped — keep **above VM boot + runner registration**. |
+| `RECOVERY_SUBREQUEST_BUDGET` | | `30` | Max GitHub subrequests the 5-min recovery scan spends before deferring the tail repos to the next tick (cursor-resumed). Caps the O(installed-repos) fan-out under the Free-plan 50-subrequest cap. Raise once installed repos routinely exceed ~half this. |
 | `ALERT_WEBHOOK_URL` | ✅ | — | Optional Slack-compatible webhook for provision/teardown failures. |
 
 ## Choosing a runner size

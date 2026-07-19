@@ -3,6 +3,7 @@ import { loadConfig } from "./config";
 import { verifySignature, parseWorkflowJob } from "./webhook";
 import { createJobAdmission, identifyJob, type AdmissionDecision } from "./admission";
 import { fetchCatalog } from "./shapes";
+import { discoverQueuedJobs } from "./discovery";
 import { GitHubClient } from "./github/client";
 import {
   createRunnerSandbox,
@@ -519,7 +520,26 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
   //    leaked VMs are not GitHub's doing and keep burning capacity regardless.
   let queued: QueuedJob[] = [];
   try {
-    queued = await github.listQueuedJobs();
+    // Budget the scan so its O(installed-repos) read fan-out can't blow the
+    // Free-plan 50-subrequest cap. A budget-bounded tick defers the tail repos;
+    // the cursor (persisted in the passive DO) resumes them next tick, so
+    // coverage rotates instead of the head being re-scanned forever.
+    const cursor = await co.recoveryCursor();
+    const { jobs, coverage } = await discoverQueuedJobs(github, {
+      budget: config.recoverySubrequestBudget,
+      cursor,
+      policy: config.provisionPolicy,
+      allowlist: config.repoAllowlist,
+    });
+    queued = jobs;
+    await co.setRecoveryCursor(coverage.nextCursor);
+    if (coverage.budgetBound) {
+      console.warn(
+        `reconcile: recovery budget bound (limit=${config.recoverySubrequestBudget} subrequests) — ` +
+          `covered ${coverage.covered} repos, deferred ${coverage.deferred}, ` +
+          `resuming after ${JSON.stringify(coverage.nextCursor)} next tick`,
+      );
+    }
   } catch (err) {
     console.error(`reconcile: queued-job poll failed: ${String(err)}`);
   }

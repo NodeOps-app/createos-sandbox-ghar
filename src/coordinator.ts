@@ -89,6 +89,10 @@ export class Coordinator extends DurableObject<Env> {
         delivery_id TEXT PRIMARY KEY,
         seen_at     INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT
+      );
     `);
     // Migrate DOs created before a column existed: CREATE TABLE IF NOT EXISTS
     // won't add one to a live table. A NULL `label` is a row from before shape
@@ -109,6 +113,31 @@ export class Coordinator extends DurableObject<Env> {
     if (!has("job_started_at")) {
       this.#sql.exec(`ALTER TABLE jobs ADD COLUMN job_started_at INTEGER`);
     }
+  }
+
+  /**
+   * The repo full-name the recovery scan last covered, or null. Passive state
+   * only — the scan itself runs in the Worker; the DO never makes a GitHub call.
+   * Lets a budget-bounded scan resume where it left off so coverage rotates
+   * across ticks instead of forever re-scanning the head of the repo list.
+   */
+  async recoveryCursor(): Promise<string | null> {
+    const row = this.#sql
+      .exec<{ value: string | null }>(`SELECT value FROM meta WHERE key = 'recovery_cursor'`)
+      .toArray()[0];
+    return row?.value ?? null;
+  }
+
+  async setRecoveryCursor(cursor: string | null): Promise<void> {
+    if (cursor === null) {
+      this.#sql.exec(`DELETE FROM meta WHERE key = 'recovery_cursor'`);
+      return;
+    }
+    this.#sql.exec(
+      `INSERT INTO meta (key, value) VALUES ('recovery_cursor', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      cursor,
+    );
   }
 
   #maxConcurrent(): number {

@@ -27,6 +27,11 @@ export interface Config {
   repoAllowlist: string[]; // full names, e.g. "nodeops-app/api"
   reaperMaxAgeMs: number; // orphan cutoff, e.g. 3_600_000
   reconcileGraceMs: number; // reconciler boot grace before a runner-less VM is reaped, e.g. 180_000
+  // Max GitHub subrequests the recovery scan may spend per cron tick before it
+  // defers the rest to a later tick (cursor-resumed). Bounds the O(installed-repos)
+  // read fan-out so it stays under the Free-plan 50-subrequest invocation cap.
+  recoverySubrequestBudget: number; // e.g. 30
+
   alertWebhookUrl?: string; // optional Slack-style webhook for failure alerts
 }
 

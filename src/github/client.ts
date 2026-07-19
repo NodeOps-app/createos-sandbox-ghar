@@ -12,6 +12,7 @@ type JobLite = { id?: number; status?: string; labels?: string[] };
 
 export class GitHubClient {
   #tokens: TokenCache;
+  #subrequests = 0;
   constructor(
     private config: Config,
     // Bound to globalThis so `this.fetchImpl(...)` keeps fetch's own `this`
@@ -88,7 +89,20 @@ export class GitHubClient {
     return login.toLowerCase() !== this.config.githubOrg.toLowerCase();
   }
 
+  /**
+   * Cumulative GitHub GET subrequests this client has issued (pagination
+   * counted, one per page). The recovery-discovery budget snapshots this before
+   * a scan and stops once its delta hits the budget, so pagination can never
+   * silently blow the Free-plan 50-subrequest invocation cap as installed repos
+   * grow. Only paged reads flow through `#get`; mint/delete/fork POSTs/GETs go
+   * direct and are out of discovery's budgeted path by design.
+   */
+  get subrequests(): number {
+    return this.#subrequests;
+  }
+
   async #get<T>(path: string): Promise<T> {
+    this.#subrequests++;
     const res = await this.fetchImpl(`${this.config.githubApiUrl}${path}`, {
       method: "GET",
       headers: await this.#headers(),
@@ -235,29 +249,19 @@ export class GitHubClient {
   }
 
   /**
-   * Every workflow_job GitHub still reports as `queued` — the reconciler's
-   * source of truth for jobs needing a runner, independent of whether we ever
-   * saw (or lost) their `queued` webhook. Scans the app's installed repos; a
-   * partly-drained matrix run is `in_progress` with its remaining jobs still
-   * `queued`, so both run statuses are inspected.
+   * Full names of every repo the app is installed on — the universe the
+   * recovery scan walks. Paged (non-strict): discovery tolerates a partial repo
+   * view, its subrequest budget and cursor bound coverage anyway.
    *
-   * Dumb transport: returns every queued job with its raw labels, unfiltered.
-   * Which job is ours and which shape (if any) it names is an admission decision
-   * (`identifyJob`/`createJobAdmission` in admission.ts) that belongs to the
-   * caller, not this client — deciding it here would also steal the job id
-   * out of any warning the caller wants to log about it.
+   * These three primitives (installationRepos → activeRunIds → queuedJobs) are
+   * dumb transport. The reconciler no longer calls them directly: the recovery
+   * scan (`discoverQueuedJobs` in src/discovery.ts) orchestrates them under a
+   * subrequest budget, a repo cursor, and provisioning-policy repo selection —
+   * choreography this client stays blind to. A partly-drained matrix run is
+   * `in_progress` with its remaining jobs still `queued`, so both run statuses
+   * are inspected.
    */
-  async listQueuedJobs(): Promise<QueuedJob[]> {
-    const out: QueuedJob[] = [];
-    for (const repo of await this.#installationRepos()) {
-      for (const runId of await this.#activeRunIds(repo)) {
-        out.push(...(await this.#queuedJobs(repo, runId)));
-      }
-    }
-    return out;
-  }
-
-  async #installationRepos(): Promise<string[]> {
+  async installationRepos(): Promise<string[]> {
     const repos = await this.#getPaged<RepoLite>("/installation/repositories", "repositories");
     const full: string[] = [];
     for (const r of repos) if (r.full_name) full.push(r.full_name);
@@ -269,7 +273,7 @@ export class GitHubClient {
    * per status (the REST `status` filter takes a single value) so pagination
    * walks only the active runs, never the repo's entire completed-run history.
    */
-  async #activeRunIds(repoFullName: string): Promise<number[]> {
+  async activeRunIds(repoFullName: string): Promise<number[]> {
     const ids = new Set<number>();
     for (const status of ["queued", "in_progress"] as const) {
       const runs = await this.#getPaged<RunLite>(
@@ -281,7 +285,14 @@ export class GitHubClient {
     return [...ids];
   }
 
-  async #queuedJobs(repoFullName: string, runId: number): Promise<QueuedJob[]> {
+  /**
+   * The still-`queued` jobs of one run, raw labels unfiltered. Which job is ours
+   * and what shape (if any) it names is an admission decision (`identifyJob` /
+   * `createJobAdmission` in admission.ts) that belongs to the caller, not this
+   * client — deciding it here would also steal the job id out of any warning the
+   * caller wants to log about it.
+   */
+  async queuedJobs(repoFullName: string, runId: number): Promise<QueuedJob[]> {
     const jobs = await this.#getPaged<JobLite>(
       `/repos/${repoFullName}/actions/runs/${runId}/jobs?filter=latest`,
       "jobs",
