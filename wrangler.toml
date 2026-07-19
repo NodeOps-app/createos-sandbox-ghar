@@ -56,7 +56,13 @@ head_sampling_rate = 1
 
 [observability.logs]
 enabled = true
-head_sampling_rate = 0.5
+# Head-based: a sampled invocation keeps ALL its logs, else none. 0.25 halves
+# log-event volume against the Free-plan 200k/day cap (invocation_logs below logs
+# every webhook + 288 crons/day). Trade-off: a budget-bound recovery warn is
+# sampled too, but a real bind is persistent (binds every tick until the budget
+# is raised), so it still surfaces within a few ticks. Raise temporarily when
+# capturing a spawn-latency measurement.
+head_sampling_rate = 0.25
 persist = true
 invocation_logs = true
 
