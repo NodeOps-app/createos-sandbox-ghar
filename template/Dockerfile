@@ -9,7 +9,7 @@ FROM nodeops/sandbox:debian
 # Baking Go 1.26.3 into the image means rebuilding the template on every bump and
 # still missing whatever a repo actually asked for — so we ship the *substrate* those
 # actions need (a C toolchain, archivers, a writable tool cache) and let them install.
-ARG RUNNER_VERSION=2.335.1
+ARG RUNNER_VERSION=2.336.0
 ARG GH_VERSION=2.96.0
 ARG GH_SHA256=83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60
 
