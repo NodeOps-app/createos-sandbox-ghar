@@ -30,6 +30,16 @@ describe("weightForLabel", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(weightForLabel("createos-huge", BARE, DEF)).toBe(2);
     expect(warn).toHaveBeenCalledOnce();
+    const message = warn.mock.calls[0]![0];
+    expect(message).toEqual(expect.stringContaining("createos-huge"));
+    expect(message).toEqual(expect.stringContaining(DEF));
+    warn.mockRestore();
+  });
+
+  it("falls back to weight 1 when the default shape is also unparseable, loudly twice", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(weightForLabel("createos-huge", BARE, "not-a-shape")).toBe(1);
+    expect(warn).toHaveBeenCalledTimes(2);
     warn.mockRestore();
   });
 });
