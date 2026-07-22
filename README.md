@@ -188,6 +188,7 @@ Set in `wrangler.toml [vars]` unless marked secret (`wrangler secret put`).
 | `RECONCILE_GRACE_MS` | | `180000` | Boot grace before a runner-less VM is reaped — keep **above VM boot + runner registration**. |
 | `RECOVERY_SUBREQUEST_BUDGET` | | `30` | Max GitHub subrequests the 5-min recovery scan spends before deferring the tail repos to the next tick (cursor-resumed). Caps the O(installed-repos) fan-out under the Free-plan 50-subrequest cap. Raise once installed repos routinely exceed ~half this. |
 | `ALERT_WEBHOOK_URL` | ✅ | — | Optional Slack-compatible webhook for provision/teardown failures. |
+| `ADMIN_TOKEN` | ✅ | — | Bearer token for the `/admin/*` tenant-registry API. Unset = the whole surface 404s (see [Tenant registry](#tenant-registry-admin-api)). |
 
 ## Choosing a runner size
 
@@ -233,6 +234,67 @@ GitHub deprecates old runner versions and **refuses their jobs**, so the baked r
 ## Alerting
 
 Failures are logged (`wrangler tail`). For pushed alerts, set the optional `ALERT_WEBHOOK_URL` secret to a Slack-compatible incoming webhook — the Worker posts on provision and teardown failures. Unset = no-op.
+
+## Tenant registry (admin API)
+
+The Worker keeps a registry of Tenants (approved GitHub orgs) and Projects (approved repos
+inside them) for the upcoming multi-tenant rollout — see [CONTEXT.md](CONTEXT.md) for the
+Tenant/Project/Grant vocabulary. **Approval is manual by design**: an applicant is vetted by
+a human, then an operator records the decision through these routes. Nothing in the webhook
+path reads this registry yet — provisioning, quota enforcement and usage billing are a
+follow-up change; today the registry only stores state.
+
+Set the `ADMIN_TOKEN` secret to enable the API:
+
+```bash
+bunx wrangler secret put ADMIN_TOKEN   # e.g. output of `openssl rand -hex 32`
+```
+
+Every request needs `Authorization: Bearer <ADMIN_TOKEN>`. A missing token and a wrong token
+both return **404** — indistinguishable from a route that doesn't exist — so an unconfigured
+or misconfigured deployment exposes no probeable surface. This is intentional, not a bug to
+fix into a `401`.
+
+Six routes, all under `/admin`:
+
+```bash
+# List all tenants
+curl https://<worker>.workers.dev/admin/tenants \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# Create or fully replace a tenant — every field is required, nullable fields need an
+# explicit `null`; this is a full-record upsert, not a patch, so omitting a field is a 400
+# (an earlier version let a partial POST silently wipe fields like runner_group_id)
+curl -X POST https://<worker>.workers.dev/admin/tenants \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "content-type: application/json" \
+  -d '{
+    "installation_id": 12345678, "org_login": "acme-org", "status": "approved",
+    "allow_all_repos": true, "minute_grant": 10000, "concurrency_cap": 5,
+    "max_shape": "s-4vcpu-8gb", "job_ttl_ms": 3600000,
+    "runner_group_id": null, "contact": null, "notes": null, "approved_by": "pratik"
+  }'
+
+# Change status only (suspend/revoke/re-approve); 404 if the tenant doesn't exist
+curl -X POST https://<worker>.workers.dev/admin/tenants/status \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "content-type: application/json" \
+  -d '{"installation_id": 12345678, "status": "suspended"}'
+
+# Approve one or more repos under a tenant; 404 if the tenant doesn't exist
+curl -X POST https://<worker>.workers.dev/admin/projects \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "content-type: application/json" \
+  -d '{"installation_id": 12345678, "projects": [{"repo_full_name": "acme-org/widgets", "repo_id": 987654321}]}'
+
+# Revoke a repo; 404 if the tenant doesn't exist, also 404 if that repo was never approved
+curl -X DELETE https://<worker>.workers.dev/admin/projects \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "content-type: application/json" \
+  -d '{"installation_id": 12345678, "repo_full_name": "acme-org/widgets"}'
+
+# Claim pre-registry job rows (tenant_id IS NULL) for a tenant, one-time at cutover;
+# 404 if the tenant doesn't exist
+curl -X POST https://<worker>.workers.dev/admin/backfill \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "content-type: application/json" \
+  -d '{"installation_id": 12345678}'
+```
 
 ## Security notes
 

@@ -43,3 +43,13 @@ Glossary for the GitHub Actions runner controller. Terms only, no implementation
 - **Spawn timeline** — the queued→started latency of one Sandbox, logged as a single line when the `in_progress` webhook lands, split into three phases the Controller can act on: **wait** (Job sat `pending` behind the Concurrency cap), **provision** (JIT mint + `createSandbox` + ownership record + Runner launch), **boot** (VM/dockerd/Runner-connect until GitHub dispatches the Job). GitHub sends `in_progress` when a Runner *accepts* a Job, so it is the true start signal — earlier the Controller ignored it and wrote `booted_at` at launch-return instead. Recorded by `markJobStarted` against the row the **Runner name** owns and stamped once (`job_started_at`); a Job cancelled before pickup never emits, and redelivery emits nothing. Pure observation: the DO changes no state and makes no extra call, since the webhook is one already received.
 
 - **Concurrency cap** — max simultaneous Sandboxes the Controller will run (protects createos account quota + CF free tier + cost). Off by default (`MAX_CONCURRENT` unset/0 = unlimited, boot every Job); when set to N>0, Jobs beyond N wait in a pending queue in the DO until a slot frees.
+
+- **Tenant** — an approved GitHub org, keyed by App installation id. Owns the Grant, concurrency cap, shape ceiling, job TTL and runner group.
+
+- **Project** — an approved repo inside a Tenant; the admission unit — usage is attributed to it, never enforced at it.
+
+- **Grant** — a Tenant's weighted minutes per UTC calendar month.
+
+- **Weighted minute** — one wall-clock minute of Sandbox lifetime × shape vCPU ÷ 2.
+
+- **Ledger** — per-Tenant, per-month usage rows; the month is part of the key, so a new month is a new row and there is no reset step.
