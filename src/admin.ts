@@ -113,19 +113,25 @@ export async function handleAdmin(req: Request, env: Bindings): Promise<Response
       // the stub-reuse note on the /admin/projects and DELETE routes).
       const existing = await co.adminGetTenant(b.installation_id);
       const wasApproved = existing?.tenant.status === "approved";
-      // approved_at marks WHEN the tenant was first approved, not "last
-      // edited while approved" — recomputing it on every upsert destroyed the
-      // original approval timestamp the moment an operator re-POSTed to bump
-      // a grant (fix wave 2, finding 3). Only stamp a fresh value on an
-      // actual transition INTO approved: no prior row, or the prior row's
-      // status was something other than approved. Any other new status keeps
-      // the pre-existing null-on-non-approved behaviour.
-      const approvedAt =
-        b.status === "approved"
-          ? wasApproved
-            ? (existing?.tenant.approvedAt ?? null)
-            : Date.now()
-          : null;
+      const enteringApproved = b.status === "approved" && !wasApproved;
+      // approved_at/approved_by together are one audit record of the most
+      // recent time — and by whom — the tenant entered `approved`, so they
+      // must never disagree about whether an approval happened. Both are
+      // stamped fresh ONLY on an actual transition INTO approved (no prior
+      // row, or the prior row's status wasn't approved): that write is the
+      // real approval event, so approved_by comes from what this request
+      // submitted. Both are otherwise carried forward unchanged from the
+      // existing row — while an already-approved tenant is edited (an
+      // unrelated grant bump must not silently reassign the approver, fix
+      // wave 2 finding 3), AND when a write moves the tenant to
+      // pending/suspended/revoked. That retention on the way out of approved
+      // is deliberate, not an oversight: approved_at/by record a real event
+      // in the tenant's history, and a later status change does not un-happen
+      // it — nulling them on suspend destroyed the audit trail a subsequent
+      // re-approval would otherwise extend. A later re-approval stamps both
+      // fresh again, same as any other transition into approved.
+      const approvedAt = enteringApproved ? Date.now() : (existing?.tenant.approvedAt ?? null);
+      const approvedBy = enteringApproved ? b.approved_by : (existing?.tenant.approvedBy ?? null);
       const record: TenantRecord = {
         installationId: b.installation_id,
         orgLogin: b.org_login,
@@ -139,7 +145,7 @@ export async function handleAdmin(req: Request, env: Bindings): Promise<Response
         contact: b.contact,
         notes: b.notes,
         approvedAt,
-        approvedBy: b.approved_by,
+        approvedBy,
       };
       await co.adminUpsertTenant(record);
       return json(record, 201);

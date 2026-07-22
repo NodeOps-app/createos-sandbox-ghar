@@ -391,6 +391,79 @@ describe("admin API", () => {
     expect(((await approve.json()) as TenantRecord).approvedAt).not.toBeNull();
   });
 
+  // Fix wave 3: approved_at/approved_by are RETAINED, not cleared, when a
+  // write moves an approved tenant to suspended — they record a real past
+  // approval event that a later status change does not un-happen.
+  it("retains approved_at and approved_by across an approved -> suspended edit", async () => {
+    const create = await handleAdmin(
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({ installation_id: 512, status: "approved", approved_by: "sid" }),
+      ),
+      B,
+    );
+    const created = (await create.json()) as TenantRecord;
+    expect(created.approvedAt).not.toBeNull();
+    expect(created.approvedBy).toBe("sid");
+
+    const suspend = await handleAdmin(
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({ installation_id: 512, status: "suspended", approved_by: "sid" }),
+      ),
+      B,
+    );
+    const suspended = (await suspend.json()) as TenantRecord;
+    expect(suspended.status).toBe("suspended");
+    expect(suspended.approvedAt).toBe(created.approvedAt);
+    expect(suspended.approvedBy).toBe("sid");
+  });
+
+  // Fix wave 3: a re-approval after a suspension is a fresh approval event —
+  // it must stamp a NEW approved_at (later than the original) and pick up
+  // whatever approver this write submits, not silently carry the old pair
+  // forward as "never update" would.
+  it("stamps a fresh approved_at and approved_by on a suspended -> approved re-approval", async () => {
+    const create = await handleAdmin(
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({ installation_id: 513, status: "approved", approved_by: "sid" }),
+      ),
+      B,
+    );
+    const created = (await create.json()) as TenantRecord;
+
+    await handleAdmin(
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({ installation_id: 513, status: "suspended", approved_by: "sid" }),
+      ),
+      B,
+    );
+
+    // Force a distinct Date.now() so a never-re-stamp regression cannot pass
+    // by coincidence of two approvals landing in the same millisecond.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const reapprove = await handleAdmin(
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({ installation_id: 513, status: "approved", approved_by: "naman" }),
+      ),
+      B,
+    );
+    const reapproved = (await reapprove.json()) as TenantRecord;
+    expect(reapproved.status).toBe("approved");
+    expect(reapproved.approvedAt).not.toBeNull();
+    expect(reapproved.approvedAt as number).toBeGreaterThan(created.approvedAt as number);
+    expect(reapproved.approvedBy).toBe("naman");
+  });
+
   // Gap closed: fix wave 1 added .max() caps to org_login, contact, notes and
   // approved_by but shipped no test, so a regression dropping any of them
   // would pass the whole suite silently.
