@@ -220,11 +220,16 @@ nothing accepts its deliveries.
 
 ## 10. Migration sequence (each step deployable + rollback-safe)
 
-1. Additive schema (new tables, nullable `jobs.tenant_id`). No behaviour
-   change. Deploy, verify.
-2. Seed NodeOps Tenant (`allow_all_repos`); backfill `tenant_id`.
+1. Additive schema (new tables, nullable `jobs.tenant_id`) + admin API. No
+   behaviour change. Deploy, verify.
+2. Verify seed tooling (admin endpoints) against prod. **The real NodeOps
+   Tenant is NOT seeded yet:** a Tenant is keyed by `installation_id`, and
+   seeding before step 4 would key it on the old App's id — which the step 5
+   credential swap invalidates, stranding the row and its ledger.
 3. Tenant-aware admission behind a flag defaulting to current behaviour.
-4. Create public App; install on NodeOps-app.
+4. Create public App; install on NodeOps-app. **Now** seed the NodeOps Tenant
+   (`allow_all_repos`) keyed on the new App's installation id, and backfill
+   `jobs.tenant_id` to it.
 5. Flip flag + swap App credentials in one deploy. Watch smoke run; rollback
    = revert flag + credentials (schema is additive, old code ignores it).
 6. Uninstall old App.
