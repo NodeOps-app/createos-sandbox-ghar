@@ -29,41 +29,51 @@ async function authorized(req: Request, token: string | undefined): Promise<bool
 
 const Status = z.enum(["pending", "approved", "suspended", "revoked"]);
 
+// Upper bound is Number.MAX_SAFE_INTEGER, not just .positive() — GitHub ids
+// persist through SQLite's REAL-backed integer column, so anything past that
+// silently loses precision on write and reads back wrong (finding 5).
+const SafeId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+
 const TenantBody = z.object({
-  installation_id: z.number().int().positive(),
-  org_login: z.string().min(1),
-  status: Status.default("pending"),
+  installation_id: SafeId,
+  org_login: z.string().min(1).max(39), // GitHub org login ceiling
+  // No .default() — this is an upsert of the whole row, so a POST that omits
+  // status must fail loudly rather than silently demoting an already-
+  // approved tenant back to pending (finding 2).
+  status: Status,
   allow_all_repos: z.boolean().default(false),
   minute_grant: z.number().int().positive(),
   concurrency_cap: z.number().int().positive(),
   max_shape: z.string().regex(/^s-\d+vcpu-\d+gb$/),
   job_ttl_ms: z.number().int().positive().default(1_800_000),
-  runner_group_id: z.number().int().positive().nullable().default(null),
-  contact: z.string().nullable().default(null),
-  notes: z.string().nullable().default(null),
-  approved_by: z.string().nullable().default(null),
+  runner_group_id: SafeId.nullable().default(null),
+  contact: z.string().max(10_000).nullable().default(null), // holds a JSON blob from the onboarding form
+  notes: z.string().max(2_000).nullable().default(null),
+  approved_by: z.string().max(100).nullable().default(null),
 });
 
-const StatusBody = z.object({ installation_id: z.number().int().positive(), status: Status });
+const StatusBody = z.object({ installation_id: SafeId, status: Status });
 
 const ProjectsBody = z.object({
-  installation_id: z.number().int().positive(),
+  installation_id: SafeId,
   projects: z
     .array(
       z.object({
         repo_full_name: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
-        repo_id: z.number().int().positive(),
+        repo_id: SafeId,
       }),
     )
     .min(1),
 });
 
 const ProjectDeleteBody = z.object({
-  installation_id: z.number().int().positive(),
-  repo_full_name: z.string().min(3),
+  installation_id: SafeId,
+  // Same regex as ProjectsBody.repo_full_name (finding 4) — a mistyped name
+  // must fail validation, not pass and delete zero rows behind a 200.
+  repo_full_name: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
 });
 
-const BackfillBody = z.object({ installation_id: z.number().int().positive() });
+const BackfillBody = z.object({ installation_id: SafeId });
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -106,6 +116,13 @@ export async function handleAdmin(req: Request, env: Bindings): Promise<Response
 
     if (route === "POST /admin/tenants/status") {
       const b = StatusBody.parse(await req.json());
+      // Same pre-check pattern as /admin/projects and /admin/backfill (finding
+      // 3): adminSetTenantStatus is an unconditional UPDATE, so a mistyped
+      // installation_id would otherwise update zero rows and still 200 — on a
+      // moderation surface that reads as "suspended" when nothing happened.
+      if (!(await co.adminGetTenant(b.installation_id))) {
+        return json({ error: "tenant not found", installation_id: b.installation_id }, 404);
+      }
       await co.adminSetTenantStatus(b.installation_id, b.status);
       return json({ ok: true });
     }
@@ -137,6 +154,11 @@ export async function handleAdmin(req: Request, env: Bindings): Promise<Response
 
     if (route === "DELETE /admin/projects") {
       const b = ProjectDeleteBody.parse(await req.json());
+      // Same pre-check as POST /admin/tenants/status (finding 3): removeProject
+      // is also an unconditional DELETE, zero-rows-affected and all.
+      if (!(await co.adminGetTenant(b.installation_id))) {
+        return json({ error: "tenant not found", installation_id: b.installation_id }, 404);
+      }
       await co.adminRemoveProject(b.installation_id, b.repo_full_name);
       return json({ ok: true });
     }
@@ -154,6 +176,10 @@ export async function handleAdmin(req: Request, env: Bindings): Promise<Response
     return new Response("not found", { status: 404 });
   } catch (err) {
     if (err instanceof z.ZodError) return json({ error: err.issues }, 400);
+    // req.json() throws SyntaxError on a malformed/empty/truncated body — a
+    // client mistake, not a server fault (finding 1; mirrors webhook.ts's
+    // parseWorkflowJob, which catches JSON.parse failures the same way).
+    if (err instanceof SyntaxError) return json({ error: "invalid JSON body" }, 400);
     throw err;
   }
 }
