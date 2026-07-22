@@ -22,25 +22,31 @@ const VCPU_RE = /(\d+)vcpu/;
 /**
  * The billing weight of the shape a runner label names. The bare label bills
  * at the default shape; a shaped label ("createos-4vcpu-8gb") bills by its own
- * vCPU. An unparseable label falls back to the default's weight — billing runs
- * inside the teardown path and must never block it — but warns, because a
- * silent fallback would misprice quietly (no-silent-bounds rule). If the
- * default shape is itself unparseable (a typo'd RUNNER_SHAPE env var), that
- * fallback has nothing to fall back to either — it warns a second time and
- * bills at weight 1, so a bad env var misprices loudly instead of silently
- * forever.
+ * vCPU. Either way, the string actually parsed is `src` — the label itself,
+ * or defaultShape when the label is bare. When `src` has no parseable vcpu,
+ * weightForLabel falls back to the default shape's weight instead — billing
+ * runs inside the teardown path and must never block it — but warns, because
+ * a silent fallback would misprice quietly (no-silent-bounds rule); the
+ * warning only claims that outcome once the default is confirmed to parse. If
+ * the default shape is itself unparseable (a typo'd RUNNER_SHAPE env var),
+ * that fallback has nothing to fall back to either — it warns a second time
+ * and bills at weight 1, so a bad env var misprices loudly instead of
+ * silently forever.
  */
 export function weightForLabel(label: string, runnerLabel: string, defaultShape: string): number {
   const src = label === runnerLabel ? defaultShape : label;
   const m = VCPU_RE.exec(src);
   if (m) return Number(m[1]) / 2;
-  console.warn(`quota: cannot parse vcpu from "${label}"; billing at default "${defaultShape}"`);
   const d = VCPU_RE.exec(defaultShape);
-  if (d) return Number(d[1]) / 2;
-  console.warn(
-    `quota: default shape "${defaultShape}" has no parseable vcpu either; billing "${label}" at weight 1`,
-  );
-  return 1;
+  if (!d) {
+    console.warn(
+      `quota: cannot parse vcpu from "${src}"; default shape "${defaultShape}" has no parseable vcpu either`,
+    );
+    console.warn(`quota: billing "${label}" at weight 1`);
+    return 1;
+  }
+  console.warn(`quota: cannot parse vcpu from "${src}"; billing at default "${defaultShape}"`);
+  return Number(d[1]) / 2;
 }
 
 /** Weighted minutes one VM lifetime burned. Negative lifetimes clamp to 0. */
