@@ -6,6 +6,18 @@ Contributor guide for humans and coding agents (Claude Code, Codex, Cursor, …)
 
 A Cloudflare Worker that autoscales **ephemeral GitHub Actions self-hosted runners** — one CreateOS Sandbox microVM per queued `workflow_job`, destroyed when the job finishes. `README.md` covers setup and operation; this file covers the code.
 
+## Related tooling
+
+**createos-plugin** (`../createos-plugin/createos-sandbox`) is a sibling
+public automation surface over the same CreateOS Sandbox control plane —
+a Claude Code IDE plugin (skill + slash commands over the `createos` CLI)
+instead of this repo's GitHub Actions autoscaler. Different trigger (IDE
+command vs. `workflow_job` webhook), different execution engine (`cos`
+bash driver + CLI vs. this repo's Cloudflare Worker + `createos-sandbox-sdk`),
+same underlying sandbox lifecycle. This repo consumes `createos-sandbox-sdk`
+(`../fc-sdk`) directly in `src/createos.ts` and shells out to `createos-cli`
+(`../createos-cli`) in `.github/workflows/bump-runner.yml`.
+
 ## Onboarding in 60 seconds
 
 ```bash
@@ -97,6 +109,7 @@ bun run build:template   # rebuild the ghar-runner rootfs (needs CREATEOS_* env)
 ## Conventions
 
 - **bun only** — never npm/npx/node. Pin exact versions (`bun add -E`).
+- **Use zod** for runtime validation/parsing
 - **A push to `main` is a production deploy.** The repo is connected to **Cloudflare Workers Builds**: Cloudflare builds and deploys from `main` itself — there is no deploy step in `.github/workflows/`, and nobody runs `wrangler deploy` by hand. Merging *is* shipping, so a change lands in prod the moment it lands on `main`. `bun run deploy` remains as an escape hatch for a hotfix you cannot push, but it deploys your **working tree, not `main`** — it will happily ship uncommitted local edits, and the next push overwrites it. Reach for it only when you mean it. **`ci.yml` does not gate any of this**: Workers Builds and GitHub Actions are separate systems, so a commit that fails lint/typecheck/test still deploys. Run the checks *before* you merge, not after.
 - **Always be ready to roll back before pushing to prod.** Since a push *is* the deploy, this applies to every merge: capture the current live version (`bunx wrangler@latest deployments list` → note the active version id), know the rollback command (`bunx wrangler@latest rollback [version-id]`), and confirm the change is roll-back-safe. Worker rollback reverts **code only** — a DO SQLite migration does **not** auto-revert, so every migration must be forward-compatible (additive `ALTER TABLE ADD COLUMN`; old code ignores new columns) and never destructive in a single deploy. After deploying, watch the smoke run; if it fails, roll back first and diagnose second.
 - **Implement, then test — no TDD.** Two layers: plain `vitest` for pure logic (jwt/hmac/policy/config), `@cloudflare/vitest-pool-workers` for real-DO integration (webhook flow, cap, idempotency, reaper). Mock GitHub and CreateOS at the `fetch` boundary; **never hit the network in tests**.
