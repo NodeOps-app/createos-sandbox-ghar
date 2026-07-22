@@ -15,16 +15,23 @@ import type { TenantRecord } from "./types";
 const enc = new TextEncoder();
 
 async function authorized(req: Request, token: string | undefined): Promise<boolean> {
-  if (!token) return false;
   const header = req.headers.get("Authorization") ?? "";
-  if (!header.startsWith("Bearer ")) return false;
-  // Hash both sides to equal length so the constant-time compare never
-  // short-circuits on length — the only thing it may leak is "wrong".
+  const bearer = header.startsWith("Bearer ");
+  // Every path — unset ADMIN_TOKEN, missing header, non-Bearer header, and a
+  // well-formed wrong token — must perform the same two SHA-256 digests before
+  // deciding, using fixed fallback strings when there is nothing real to hash.
+  // Otherwise the early-return paths are measurably cheaper than the full
+  // compare, and repeated timing lets a prober infer "ADMIN_TOKEN is set on
+  // this deployment" without ever guessing it (finding 4). Hashing both sides
+  // to equal length so the compare never short-circuits on byteLength.
   const [a, b] = await Promise.all([
-    crypto.subtle.digest("SHA-256", enc.encode(header.slice("Bearer ".length))),
-    crypto.subtle.digest("SHA-256", enc.encode(token)),
+    crypto.subtle.digest(
+      "SHA-256",
+      enc.encode(bearer ? header.slice("Bearer ".length) : "no-header"),
+    ),
+    crypto.subtle.digest("SHA-256", enc.encode(token ?? "no-token")),
   ]);
-  return timingSafeEqual(a, b);
+  return Boolean(token) && bearer && timingSafeEqual(a, b);
 }
 
 const Status = z.enum(["pending", "approved", "suspended", "revoked"]);
@@ -37,19 +44,25 @@ const SafeId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const TenantBody = z.object({
   installation_id: SafeId,
   org_login: z.string().min(1).max(39), // GitHub org login ceiling
-  // No .default() — this is an upsert of the whole row, so a POST that omits
-  // status must fail loudly rather than silently demoting an already-
-  // approved tenant back to pending (finding 2).
+  // No .default() anywhere in this object — it is a full-record upsert, so a
+  // POST that omits ANY optional field must fail loudly (400) rather than
+  // silently resetting that field to its creation default. A `.default()`
+  // here previously let a routine "bump minute_grant" POST silently wipe
+  // runner_group_id (Plan 2's gate-3 security boundary), contact, notes,
+  // approved_by, job_ttl_ms and allow_all_repos back to their defaults
+  // (fix wave 2, finding 1). `.nullable()` without `.default()` still
+  // requires the key to be present — `null` must be sent explicitly, which is
+  // the point: every write states its full intent.
   status: Status,
-  allow_all_repos: z.boolean().default(false),
+  allow_all_repos: z.boolean(),
   minute_grant: z.number().int().positive(),
   concurrency_cap: z.number().int().positive(),
   max_shape: z.string().regex(/^s-\d+vcpu-\d+gb$/),
-  job_ttl_ms: z.number().int().positive().default(1_800_000),
-  runner_group_id: SafeId.nullable().default(null),
-  contact: z.string().max(10_000).nullable().default(null), // holds a JSON blob from the onboarding form
-  notes: z.string().max(2_000).nullable().default(null),
-  approved_by: z.string().max(100).nullable().default(null),
+  job_ttl_ms: z.number().int().positive(),
+  runner_group_id: SafeId.nullable(),
+  contact: z.string().max(10_000).nullable(), // holds a JSON blob from the onboarding form
+  notes: z.string().max(2_000).nullable(),
+  approved_by: z.string().max(100).nullable(),
 });
 
 const StatusBody = z.object({ installation_id: SafeId, status: Status });
@@ -95,6 +108,24 @@ export async function handleAdmin(req: Request, env: Bindings): Promise<Response
 
     if (route === "POST /admin/tenants") {
       const b = TenantBody.parse(await req.json());
+      // Read-before-write is safe here: adminGetTenant never throws, so it
+      // cannot poison the stub ahead of the single mutating call below (see
+      // the stub-reuse note on the /admin/projects and DELETE routes).
+      const existing = await co.adminGetTenant(b.installation_id);
+      const wasApproved = existing?.tenant.status === "approved";
+      // approved_at marks WHEN the tenant was first approved, not "last
+      // edited while approved" — recomputing it on every upsert destroyed the
+      // original approval timestamp the moment an operator re-POSTed to bump
+      // a grant (fix wave 2, finding 3). Only stamp a fresh value on an
+      // actual transition INTO approved: no prior row, or the prior row's
+      // status was something other than approved. Any other new status keeps
+      // the pre-existing null-on-non-approved behaviour.
+      const approvedAt =
+        b.status === "approved"
+          ? wasApproved
+            ? (existing?.tenant.approvedAt ?? null)
+            : Date.now()
+          : null;
       const record: TenantRecord = {
         installationId: b.installation_id,
         orgLogin: b.org_login,
@@ -107,7 +138,7 @@ export async function handleAdmin(req: Request, env: Bindings): Promise<Response
         runnerGroupId: b.runner_group_id,
         contact: b.contact,
         notes: b.notes,
-        approvedAt: b.status === "approved" ? Date.now() : null,
+        approvedAt,
         approvedBy: b.approved_by,
       };
       await co.adminUpsertTenant(record);
@@ -154,12 +185,19 @@ export async function handleAdmin(req: Request, env: Bindings): Promise<Response
 
     if (route === "DELETE /admin/projects") {
       const b = ProjectDeleteBody.parse(await req.json());
-      // Same pre-check as POST /admin/tenants/status (finding 3): removeProject
-      // is also an unconditional DELETE, zero-rows-affected and all.
+      // Same pre-check as POST /admin/tenants/status: proves the TENANT
+      // exists, but not that this repo was ever a project under it.
       if (!(await co.adminGetTenant(b.installation_id))) {
         return json({ error: "tenant not found", installation_id: b.installation_id }, 404);
       }
-      await co.adminRemoveProject(b.installation_id, b.repo_full_name);
+      // removeProject is an unconditional DELETE; a valid-shaped but mistyped
+      // repo_full_name affects zero rows. Reporting {ok:true} anyway told the
+      // operator a repo was revoked when it is still approved (fix wave 2,
+      // finding 2) — the same failure class as the status no-op fixed above.
+      const removed = await co.adminRemoveProject(b.installation_id, b.repo_full_name);
+      if (removed === 0) {
+        return json({ error: "project not found", repo_full_name: b.repo_full_name }, 404);
+      }
       return json({ ok: true });
     }
 

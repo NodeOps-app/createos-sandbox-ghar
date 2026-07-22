@@ -6,6 +6,8 @@ import type { TenantRecord } from "../../src/types";
 
 const B = env as unknown as Bindings;
 
+const repeatChar = (n: number) => "a".repeat(n);
+
 function req(method: string, path: string, body?: unknown, token = "test-admin-token") {
   return new Request(`https://ghar.test${path}`, {
     method,
@@ -14,13 +16,23 @@ function req(method: string, path: string, body?: unknown, token = "test-admin-t
   });
 }
 
+// Every optional field is required-but-nullable since fix wave 2 (finding 1),
+// so a full, valid body must state all of them explicitly — this helper is
+// the "full intent" a real upsert states, and tests override only what they
+// mean to vary.
 const tenantBody = (over: Record<string, unknown> = {}) => ({
   installation_id: 501,
   org_login: "acme",
   status: "pending",
+  allow_all_repos: false,
   minute_grant: 5000,
   concurrency_cap: 5,
   max_shape: "s-4vcpu-8gb",
+  job_ttl_ms: 1_800_000,
+  runner_group_id: null,
+  contact: null,
+  notes: null,
+  approved_by: null,
   ...over,
 });
 
@@ -64,6 +76,44 @@ describe("admin auth", () => {
       req("GET", "/admin/tenants", undefined, "a-much-longer-wrong-token-than-the-real-one"),
       B,
     );
+    expect(digestSpy).toHaveBeenCalledTimes(2);
+    digestSpy.mockRestore();
+  });
+
+  // Finding 4: unset ADMIN_TOKEN, a missing header, and a well-formed wrong
+  // token must all cost the same two digests — otherwise the early-return
+  // paths are cheaper than the full compare, and timing alone would tell a
+  // prober "this deployment has ADMIN_TOKEN configured" without ever guessing
+  // it. Structural proof again (digest count), not a pass/fail on the result.
+  it("hashes twice even when ADMIN_TOKEN is unset", async () => {
+    const noAdminToken = { ...B, ADMIN_TOKEN: undefined } as unknown as Bindings;
+    const digestSpy = vi.spyOn(crypto.subtle, "digest");
+    const res = await handleAdmin(
+      req("GET", "/admin/tenants", undefined, "anything"),
+      noAdminToken,
+    );
+    expect(res.status).toBe(404);
+    expect(digestSpy).toHaveBeenCalledTimes(2);
+    digestSpy.mockRestore();
+  });
+
+  it("hashes twice even when the Authorization header is missing", async () => {
+    const digestSpy = vi.spyOn(crypto.subtle, "digest");
+    const res = await handleAdmin(new Request("https://ghar.test/admin/tenants"), B);
+    expect(res.status).toBe(404);
+    expect(digestSpy).toHaveBeenCalledTimes(2);
+    digestSpy.mockRestore();
+  });
+
+  it("hashes twice even when the Authorization header isn't Bearer-prefixed", async () => {
+    const digestSpy = vi.spyOn(crypto.subtle, "digest");
+    const res = await handleAdmin(
+      new Request("https://ghar.test/admin/tenants", {
+        headers: { Authorization: "Basic dGVzdDp0ZXN0" },
+      }),
+      B,
+    );
+    expect(res.status).toBe(404);
     expect(digestSpy).toHaveBeenCalledTimes(2);
     digestSpy.mockRestore();
   });
@@ -253,5 +303,110 @@ describe("admin API", () => {
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toHaveProperty("error");
+  });
+
+  // Fix wave 2, finding 1: every previously-`.default()`ed field is now
+  // required (nullable fields still require the key present). Omitting any of
+  // them must 400, not silently upsert that field back to its creation
+  // default and wipe whatever an operator had set — runner_group_id is Plan
+  // 2's gate-3 security boundary, so it stands in for the whole class.
+  it("400s a tenant upsert that omits a previously-defaulted field (runner_group_id)", async () => {
+    const body = tenantBody({ installation_id: 507 });
+    delete (body as Record<string, unknown>).runner_group_id;
+    const res = await handleAdmin(req("POST", "/admin/tenants", body), B);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toHaveProperty("error");
+  });
+
+  // Fix wave 2, finding 2: removeProject is an unconditional DELETE. A
+  // valid-shaped but mistyped repo_full_name under a real tenant must 404
+  // naming the repo, not report {ok:true} for a revoke that never happened —
+  // and the actually-approved project must be left untouched.
+  it("404s a project delete that matches the tenant but no project, leaving the real one intact", async () => {
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 508 })), B);
+    await handleAdmin(
+      req("POST", "/admin/projects", {
+        installation_id: 508,
+        projects: [{ repo_full_name: "acme/real", repo_id: 21 }],
+      }),
+      B,
+    );
+
+    const typo = await handleAdmin(
+      req("DELETE", "/admin/projects", { installation_id: 508, repo_full_name: "acme/typo" }),
+      B,
+    );
+    expect(typo.status).toBe(404);
+    expect(await typo.json()).toEqual({ error: "project not found", repo_full_name: "acme/typo" });
+
+    const real = await handleAdmin(
+      req("DELETE", "/admin/projects", { installation_id: 508, repo_full_name: "acme/real" }),
+      B,
+    );
+    expect(real.status).toBe(200);
+  });
+
+  // Fix wave 2, finding 3: approved_at marks WHEN a tenant was first approved.
+  // Re-POSTing an already-approved tenant to change an unrelated field (here
+  // minute_grant) must not recompute it to "now" — that destroys the original
+  // approval timestamp even though no approval transition happened.
+  it("preserves approved_at across an edit that keeps status approved", async () => {
+    const create = await handleAdmin(
+      req("POST", "/admin/tenants", tenantBody({ installation_id: 509, status: "approved" })),
+      B,
+    );
+    const created = (await create.json()) as TenantRecord;
+    expect(created.approvedAt).not.toBeNull();
+
+    // Force a distinct Date.now() so a recompute-on-every-write regression
+    // cannot pass by coincidence of two calls landing in the same millisecond.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const edit = await handleAdmin(
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({ installation_id: 509, status: "approved", minute_grant: 9_999 }),
+      ),
+      B,
+    );
+    const edited = (await edit.json()) as TenantRecord;
+    expect(edited.minuteGrant).toBe(9_999);
+    expect(edited.approvedAt).toBe(created.approvedAt);
+  });
+
+  // A fresh transition INTO approved (prior status was pending) DOES stamp a
+  // new approved_at — the preservation above must not turn into "never update".
+  it("stamps a fresh approved_at on an actual transition into approved", async () => {
+    const create = await handleAdmin(
+      req("POST", "/admin/tenants", tenantBody({ installation_id: 510, status: "pending" })),
+      B,
+    );
+    expect(((await create.json()) as TenantRecord).approvedAt).toBeNull();
+
+    const approve = await handleAdmin(
+      req("POST", "/admin/tenants", tenantBody({ installation_id: 510, status: "approved" })),
+      B,
+    );
+    expect(((await approve.json()) as TenantRecord).approvedAt).not.toBeNull();
+  });
+
+  // Gap closed: fix wave 1 added .max() caps to org_login, contact, notes and
+  // approved_by but shipped no test, so a regression dropping any of them
+  // would pass the whole suite silently.
+  it("400s tenant string fields over their .max() cap", async () => {
+    const cases: Record<string, unknown>[] = [
+      { org_login: repeatChar(40) }, // cap 39
+      { contact: repeatChar(10_001) }, // cap 10_000
+      { notes: repeatChar(2_001) }, // cap 2_000
+      { approved_by: repeatChar(101) }, // cap 100
+    ];
+    for (const fields of cases) {
+      const res = await handleAdmin(
+        req("POST", "/admin/tenants", tenantBody({ installation_id: 511, ...fields })),
+        B,
+      );
+      expect(res.status).toBe(400);
+    }
   });
 });

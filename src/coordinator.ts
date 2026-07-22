@@ -560,8 +560,9 @@ export class Coordinator extends DurableObject<Env> {
     addProjects(this.#sql, installationId, projects, Date.now());
   }
 
-  adminRemoveProject(installationId: number, repoFullName: string): void {
-    removeProject(this.#sql, installationId, repoFullName);
+  /** Returns the number of project rows removed (0 if repoFullName never matched). */
+  adminRemoveProject(installationId: number, repoFullName: string): number {
+    return removeProject(this.#sql, installationId, repoFullName);
   }
 
   adminBackfillTenantIds(installationId: number): number {
