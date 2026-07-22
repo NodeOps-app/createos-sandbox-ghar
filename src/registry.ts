@@ -70,6 +70,17 @@ export function upsertTenant(sql: SqlStorage, t: TenantRecord): void {
   );
 }
 
+/**
+ * Existence check shared by every write that would otherwise let a Project or
+ * a job backfill attach to a Tenant that was never seeded — there are no
+ * foreign keys, so this is the only thing standing in for one.
+ */
+function tenantExists(sql: SqlStorage, installationId: number): boolean {
+  return (
+    sql.exec(`SELECT 1 FROM tenants WHERE installation_id = ?`, installationId).toArray().length > 0
+  );
+}
+
 export function getTenant(sql: SqlStorage, installationId: number): TenantRecord | null {
   const rows = sql
     .exec(`SELECT * FROM tenants WHERE installation_id = ?`, installationId)
@@ -90,12 +101,22 @@ export function setTenantStatus(
   sql.exec(`UPDATE tenants SET status = ? WHERE installation_id = ?`, status, installationId);
 }
 
+/**
+ * Rejects a batch for a Tenant that does not exist rather than inserting rows
+ * `adminGetTenant` can never surface (it returns null when the tenant is
+ * missing) — otherwise a tenant created later would silently inherit repo
+ * approvals nobody granted for it. Checked before any insert so a bad
+ * installationId never leaves a partial batch behind.
+ */
 export function addProjects(
   sql: SqlStorage,
   installationId: number,
   projects: { repoFullName: string; repoId: number }[],
   now: number,
 ): void {
+  if (!tenantExists(sql, installationId)) {
+    throw new Error(`addProjects: no tenant with installation_id ${installationId}`);
+  }
   for (const p of projects) {
     sql.exec(
       `INSERT INTO projects (installation_id, repo_full_name, repo_id, added_at)
@@ -140,9 +161,15 @@ export function listProjects(sql: SqlStorage, installationId: number): ProjectRe
 /**
  * Claims every pre-multi-tenancy job row (tenant_id IS NULL) for one tenant.
  * NULL-only on purpose: re-running is a no-op, and rows already owned by a
- * tenant are never re-assigned — the backfill cannot rewrite history.
+ * tenant are never re-assigned — the backfill cannot rewrite history. That
+ * same NULL-only predicate is why a bad installationId is unrecoverable: a
+ * re-run with the correct id can never reclaim rows a wrong one already
+ * claimed, since they are no longer NULL. So refuse up front instead.
  */
 export function backfillJobTenant(sql: SqlStorage, installationId: number): number {
+  if (!tenantExists(sql, installationId)) {
+    throw new Error(`backfillJobTenant: no tenant with installation_id ${installationId}`);
+  }
   sql.exec(`UPDATE jobs SET tenant_id = ? WHERE tenant_id IS NULL`, installationId);
   const row = sql.exec(`SELECT changes() AS n`).one() as { n: number };
   return row.n;
