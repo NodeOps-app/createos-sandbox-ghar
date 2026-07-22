@@ -3,7 +3,7 @@ import type { WorkflowJob } from "./types";
 const enc = new TextEncoder();
 
 /** Constant-time compare of two equal-length ArrayBuffers. */
-function timingSafeEqual(a: ArrayBuffer, b: ArrayBuffer): boolean {
+export function timingSafeEqual(a: ArrayBuffer, b: ArrayBuffer): boolean {
   if (a.byteLength !== b.byteLength) return false;
   const x = new Uint8Array(a);
   const y = new Uint8Array(b);

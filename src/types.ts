@@ -33,6 +33,7 @@ export interface Config {
   recoverySubrequestBudget: number; // e.g. 30
 
   alertWebhookUrl?: string; // optional Slack-style webhook for failure alerts
+  adminToken?: string; // bearer token for /admin/*; unset = admin surface disabled (404)
 }
 
 /**
