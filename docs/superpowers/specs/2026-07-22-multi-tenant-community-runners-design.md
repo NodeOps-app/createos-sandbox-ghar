@@ -185,6 +185,14 @@ the shape catalog. A suspended Tenant's in-flight VMs still tear down cleanly.
   admission refuses.
 - Egress: on teardown, read the VM's `getBandwidth().used_bytes` best-effort
   into `usage.egress_bytes`. Alert-only; never blocks teardown.
+- **Bill from the shape the VM actually ran, persisted at provision time — not
+  reconstructed from config at teardown.** `weightForLabel` derives the weight
+  from `runnerLabel`/`runnerShape` as they read *now*, so changing either while
+  a VM is alive reprices that VM against a shape it never ran on (a
+  `RUNNER_LABEL` rename also strands the persisted `jobs.label`, per the
+  AGENTS.md gotcha). `src/quota.ts` is pure and takes the shape as an argument,
+  so this is the caller's obligation: persist the resolved shape on the job row
+  at provision and pass that historical value at teardown.
 
 ## 8. Runner groups (gate 3)
 
