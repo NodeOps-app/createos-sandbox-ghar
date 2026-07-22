@@ -17,6 +17,7 @@ function req(method: string, path: string, body?: unknown, token = "test-admin-t
 const tenantBody = (over: Record<string, unknown> = {}) => ({
   installation_id: 501,
   org_login: "acme",
+  status: "pending",
   minute_grant: 5000,
   concurrency_cap: 5,
   max_shape: "s-4vcpu-8gb",
@@ -160,10 +161,97 @@ describe("admin API", () => {
     expect(backfill.status).toBe(404);
     expect(await backfill.json()).toEqual({ error: "tenant not found", installation_id: 999_998 });
 
+    // vitest-pool-workers isolates DO storage per test, so tenant 501 from an
+    // earlier `it` isn't here either; seed one of our own for the flip.
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 506 })), B);
     const status = await handleAdmin(
-      req("POST", "/admin/tenants/status", { installation_id: 501, status: "suspended" }),
+      req("POST", "/admin/tenants/status", { installation_id: 506, status: "suspended" }),
       B,
     );
     expect(status.status).toBe(200);
+  });
+
+  // Finding 1: req.json() throws SyntaxError on a malformed body; that must
+  // map to 400 like any other bad-input case, not fall through to a 500.
+  it("400s a malformed JSON body instead of 500ing", async () => {
+    const res = await handleAdmin(
+      new Request("https://ghar.test/admin/tenants", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-admin-token", "content-type": "application/json" },
+        body: "{not valid json",
+      }),
+      B,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toHaveProperty("error");
+  });
+
+  // Finding 2: status had `.default("pending")`, so an upsert that changed a
+  // quota field but forgot to restate status: "approved" would silently
+  // demote an already-approved tenant back to pending. Making it required
+  // turns the omission into a 400 instead of a silent moderation flip.
+  it("400s a tenant upsert that omits status, rather than silently resetting it", async () => {
+    const body = tenantBody({ installation_id: 504 });
+    delete (body as Record<string, unknown>).status;
+    const res = await handleAdmin(req("POST", "/admin/tenants", body), B);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toHaveProperty("error");
+  });
+
+  // Finding 3: a status change or project delete for a mistyped
+  // installation_id is an unconditional UPDATE/DELETE that touches zero rows
+  // — it must 404, not silently 200 as if the moderation action took effect.
+  it("404s a status change for a nonexistent tenant, and a later request still works", async () => {
+    const status = await handleAdmin(
+      req("POST", "/admin/tenants/status", { installation_id: 999_997, status: "suspended" }),
+      B,
+    );
+    expect(status.status).toBe(404);
+    expect(await status.json()).toEqual({ error: "tenant not found", installation_id: 999_997 });
+
+    const list = await handleAdmin(req("GET", "/admin/tenants"), B);
+    expect(list.status).toBe(200);
+  });
+
+  it("404s a project delete for a nonexistent tenant, and a later request still works", async () => {
+    const del = await handleAdmin(
+      req("DELETE", "/admin/projects", { installation_id: 999_996, repo_full_name: "acme/ghost" }),
+      B,
+    );
+    expect(del.status).toBe(404);
+    expect(await del.json()).toEqual({ error: "tenant not found", installation_id: 999_996 });
+
+    const list = await handleAdmin(req("GET", "/admin/tenants"), B);
+    expect(list.status).toBe(200);
+  });
+
+  // Finding 4: ProjectDeleteBody only had `.min(3)`, so a mistyped
+  // repo_full_name (no "owner/repo" shape) passed validation and deleted zero
+  // rows behind a 200. The delete path must reject it the same way the add
+  // path already does.
+  it("400s a project delete whose repo_full_name isn't owner/repo shaped", async () => {
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 505 })), B);
+    const res = await handleAdmin(
+      req("DELETE", "/admin/projects", { installation_id: 505, repo_full_name: "acmeapi" }),
+      B,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toHaveProperty("error");
+  });
+
+  // Finding 5: installation_id (and other persisted ids) had no upper bound,
+  // so a value past Number.MAX_SAFE_INTEGER would silently lose precision on
+  // write. Reject it at the boundary instead.
+  it("400s an installation_id past Number.MAX_SAFE_INTEGER", async () => {
+    const res = await handleAdmin(
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({ installation_id: Number.MAX_SAFE_INTEGER + 1024 }),
+      ),
+      B,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toHaveProperty("error");
   });
 });
