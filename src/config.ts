@@ -70,5 +70,6 @@ export function loadConfig(env: Record<string, unknown>): Config {
     reconcileGraceMs: num(env, "RECONCILE_GRACE_MS", 180_000),
     recoverySubrequestBudget: num(env, "RECOVERY_SUBREQUEST_BUDGET", 30),
     alertWebhookUrl: (env.ALERT_WEBHOOK_URL as string) || undefined,
+    adminToken: (env.ADMIN_TOKEN as string) || undefined,
   };
 }
