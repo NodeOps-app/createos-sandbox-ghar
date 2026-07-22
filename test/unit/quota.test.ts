@@ -17,7 +17,10 @@ describe("monthKey", () => {
 
 describe("weightForLabel", () => {
   it("bills the bare label at the default shape", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(weightForLabel(BARE, BARE, DEF)).toBe(2);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("bills shaped labels by their own vCPU", () => {
@@ -40,6 +43,12 @@ describe("weightForLabel", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(weightForLabel("createos-huge", BARE, "not-a-shape")).toBe(1);
     expect(warn).toHaveBeenCalledTimes(2);
+    const first = warn.mock.calls[0]![0];
+    expect(first).toEqual(expect.stringContaining("createos-huge"));
+    expect(first).toEqual(expect.stringContaining("not-a-shape"));
+    expect(first).not.toEqual(expect.stringContaining("billing at default"));
+    const second = warn.mock.calls[1]![0];
+    expect(second).toEqual(expect.stringContaining("createos-huge"));
     warn.mockRestore();
   });
 });
