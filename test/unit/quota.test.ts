@@ -29,12 +29,20 @@ describe("weightForLabel", () => {
     expect(weightForLabel("createos-8vcpu-16gb", BARE, DEF)).toBe(4);
   });
 
+  it("bills by the shape's vCPU, not a vCPU-like token in the runner-label prefix", () => {
+    expect(weightForLabel("ci-16vcpu-2vcpu-2gb", "ci-16vcpu", DEF)).toBe(1);
+  });
+
+  it("still parses a label that does not carry the runner-label prefix", () => {
+    expect(weightForLabel("createos-2vcpu-2gb", "gha", DEF)).toBe(1);
+  });
+
   it("falls back to the default weight on an unparseable label, loudly", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(weightForLabel("createos-huge", BARE, DEF)).toBe(2);
     expect(warn).toHaveBeenCalledOnce();
     const message = warn.mock.calls[0]![0];
-    expect(message).toEqual(expect.stringContaining("createos-huge"));
+    expect(message).toEqual(expect.stringContaining("huge"));
     expect(message).toEqual(expect.stringContaining(DEF));
     warn.mockRestore();
   });
@@ -44,11 +52,21 @@ describe("weightForLabel", () => {
     expect(weightForLabel("createos-huge", BARE, "not-a-shape")).toBe(1);
     expect(warn).toHaveBeenCalledTimes(2);
     const first = warn.mock.calls[0]![0];
-    expect(first).toEqual(expect.stringContaining("createos-huge"));
+    expect(first).toEqual(expect.stringContaining("huge"));
     expect(first).toEqual(expect.stringContaining("not-a-shape"));
     expect(first).not.toEqual(expect.stringContaining("billing at default"));
     const second = warn.mock.calls[1]![0];
     expect(second).toEqual(expect.stringContaining("createos-huge"));
+    warn.mockRestore();
+  });
+
+  it("names the bare label (not the resolved default shape) in the second warning", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(weightForLabel(BARE, BARE, "not-a-shape")).toBe(1);
+    expect(warn).toHaveBeenCalledTimes(2);
+    const second = warn.mock.calls[1]![0];
+    expect(second).toEqual(expect.stringContaining(BARE));
+    expect(second).not.toEqual(expect.stringContaining("not-a-shape"));
     warn.mockRestore();
   });
 });
