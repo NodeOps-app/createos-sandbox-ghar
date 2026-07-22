@@ -27,6 +27,7 @@ type Row = {
   provision_started_at: number | null;
   booted_at: number | null;
   job_started_at: number | null;
+  tenant_id: number | null;
 };
 
 /**
@@ -93,6 +94,36 @@ export class Coordinator extends DurableObject<Env> {
         key   TEXT PRIMARY KEY,
         value TEXT
       );
+      CREATE TABLE IF NOT EXISTS tenants (
+        installation_id INTEGER PRIMARY KEY,
+        org_login       TEXT NOT NULL,
+        status          TEXT NOT NULL,
+        allow_all_repos INTEGER NOT NULL DEFAULT 0,
+        minute_grant    INTEGER NOT NULL,
+        concurrency_cap INTEGER NOT NULL,
+        max_shape       TEXT NOT NULL,
+        job_ttl_ms      INTEGER NOT NULL,
+        runner_group_id INTEGER,
+        contact         TEXT,
+        notes           TEXT,
+        approved_at     INTEGER,
+        approved_by     TEXT
+      );
+      CREATE TABLE IF NOT EXISTS projects (
+        installation_id INTEGER NOT NULL,
+        repo_full_name  TEXT NOT NULL,
+        repo_id         INTEGER NOT NULL,
+        added_at        INTEGER NOT NULL,
+        PRIMARY KEY (installation_id, repo_full_name)
+      );
+      CREATE TABLE IF NOT EXISTS usage (
+        installation_id  INTEGER NOT NULL,
+        month            TEXT NOT NULL,
+        repo_full_name   TEXT NOT NULL,
+        weighted_minutes REAL NOT NULL DEFAULT 0,
+        egress_bytes     INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (installation_id, month, repo_full_name)
+      );
     `);
     // Migrate DOs created before a column existed: CREATE TABLE IF NOT EXISTS
     // won't add one to a live table. A NULL `label` is a row from before shape
@@ -100,9 +131,12 @@ export class Coordinator extends DurableObject<Env> {
     // `provision_started_at` is a row from before ROW_AGE, which COALESCEs it
     // back to created_at; a NULL `job_started_at` is a row whose in_progress
     // signal was never recorded (pre-migration, or a job that never started) and
-    // only feeds the spawn-timeline log, so old code ignoring it is harmless. All
-    // migrations are additive, so a Worker rollback (which does NOT revert DO
-    // SQLite) leaves the old code reading rows it still understands.
+    // only feeds the spawn-timeline log, so old code ignoring it is harmless. A
+    // NULL `tenant_id` is a row from before multi-tenancy, owned by the seeded
+    // first tenant once backfilled; until then no code reads it, so old and new
+    // code agree. All migrations are additive, so a Worker rollback (which does
+    // NOT revert DO SQLite) leaves the old code reading rows it still
+    // understands.
     const cols = this.#sql.exec(`PRAGMA table_info(jobs)`).toArray() as { name: string }[];
     const has = (c: string) => cols.some((col) => col.name === c);
     if (!has("runner_name")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN runner_name TEXT`);
@@ -113,6 +147,7 @@ export class Coordinator extends DurableObject<Env> {
     if (!has("job_started_at")) {
       this.#sql.exec(`ALTER TABLE jobs ADD COLUMN job_started_at INTEGER`);
     }
+    if (!has("tenant_id")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN tenant_id INTEGER`);
   }
 
   /**

@@ -35,6 +35,37 @@ export interface Config {
   alertWebhookUrl?: string; // optional Slack-style webhook for failure alerts
 }
 
+/**
+ * A Tenant is an approved GitHub org, keyed by App installation id (spec D1).
+ * It owns the quota grant, concurrency cap, shape ceiling, job TTL and runner
+ * group. A Project is an approved repo inside a Tenant — the admission unit
+ * (D2). Quota is enforced on the Tenant, attributed per Project (D3).
+ */
+export type TenantStatus = "pending" | "approved" | "suspended" | "revoked";
+
+export interface TenantRecord {
+  installationId: number;
+  orgLogin: string;
+  status: TenantStatus;
+  allowAllRepos: boolean;
+  minuteGrant: number; // weighted minutes per UTC calendar month
+  concurrencyCap: number;
+  maxShape: string; // "s-4vcpu-8gb"
+  jobTtlMs: number;
+  runnerGroupId: number | null; // NULL until approval creates the group (Plan 2)
+  contact: string | null; // JSON blob from the onboarding form
+  notes: string | null;
+  approvedAt: number | null;
+  approvedBy: string | null;
+}
+
+export interface ProjectRecord {
+  installationId: number;
+  repoFullName: string;
+  repoId: number; // runner-group scoping API takes repo ids
+  addedAt: number;
+}
+
 /** The subset of a workflow_job webhook the controller acts on. */
 export interface WorkflowJob {
   action: "queued" | "in_progress" | "completed" | "waiting";
