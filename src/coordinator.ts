@@ -8,7 +8,20 @@ import type {
   ProvisionFailedResult,
   SpawnTimeline,
   TeardownTask,
+  ProjectRecord,
+  TenantRecord,
+  TenantStatus,
 } from "./types";
+import {
+  addProjects,
+  backfillJobTenant,
+  getTenant,
+  listProjects,
+  listTenants,
+  removeProject,
+  setTenantStatus,
+  upsertTenant,
+} from "./registry";
 
 interface Env {
   MAX_CONCURRENT: string;
@@ -516,5 +529,42 @@ export class Coordinator extends DurableObject<Env> {
     this.#sql.exec(`DELETE FROM deliveries WHERE seen_at < ?`, cutoff);
     // Stale-orphan teardowns above vacated slots; pull surviving pending jobs in.
     return { toDestroy, nextPending: this.#drainPending() };
+  }
+
+  // ── Tenant registry (admin-frequency; never on the webhook hot path) ──
+
+  adminUpsertTenant(t: TenantRecord): void {
+    upsertTenant(this.#sql, t);
+  }
+
+  adminGetTenant(
+    installationId: number,
+  ): { tenant: TenantRecord; projects: ProjectRecord[] } | null {
+    const tenant = getTenant(this.#sql, installationId);
+    if (!tenant) return null;
+    return { tenant, projects: listProjects(this.#sql, installationId) };
+  }
+
+  adminListTenants(): TenantRecord[] {
+    return listTenants(this.#sql);
+  }
+
+  adminSetTenantStatus(installationId: number, status: TenantStatus): void {
+    setTenantStatus(this.#sql, installationId, status);
+  }
+
+  adminAddProjects(
+    installationId: number,
+    projects: { repoFullName: string; repoId: number }[],
+  ): void {
+    addProjects(this.#sql, installationId, projects, Date.now());
+  }
+
+  adminRemoveProject(installationId: number, repoFullName: string): void {
+    removeProject(this.#sql, installationId, repoFullName);
+  }
+
+  adminBackfillTenantIds(installationId: number): number {
+    return backfillJobTenant(this.#sql, installationId);
   }
 }
