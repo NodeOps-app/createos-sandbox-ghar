@@ -29,12 +29,37 @@ describe("weightForLabel", () => {
     expect(weightForLabel("createos-8vcpu-16gb", BARE, DEF)).toBe(4);
   });
 
+  it("bills fractional-vCPU shapes correctly, not as a decimal-fragment overbill", () => {
+    // Regression for VCPU_RE matching "5vcpu" inside "0.5vcpu": that read the
+    // count as 5 (weight 2.5) instead of 0.5 (weight 0.25) — a 10x overbill.
+    expect(weightForLabel("createos-0.5vcpu-1gb", BARE, DEF)).toBe(0.25);
+    expect(weightForLabel("createos-0.25vcpu-512mb", BARE, DEF)).toBe(0.125);
+  });
+
+  it("bills a fractional-vCPU default shape correctly via the bare-label path", () => {
+    expect(weightForLabel(BARE, BARE, "s-0.5vcpu-1gb")).toBe(0.25);
+    expect(weightForLabel(BARE, BARE, "s-0.25vcpu-512mb")).toBe(0.125);
+  });
+
   it("bills by the shape's vCPU, not a vCPU-like token in the runner-label prefix", () => {
     expect(weightForLabel("ci-16vcpu-2vcpu-2gb", "ci-16vcpu", DEF)).toBe(1);
   });
 
   it("still parses a label that does not carry the runner-label prefix", () => {
-    expect(weightForLabel("createos-2vcpu-2gb", "gha", DEF)).toBe(1);
+    // runnerLabel deliberately overlaps the label's own prefix ("createos-2")
+    // so an unguarded `label.slice(runnerLabel.length + 1)` would slice into
+    // the middle of "2vcpu" and destroy the token — this input only passes
+    // if the startsWith guard actually gated the slice.
+    expect(weightForLabel("createos-2vcpu-2gb", "createos-2", DEF)).toBe(1);
+  });
+
+  it("best-effort parses a stale-prefix label matching neither the bare label nor the current prefix", () => {
+    // Simulates a RUNNER_LABEL rename mid-flight (see AGENTS.md): a persisted
+    // jobs.label ("gha-2vcpu-2gb") carries the *old* prefix, which matches
+    // neither the new bare label nor the new prefix. shapeForLabel throws on
+    // this input; quota must not — teardown falls through to a best-effort
+    // parse of the raw label instead of blocking.
+    expect(weightForLabel("gha-2vcpu-2gb", "createos", DEF)).toBe(1);
   });
 
   it("falls back to the default weight on an unparseable label, loudly", () => {
@@ -44,6 +69,10 @@ describe("weightForLabel", () => {
     const message = warn.mock.calls[0]![0];
     expect(message).toEqual(expect.stringContaining("huge"));
     expect(message).toEqual(expect.stringContaining(DEF));
+    // The stripped fragment ("huge") is a substring of the full label
+    // ("createos-huge"), so pin the full, prefixed label explicitly — this
+    // is what's persisted in jobs.label and what every other log line names.
+    expect(message).toEqual(expect.stringContaining("createos-huge"));
     warn.mockRestore();
   });
 
@@ -54,6 +83,7 @@ describe("weightForLabel", () => {
     const first = warn.mock.calls[0]![0];
     expect(first).toEqual(expect.stringContaining("huge"));
     expect(first).toEqual(expect.stringContaining("not-a-shape"));
+    expect(first).toEqual(expect.stringContaining("createos-huge"));
     expect(first).not.toEqual(expect.stringContaining("billing at default"));
     const second = warn.mock.calls[1]![0];
     expect(second).toEqual(expect.stringContaining("createos-huge"));

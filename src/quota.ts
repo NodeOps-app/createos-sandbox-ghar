@@ -17,7 +17,15 @@ export function monthKey(nowMs: number): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-const VCPU_RE = /(\d+)vcpu/;
+// Requires the decimal point immediately after the leading digits, so the
+// match anchors at the *start* of a fractional count instead of a suffix of
+// one: real createos shapes include fractional vCPU counts (s-0.5vcpu-1gb,
+// s-0.25vcpu-512mb — see docs/superpowers/specs/2026-07-09-shape-labels-design.md),
+// and an unanchored /(\d+)vcpu/ matches "5vcpu" inside "0.5vcpu" — reading a
+// count 10x too high instead of failing to match. `(?:\.\d+)?` only extends a
+// match that already started at the first digit, so it can't itself start
+// mid-number the way the old bare `\d+` did.
+const VCPU_RE = /(\d+(?:\.\d+)?)vcpu/;
 
 /**
  * The billing weight of the shape a runner label names. The bare label bills
@@ -32,6 +40,19 @@ const VCPU_RE = /(\d+)vcpu/;
  * count instead of the shape's. Quota can't import shapeForLabel to share
  * this (the DO importing quota.ts must stay import-free), so the substring
  * rule is duplicated here — that duplication is the price of the import ban.
+ *
+ * There is a third outcome besides bare and correctly-prefixed: a label that
+ * carries *neither* the bare label nor the current `runnerLabel` prefix. This
+ * is reachable in production, not just defensive — AGENTS.md documents that
+ * renaming RUNNER_LABEL while jobs are in flight leaves rows whose persisted
+ * `jobs.label` still carries the *old* prefix, which matches neither check
+ * against the new config. `shapeForLabel` in shapes.ts throws on this same
+ * input, because a wrong-size VM is worse than no VM — but billing runs in
+ * the teardown path for a VM that already exists and must never block that
+ * teardown, so quota instead falls through to a best-effort parse of the raw
+ * label (`src = label`), warning if that also fails to parse. Deliberate
+ * asymmetry: provisioning refuses to guess, teardown cannot afford to.
+ *
  * When `src` has no parseable vcpu, weightForLabel falls back to the default
  * shape's weight instead — billing runs inside the teardown path and must
  * never block it — but warns, because a silent fallback would misprice
@@ -47,18 +68,20 @@ export function weightForLabel(label: string, runnerLabel: string, defaultShape:
       ? defaultShape
       : label.startsWith(`${runnerLabel}-`)
         ? label.slice(runnerLabel.length + 1)
-        : label;
+        : label; // stale-rename fallthrough (see doc comment above) — best-effort parse of the raw label
   const m = VCPU_RE.exec(src);
   if (m) return Number(m[1]) / 2;
   const d = VCPU_RE.exec(defaultShape);
   if (!d) {
     console.warn(
-      `quota: cannot parse vcpu from "${src}"; default shape "${defaultShape}" has no parseable vcpu either`,
+      `quota: cannot parse vcpu from "${src}" (label "${label}"); default shape "${defaultShape}" has no parseable vcpu either`,
     );
     console.warn(`quota: billing "${label}" at weight 1`);
     return 1;
   }
-  console.warn(`quota: cannot parse vcpu from "${src}"; billing at default "${defaultShape}"`);
+  console.warn(
+    `quota: cannot parse vcpu from "${src}" (label "${label}"); billing at default "${defaultShape}"`,
+  );
   return Number(d[1]) / 2;
 }
 
