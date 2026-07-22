@@ -130,12 +130,25 @@ export function addProjects(
   }
 }
 
-export function removeProject(sql: SqlStorage, installationId: number, repoFullName: string): void {
+/**
+ * Returns the number of rows the DELETE actually affected so a mistyped
+ * repo_full_name (valid shape, no matching row) can 404 instead of reporting
+ * success for a revoke that never happened — same pattern as
+ * backfillJobTenant's `changes()` read, taken immediately after the DELETE
+ * with no intervening await so it reflects THIS statement.
+ */
+export function removeProject(
+  sql: SqlStorage,
+  installationId: number,
+  repoFullName: string,
+): number {
   sql.exec(
     `DELETE FROM projects WHERE installation_id = ? AND repo_full_name = ?`,
     installationId,
     repoFullName,
   );
+  const row = sql.exec(`SELECT changes() AS n`).one() as { n: number };
+  return row.n;
 }
 
 export function listProjects(sql: SqlStorage, installationId: number): ProjectRecord[] {
