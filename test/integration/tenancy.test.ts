@@ -1,6 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import type { TenantRecord } from "../../src/types";
+import { weightForLabel } from "../../src/quota";
 
 function stub(name: string) {
   return env.COORDINATOR.get(env.COORDINATOR.idFromName(name));
@@ -28,7 +29,7 @@ const job = (id: number, tenant: number) => ({
   label: "createos",
   tenant: null,
 });
-const ctx = (tenant: number, cap = 1) => ({ tenantId: tenant, weight: 2, cap });
+const ctx = (tenant: number, cap = 1, weight = 2) => ({ tenantId: tenant, weight, cap });
 
 describe("admitTenantJob", () => {
   it("walks the gate ladder: unknown → not-approved → repo → ok with balance", async () => {
@@ -129,6 +130,59 @@ describe("per-tenant cap at promotion", () => {
 
     const res = await s.onCompleted(1, "cos-1-aa");
     expect(res.nextPending?.jobId).toBe(3); // strict FIFO, untouched by the tenant-headroom check
+
+    // Single mode never bills: a promoted NULL-tenant_id row's weight stays NULL.
+    await runInDurableObject(s, (_i, state) => {
+      const row = state.storage.sql
+        .exec<{ weight: number | null }>(`SELECT weight FROM jobs WHERE job_id = 3`)
+        .one();
+      expect(row.weight).toBeNull();
+    });
+  });
+});
+
+describe("weight recomputed at promotion", () => {
+  // Weight is stamped from tenantCtx at ENQUEUE, but a pending row can sit
+  // across a RUNNER_SHAPE change and boot the shape live at PROMOTION time —
+  // so promotion must recompute it, not trust the stale enqueue-time value.
+  // Forcing the enqueue weight deliberately wrong (999) and asserting the
+  // promoted row does NOT carry it proves the recompute actually happened.
+  it("overrides a wrong enqueue-time weight with the recompute at promotion", async () => {
+    const s = stub("promo-weight-" + Math.random());
+    await s.adminUpsertTenant(approved(1, { concurrencyCap: 1 }));
+
+    await s.onQueued(job(11, 1), "d1", ctx(1, 1)); // A's one running job, fills tenant cap
+    await s.recordSandboxCreated(11, "sb11", "cos-11-aa");
+    await s.markRunning(11);
+
+    await s.onQueued(job(12, 1), "d2", ctx(1, 1, 999)); // queued behind tenant cap, WRONG weight
+    await runInDurableObject(s, (_i, state) => {
+      const row = state.storage.sql
+        .exec<{ weight: number | null; state: string }>(
+          `SELECT weight, state FROM jobs WHERE job_id = 12`,
+        )
+        .one();
+      expect(row.state).toBe("pending");
+      expect(row.weight).toBe(999); // stamped as-is at enqueue, not yet recomputed
+    });
+
+    const res = await s.onCompleted(11, "cos-11-aa"); // frees tenant headroom, promotes 12
+    expect(res.nextPending?.jobId).toBe(12);
+
+    // RUNNER_LABEL/RUNNER_SHAPE come from wrangler.toml (vitest.config.ts's
+    // miniflare bindings only override MAX_CONCURRENT et al., not these) —
+    // same values the DO reads via this.env at promotion.
+    const expected = weightForLabel(job(12, 1).label, "createos", "s-4vcpu-4gb");
+    await runInDurableObject(s, (_i, state) => {
+      const row = state.storage.sql
+        .exec<{ weight: number | null; state: string }>(
+          `SELECT weight, state FROM jobs WHERE job_id = 12`,
+        )
+        .one();
+      expect(row.state).toBe("provisioning");
+      expect(row.weight).toBe(expected);
+      expect(row.weight).not.toBe(999);
+    });
   });
 });
 

@@ -548,9 +548,23 @@ export class Coordinator extends DurableObject<Env> {
       .toArray();
     const row = rows[0];
     if (!row) return null;
+    // Weight was stamped at ENQUEUE from tenantCtx, which can go stale if the
+    // row sits pending across a RUNNER_SHAPE change — it boots the NEW shape
+    // but would bill the OLD weight. Recompute from the current config at the
+    // moment it actually promotes. Single-mode rows (tenant_id NULL) are never
+    // billed, so their weight (NULL) is left untouched.
+    const weight =
+      row.tenant_id != null
+        ? weightForLabel(
+            row.label ?? this.env.RUNNER_LABEL,
+            this.env.RUNNER_LABEL,
+            this.env.RUNNER_SHAPE,
+          )
+        : row.weight;
     this.#sql.exec(
-      `UPDATE jobs SET state = 'provisioning', provision_started_at = ? WHERE job_id = ?`,
+      `UPDATE jobs SET state = 'provisioning', provision_started_at = ?, weight = ? WHERE job_id = ?`,
       Date.now(),
+      weight,
       row.job_id,
     );
     return this.#toPending(row);
