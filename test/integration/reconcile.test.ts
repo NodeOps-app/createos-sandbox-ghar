@@ -1,9 +1,16 @@
-import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import {
+  env,
+  createExecutionContext,
+  waitOnExecutionContext,
+  runInDurableObject,
+} from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { runReconciler } from "../../src/reconcile";
+import { runReconciler, runReaper } from "../../src/reconcile";
 import { resetShapeCacheForTests } from "../../src/shapes";
 import { resetCredentialSessionsForTests } from "../../src/github/auth";
 import { shapeCatalog, runnerName } from "../helpers/mocks";
+import type { Bindings } from "../../src/index";
+import type { TenantRecord } from "../../src/types";
 
 // Both caches are module-level and outlive any single test. The shapes catalog:
 // without the reset, whichever suite runs first decides what every later case
@@ -195,16 +202,29 @@ describe("runReconciler", () => {
     globalThis.fetch = realFetch;
   });
 
-  it("aborts the tick without stranding a row when a later admission throws", async () => {
-    // fork-gated admission does a GitHub fork check per job. If a LATER job's
-    // check throws after an earlier job was admitted, the earlier job must NOT
-    // be left as a `provisioning` row with no VM: the admit phase has to finish
-    // before any Coordinator mutation. Run 9601's job admits; run 9602's fork
-    // lookup returns a 200 with a non-JSON body, so isForkJob's res.json()
-    // rejects and admission throws mid-tick. Runners list 500s so step A is
-    // skipped and cannot itself move the active count.
+  // Bug #1 (deferred from the security-audit backlog, closed by Task 9): a per-
+  // job admission throw used to escape runReconciler entirely, skipping steps
+  // C/D and — because index.ts awaits runReconciler then runReaper sequentially
+  // — the reaper too. This single test proves the whole chain: the throwing
+  // job is skipped (not the tick), the earlier job still admits, and step D +
+  // the reaper (called the same way index.ts's `scheduled` calls them) both
+  // still run in the same tick.
+  it("an admission throw skips only that job — the earlier job still admits, and step D + the reaper still run", async () => {
+    // fork-gated admission does a GitHub fork check per job. Run 9601's job
+    // admits cleanly; run 9602's fork lookup returns a 200 with a non-JSON
+    // body, so isForkJob's res.json() rejects and admission throws for THAT
+    // job only. Runners list 500s so step A/C are skipped (unrelated to this
+    // fix) and cannot themselves move the active count.
     const singleton = stub("singleton");
     const before = await singleton.activeCount();
+
+    // A row already parked in `destroying` (onCompleted before its teardown
+    // confirmed) — the reaper's sweep picks these up regardless of cutoff, the
+    // same fixture reaper.test.ts uses for a deterministic reaper effect.
+    await singleton.onQueued(job(96099), "d-96099");
+    await boot(singleton, 96099, "sb96099");
+    await singleton.onCompleted(96099, runnerName(96099));
+
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const req = new Request(input, init);
       const u = req.url;
@@ -213,6 +233,8 @@ describe("runReconciler", () => {
           JSON.stringify({ token: "t", expires_at: new Date(Date.now() + 3.6e6).toISOString() }),
           { status: 201 },
         );
+      if (u.includes("/generate-jitconfig"))
+        return new Response(JSON.stringify({ encoded_jit_config: "BLOB" }), { status: 201 });
       if (req.method === "GET" && u.includes("/actions/runners"))
         return new Response("boom", { status: 500 });
       if (u.includes("/installation/repositories"))
@@ -237,17 +259,47 @@ describe("runReconciler", () => {
       return new Response("unmocked " + u, { status: 404 });
     }) as typeof fetch;
 
-    await expect(
-      runReconciler({ ...env, PROVISION_POLICY: "fork-gated" } as any, {
-        makeClient: () => ({
-          createSandbox: vi.fn(),
-          listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
-          getSandbox: vi.fn(),
-          listSandboxes: vi.fn().mockResolvedValue([]),
-        }),
+    const orphan = vm(vmName(9805)); // step D target: no Coordinator row owns it
+    const createSandbox = vi.fn().mockResolvedValue({
+      id: "sb96011",
+      runCommand: vi.fn().mockResolvedValue({ result: { stdout: "started" }, exec_ms: 1 }),
+    });
+    const destroyReaped = vi.fn().mockResolvedValue({ id: "sb96099", status: "destroying" });
+    const getSandbox = vi
+      .fn()
+      .mockResolvedValue({ destroy: destroyReaped, getBandwidth: async () => ({ used_bytes: 0 }) });
+    const deps = {
+      makeClient: () => ({
+        createSandbox,
+        listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
+        getSandbox,
+        listSandboxes: vi.fn().mockResolvedValue([orphan]),
       }),
-    ).rejects.toThrow();
-    expect(await singleton.activeCount()).toBe(before); // job 96011 not stranded
+    };
+
+    await expect(
+      runReconciler({ ...env, PROVISION_POLICY: "fork-gated" } as any, deps),
+    ).resolves.toBeUndefined();
+
+    // 96011 admitted and provisioned — NOT swallowed by 96022's throw.
+    expect(createSandbox).toHaveBeenCalledOnce();
+    expect(await singleton.activeCount()).toBe(before + 1);
+    // 96022's admission failure never reached the Coordinator — no row exists.
+    await runInDurableObject(singleton, async (_i, state) => {
+      const rows = state.storage.sql
+        .exec(`SELECT COUNT(*) AS n FROM jobs WHERE job_id = ?`, 96022)
+        .toArray() as { n: number }[];
+      expect(rows[0]!.n).toBe(0);
+    });
+    // Step D ran despite the mid-tick throw: the GitHub-independent orphaned-
+    // sandbox sweep destroyed the unowned VM.
+    expect(orphan.destroy).toHaveBeenCalledOnce();
+
+    // Mirrors index.ts's `scheduled`: the reaper runs right after the
+    // reconciler, unconditionally. It still tears down 96099's parked row.
+    await expect(runReaper(env as any, deps)).resolves.toBeUndefined();
+    expect(destroyReaped).toHaveBeenCalledOnce();
+
     globalThis.fetch = realFetch;
   });
 
@@ -520,6 +572,210 @@ describe("runReconciler — orphaned sandbox sweep", () => {
     const orphan = vm(vmName(9804));
     await runReconciler(env as any, depsWith([orphan]));
     expect(orphan.destroy).toHaveBeenCalledOnce();
+    globalThis.fetch = realFetch;
+  });
+});
+
+/**
+ * Multi-tenant reconciler (Task 9): `runReconciler` behind TENANCY_MODE=multi.
+ * Recovery re-enters every discovered job through `admitAndDrive` — the same
+ * gate ladder the webhook uses (see tenancy-webhook.test.ts) — so these cases
+ * focus on what's NEW here: per-tenant rotation, the all-or-nothing runner
+ * union, and the shared cross-tenant subrequest budget.
+ *
+ * All three tests share the file's one singleton Coordinator (`coordinator()`
+ * always resolves the same DO name), so each test revokes the tenants it
+ * created before returning — otherwise a later test's `adminListTenants()`
+ * would see them too and its subrequest-budget arithmetic would be off by
+ * however many extra (empty-repo) tenants leaked in.
+ */
+describe("runReconciler — multi-tenant mode", () => {
+  const multiEnv = (over: Record<string, unknown> = {}) =>
+    ({ ...env, TENANCY_MODE: "multi", ...over }) as unknown as Bindings;
+
+  const approvedTenant = (id: number, over: Partial<TenantRecord> = {}): TenantRecord => ({
+    installationId: id,
+    orgLogin: `mt-org-${id}`,
+    status: "approved",
+    allowAllRepos: false,
+    minuteGrant: 100_000,
+    concurrencyCap: 5,
+    maxShape: "s-4vcpu-8gb",
+    jobTtlMs: 1_800_000,
+    runnerGroupId: 42,
+    contact: null,
+    notes: null,
+    approvedAt: 1,
+    approvedBy: "op",
+    ...over,
+  });
+
+  // Reuses the file-level MockRunner type (identical shape) — see line 91.
+  type MockJob = { id: number; status: string; labels: string[] };
+
+  /**
+   * Routes GitHub calls for N tenants keyed by installation id. The token
+   * endpoint is installation-scoped by URL, so the mint mock ties the minted
+   * token to the requesting installation; every other call (runners, repo
+   * list, run/job listings) is then resolved off THAT bearer token, because
+   * `/installation/repositories` carries no org or repo in its URL — the
+   * token is the only thing distinguishing tenants there.
+   */
+  function patchMultiGitHub(
+    tenants: Record<
+      number,
+      {
+        org: string;
+        runners?: MockRunner[] | number; // number = simulate this HTTP status
+        repos?: string[];
+        jobsByRepo?: Record<string, MockJob[]>;
+      }
+    >,
+  ) {
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = new Request(input, init);
+      const u = req.url;
+      const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status });
+
+      const tokenMatch = u.match(/\/app\/installations\/(\d+)\/access_tokens/);
+      if (tokenMatch) {
+        return json(
+          {
+            token: `tok-${tokenMatch[1]}`,
+            expires_at: new Date(Date.now() + 3.6e6).toISOString(),
+          },
+          201,
+        );
+      }
+      const instId = Number((req.headers.get("Authorization") ?? "").replace("Bearer tok-", ""));
+      const t = tenants[instId];
+
+      if (u.includes("generate-jitconfig")) return json({ encoded_jit_config: "BLOB" }, 201);
+      if (req.method === "GET" && u.includes("/actions/runners")) {
+        if (typeof t?.runners === "number") return new Response("boom", { status: t.runners });
+        return json({ runners: t?.runners ?? [] });
+      }
+      if (u.includes("/installation/repositories")) {
+        return json({ repositories: (t?.repos ?? []).map((full_name) => ({ full_name })) });
+      }
+      if (u.includes("/jobs")) {
+        const repo = (t?.repos ?? []).find((r) => u.includes(`/repos/${r}/`));
+        return json({ jobs: (repo && t?.jobsByRepo?.[repo]) ?? [] });
+      }
+      if (u.includes("/actions/runs")) {
+        if (u.includes("status=in_progress")) return json({ workflow_runs: [] });
+        // status=queued: only fabricate an active run for a repo that actually
+        // has jobs configured, so cursor-only tests (no jobsByRepo) cost
+        // exactly 2 subrequests/repo (both status reads, no job fetch).
+        const repo = (t?.repos ?? []).find((r) => u.includes(`/repos/${r}/`));
+        const hasJobs = repo !== undefined && (t?.jobsByRepo?.[repo]?.length ?? 0) > 0;
+        return json({ workflow_runs: hasJobs ? [{ id: 9000, status: "queued" }] : [] });
+      }
+      return new Response("unmocked " + u, { status: 404 });
+    }) as typeof fetch;
+  }
+
+  it("recovery admits a queued job from an approved project and refuses one from an unapproved repo", async () => {
+    const s = stub("singleton");
+    await s.adminUpsertTenant(approvedTenant(40001));
+    await s.adminAddProjects(40001, [{ repoFullName: "mt-org-40001/api", repoId: 1 }]);
+
+    patchMultiGitHub({
+      40001: {
+        org: "mt-org-40001",
+        repos: ["mt-org-40001/api", "mt-org-40001/other"],
+        jobsByRepo: {
+          "mt-org-40001/api": [{ id: 400011, status: "queued", labels: ["createos"] }],
+          "mt-org-40001/other": [{ id: 400022, status: "queued", labels: ["createos"] }],
+        },
+      },
+    });
+
+    const createSandbox = vi.fn().mockResolvedValue({
+      id: "sb400011",
+      runCommand: vi.fn().mockResolvedValue({ result: { stdout: "started" }, exec_ms: 1 }),
+    });
+    await runReconciler(multiEnv(), {
+      makeClient: () => ({
+        createSandbox,
+        listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
+    });
+
+    // mt-org-40001/api is an approved project → admits and provisions.
+    expect(createSandbox).toHaveBeenCalledOnce();
+    await runInDurableObject(s, async (_i, state) => {
+      const approved = state.storage.sql
+        .exec(`SELECT COUNT(*) AS n FROM jobs WHERE job_id = ?`, 400011)
+        .toArray() as { n: number }[];
+      expect(approved[0]!.n).toBe(1);
+      // mt-org-40001/other was never added as a project → repo-not-approved,
+      // refused before admitAndDrive ever calls onQueued — no row inserted.
+      const refused = state.storage.sql
+        .exec(`SELECT COUNT(*) AS n FROM jobs WHERE job_id = ?`, 400022)
+        .toArray() as { n: number }[];
+      expect(refused[0]!.n).toBe(0);
+    });
+
+    await s.adminSetTenantStatus(40001, "revoked"); // keep later tests' tenant list clean
+    globalThis.fetch = realFetch;
+  });
+
+  it("step A is all-or-nothing: one tenant's listRunners failure spares every tenant's stale row", async () => {
+    const s = stub("singleton");
+    await s.adminUpsertTenant(approvedTenant(40101));
+    await s.adminUpsertTenant(approvedTenant(40102));
+
+    await s.onQueued(job(97001), "d-97001");
+    await boot(s, 97001, "sb97001"); // running; its runner is NOT in tenant A's online list below
+
+    patchMultiGitHub({
+      40101: { org: "mt-org-40101", runners: [{ id: 1, name: "someone-else", status: "online" }] },
+      40102: { org: "mt-org-40102", runners: 500 }, // tenant B's list fails
+    });
+
+    await expect(runReconciler(multiEnv(), {})).resolves.toBeUndefined();
+    // A partial union would read 97001's runner as absent (it's not in tenant
+    // A's list, and tenant B's list never loaded) and reap it. The whole step
+    // must be skipped instead — 97001 survives.
+    expect(await s.activeCount()).toBe(1);
+
+    await s.adminSetTenantStatus(40101, "revoked");
+    await s.adminSetTenantStatus(40102, "revoked");
+    globalThis.fetch = realFetch;
+  });
+
+  it("recovery cursor round-trips across tenants: tick 1 stops mid-tenant-A, tick 2 resumes A then covers B", async () => {
+    const s = stub("singleton");
+    await s.adminUpsertTenant(approvedTenant(40201));
+    await s.adminUpsertTenant(approvedTenant(40202));
+    patchMultiGitHub({
+      40201: { org: "mt-org-40201", repos: ["mt-org-40201/r1", "mt-org-40201/r2"] },
+      40202: { org: "mt-org-40202", repos: ["mt-org-40202/r1"] },
+    });
+
+    // Cost per repo here is 2 subrequests (activeRunIds' two status reads; no
+    // jobsByRepo means queuedJobs is never reached) plus 1 for the tenant's
+    // own installationRepos() call. Budget=3 covers tenant A's r1 (spent: 1 +
+    // 2 = 3) and hits the boundary check (3 >= 3) before r2 — budget-bound at
+    // tenant A, tenant B never reached this tick.
+    await runReconciler(multiEnv({ RECOVERY_SUBREQUEST_BUDGET: "3" }), {});
+    expect(await s.recoveryCursor()).toBe(
+      JSON.stringify({ installationId: 40201, repo: "mt-org-40201/r1" }),
+    );
+
+    // Tick 2: rotation resumes AT tenant A (per its stored repo cursor, so it
+    // picks up r2), a generous budget lets it finish A's remaining repo AND
+    // roll into tenant B, which the persisted cursor now reflects.
+    await runReconciler(multiEnv({ RECOVERY_SUBREQUEST_BUDGET: "20" }), {});
+    expect(await s.recoveryCursor()).toBe(
+      JSON.stringify({ installationId: 40202, repo: "mt-org-40202/r1" }),
+    );
+
+    await s.adminSetTenantStatus(40201, "revoked");
+    await s.adminSetTenantStatus(40202, "revoked");
     globalThis.fetch = realFetch;
   });
 });

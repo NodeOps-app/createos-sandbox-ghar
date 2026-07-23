@@ -33,9 +33,17 @@ export default {
     // Reconcile first (re-drive stuck jobs, reap runner-less VMs), then the
     // age-only reaper as a coarse backstop. Sequential: both mutate the one
     // singleton Coordinator, so running them concurrently would race its rows.
+    // runReconciler guards its own per-job admission throws (see reconcile.ts),
+    // but this catch is a belt-and-suspenders backstop for anything else that
+    // slips past it — the reaper must run regardless, since its leaked-VM
+    // cleanup has nothing to do with why the reconciler failed.
     ctx.waitUntil(
       (async () => {
-        await runReconciler(env);
+        try {
+          await runReconciler(env);
+        } catch (err) {
+          console.error(`scheduled: runReconciler failed: ${String(err)}`);
+        }
         await runReaper(env);
       })(),
     );
