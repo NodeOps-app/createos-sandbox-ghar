@@ -1,10 +1,8 @@
-# Multi-Tenant Plan 2a: Tenant Infrastructure Implementation Plan
+# Multi-Tenant Plan 2a: Tenant Infra (Flag-Gated) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land every multi-tenant building block that is **inert in single mode** — the reconcile.ts extraction, the `TENANCY_MODE` flag, the DO's tenant admission read + per-tenant cap + weight column, ledger billing at teardown, and per-tenant GitHub identity with the runner-group/check-run endpoints — so deploying this plan changes **nothing** in production. Plan 2b then wires them into the multi-mode webhook/reconciler runtime.
-
-**Scope note:** This is the first half of the original Plan 2, split at the infra/runtime seam (file-size rule). Tasks 1–5 here; the multi-mode webhook path, per-tenant TTL sweep, approval orchestration, multi-tenant reconciler, and the deploy checkpoint are Plan 2b (`2026-07-23-multi-tenant-plan-2b-tenant-runtime.md`). The Architecture paragraph below describes the full 2a+2b picture — this plan builds the parts, 2b connects them.
+**Goal:** Land the tenant-runtime **infrastructure** — reconcile extraction, tenancy flag, DO tenant admission + per-tenant cap, quota ledger, per-tenant GitHub identity + org endpoints — behind `TENANCY_MODE` defaulting to `single`, so deploying this plan changes **nothing** in production. The wiring that *uses* it (webhook gate ladder, per-tenant TTL, approval orchestration, multi-tenant reconciler, deploy checkpoint) is **Plan 2b**.
 
 **Architecture:** The webhook queued path in `multi` mode becomes: identify label (pure, filters ~all traffic free) → one DO read `admitTenantJob` (tenant status + project + quota balance in one RPC) → pure shape-ceiling check → cached catalog validate → `onQueued` carrying `{tenantId, weight, cap}`. Billing writes happen in the one place every teardown already confirms (`markDestroyed`), using a **weight persisted at admission time** (commit `11fb56c`) with the quota.ts label parse as fallback for old rows. Per-tenant GitHub identity rides the existing `credentialSession` registry (already keyed by installation id). The reconciler gains a tenant loop; the reaper reads per-tenant TTLs via SQL join. Refusal check runs are deduped to one per (repo, UTC day) via a DO insert-or-ignore.
 
@@ -12,6 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-22-multi-tenant-community-runners-design.md`
 **Builds on (shipped, verified 2026-07-23):** Plan 1 — `quota.ts` (fractional-vCPU, last-token, prefix-strip parse), `registry.ts` (writes throw on unknown tenant; `removeProject` returns count), `admin.ts` (full-record upsert stamps `approved_at/by` only on transition into approved; status route refuses `approved`), Coordinator `admin*` RPC, tables `tenants`/`projects`/`usage`, `jobs.tenant_id`.
+**Continues in:** `2026-07-23-multi-tenant-plan-2b-tenant-runtime.md`. **Task numbering is shared across the pair** — this file is Tasks 1–5, 2b is Tasks 6–10 — so cross-references like "Task 6/9 consume this" point into 2b, and 2b's "Task 3's `admitTenantJob`" points back here.
 
 ## Global Constraints
 
@@ -24,7 +23,6 @@
 - **The Coordinator stays passive** — no network, imports only `./types`, `./registry`, `./quota` (all import-free/types-only). It must NEVER import `shapes.ts`.
 - **Known harness trap (from Plan 1):** an exception crossing a real DO stub corrupts vitest-pool-workers isolated storage. Never let a DO method throw across a stub in tests — pre-check (as `admin.ts` does) or use `runInDurableObject`.
 - **Files < 1100 lines**; `handler.ts` must END this plan smaller than it starts (Task 1 extracts ~270 lines to `reconcile.ts`).
-- **Everything in this plan must be inert under `TENANCY_MODE=single`:** the flag parses but nothing branches on it yet (Plan 2b adds the branches); `admitTenantJob`/`shouldNotifyRefusal` exist but have no production caller; billing fires only on rows with a non-NULL `tenant_id`, which single mode never writes; the bandwidth read fires only on `TeardownTask.tenantId !== null`, likewise never in single mode; the `GitHubClient` tenant parameter has no production caller. Deploying 2a alone is a no-op by construction — the tests must prove the old suite green untouched.
 - **No silent bounds** — every new cap/skip/fallback `console.warn`s with identifiers and counts.
 - **Conventional Commits**, imperative ≤ 50 chars, atomic per task. Comment the why.
 - Tests that stub `listShapes` call `resetShapeCacheForTests()` in `beforeEach`; tests that inject fetch into GitHub clients call `resetCredentialSessionsForTests()`.
@@ -203,7 +201,7 @@ git commit -m "feat: add tenancy flag and webhook tenant fields"
 - Test: `test/integration/tenancy.test.ts` (new)
 
 **Interfaces:**
-- Produces (Plan 2b consumes):
+- Produces (Task 6/9 consume):
 
 ```typescript
 /** Tenant fields a provision needs — joined onto every PendingJob the DO returns. */
@@ -343,7 +341,7 @@ Column-guard block gains:
 LEFT JOIN tenants ON tenants.installation_id = jobs.tenant_id
 ```
 
-and maps `tenant: row.installation_id ? { installationId, orgLogin, runnerGroupId, allowAllRepos: allow_all_repos === 1 } : null`. Single query change per site; do them all in this task so the type change compiles everywhere at once (webhook-path construction sites in `handler.ts`/`admission.ts` set `tenant: null` for now — Plan 2b wires the real value).
+and maps `tenant: row.installation_id ? { installationId, orgLogin, runnerGroupId, allowAllRepos: allow_all_repos === 1 } : null`. Single query change per site; do them all in this task so the type change compiles everywhere at once (webhook-path construction sites in `handler.ts`/`admission.ts` set `tenant: null` for now — Task 6 wires the real value).
 
 - [ ] **Step 6: Tests** — `test/integration/tenancy.test.ts`:
 
@@ -460,7 +458,7 @@ git commit -m "feat: tenant admission read and per-tenant cap in DO"
 
 **Interfaces:**
 - Produces:
-  - `quota.dayKey(nowMs: number): string` → `"2026-07-23"` (UTC; Plan 2b's refusal dedup key)
+  - `quota.dayKey(nowMs: number): string` → `"2026-07-23"` (UTC; Task 6's refusal dedup key)
   - `TeardownTask.tenantId: number | null` — bandwidth is read at teardown **only** when non-null (cost gate)
   - `teardownSandbox(config, sandboxId, deps): Promise<number | null>` — egress `used_bytes`, null when unavailable/self-deleted
   - `markDestroyed(jobId: number, egressBytes?: number): Promise<void>` — writes the ledger before deleting the row
@@ -785,15 +783,3 @@ git commit -m "feat: per-tenant github identity and org endpoints"
 ```
 
 ---
-
-
-## Self-review checklist (run before handing off to Plan 2b)
-
-- Every `PendingJob` literal in src AND tests now has `tenant` — the compiler enforces; grep `test/helpers/fixtures.ts` too.
-- `admitTenantJob` numbers: unknown org costs 1 DO read; approved+ok costs ≤3 row reads. No writes on any path except the notice insert.
-- Full pre-existing suite green with zero test-body changes beyond the listed ones: import paths (Task 1), `TeardownTask.tenantId` fixture additions (Task 4), `PendingJob.tenant` additions (Task 3).
-- No production code path reaches any new function while `TENANCY_MODE=single` (rg for callers of `admitTenantJob`, `shouldNotifyRefusal`, `createRunnerGroup`, `createCheckRun` — test files only).
-
-## Continues in Plan 2b
-
-`2026-07-23-multi-tenant-plan-2b-tenant-runtime.md` — multi-mode webhook admission + provisioning + check runs, per-tenant TTL sweep, admin approval orchestration (runner group fail-closed), multi-tenant reconciler, docs + the flag-off deploy checkpoint.

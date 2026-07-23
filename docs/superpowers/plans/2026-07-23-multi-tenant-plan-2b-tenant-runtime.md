@@ -9,7 +9,7 @@
 **Tech Stack:** unchanged — CF Workers + DO SQLite, TypeScript, zod, vitest + pool-workers, bun.
 
 **Spec:** `docs/superpowers/specs/2026-07-22-multi-tenant-community-runners-design.md`
-**Builds on:** Plan 2a (`2026-07-23-multi-tenant-plan-2a-tenant-infra.md`) — MUST be merged first. Interfaces this plan consumes, exactly as 2a produced them:
+**Builds on:** Plan 2a (`2026-07-23-multi-tenant-plan-2a-tenant-infra.md`, Tasks 1–5) — MUST be merged first. **Task numbering continues from 2a: this file is Tasks 6–10**, so "Task 3's `admitTenantJob`" and "Task 5's `createRunnerGroup`" point into 2a. Interfaces consumed, exactly as 2a produces them:
 
 ```typescript
 // Coordinator (DO RPC)
@@ -43,7 +43,7 @@ Identical to Plan 2a — restated where they bind hardest here:
 
 ---
 
-### Task 1: Multi-mode webhook admission + provisioning + check runs
+### Task 6: Multi-mode webhook admission + provisioning + check runs
 
 **Files:**
 - Modify: `src/shapes.ts` (`shapeWithinCeiling`), `src/handler.ts` (queued path + `provisionAndRecord` + refusal notices), `src/sandbox.ts` (`createRunnerSandbox` bandwidth + tenant client)
@@ -53,7 +53,7 @@ Identical to Plan 2a — restated where they bind hardest here:
 - Consumes: everything in the Builds-on block.
 - Produces:
   - `shapeWithinCeiling(shape: string, ceiling: string): boolean` in `shapes.ts` — pure; **unparseable input returns false** (fail closed at a security gate) and warns.
-  - `admitAndDrive(env, config, job, ctx, deps, scope): Promise<string>` exported from `handler.ts` — the ONE multi-mode admission function; Task 4's reconciler reuses it verbatim (webhook/reconciler parity, same guarantee `admission.ts` gives single mode).
+  - `admitAndDrive(env, config, job, ctx, deps, scope): Promise<string>` exported from `handler.ts` — the ONE multi-mode admission function; Task 9's reconciler reuses it verbatim (webhook/reconciler parity, same guarantee `admission.ts` gives single mode).
 
 - [ ] **Step 1: `shapeWithinCeiling`** in `src/shapes.ts`:
 
@@ -298,7 +298,7 @@ git commit -m "feat: multi-tenant webhook admission and provisioning"
 
 ---
 
-### Task 2: Per-tenant job TTL in the sweep
+### Task 7: Per-tenant job TTL in the sweep
 
 **Files:**
 - Modify: `src/coordinator.ts` (`sweep`)
@@ -347,14 +347,14 @@ git commit -m "feat: per-tenant job TTL in reaper sweep"
 
 ---
 
-### Task 3: Admin approval orchestration — runner group fail-closed
+### Task 8: Admin approval orchestration — runner group fail-closed
 
 **Files:**
 - Modify: `src/admin.ts` (+ thread an optional `fetchImpl` param: `handleAdmin(req, env, fetchImpl?)` → `new GitHubClient(config, fetchImpl, …)`; production callers omit it — test seam only)
 - Test: `test/integration/admin.test.ts` (extend)
 
 **Interfaces:**
-- Consumes: `createRunnerGroup`, `setRunnerGroupRepos` (Plan 2a Task 5); the shipped approval-stamp logic in POST `/admin/tenants` (kept intact — `approved_at/by` still stamp only on transition into approved).
+- Consumes: `createRunnerGroup`, `setRunnerGroupRepos` (Task 5); the shipped approval-stamp logic in POST `/admin/tenants` (kept intact — `approved_at/by` still stamp only on transition into approved).
 - Produces: behavior only — no new routes.
 
 - [ ] **Step 1: Approval creates the group (D12, fail-closed)** — in POST `/admin/tenants`, after computing `enteringApproved` and before `adminUpsertTenant`:
@@ -406,14 +406,14 @@ git commit -m "feat: fail-closed runner group at tenant approval"
 
 ---
 
-### Task 4: Multi-tenant reconciler
+### Task 9: Multi-tenant reconciler
 
 **Files:**
 - Modify: `src/reconcile.ts`
 - Test: `test/integration/reconcile.test.ts` (extend)
 
 **Interfaces:**
-- Consumes: `adminListTenants`, tenant-scoped `GitHubClient`s, `admitAndDrive` (Task 1), `recoveryCursor`/`setRecoveryCursor`.
+- Consumes: `adminListTenants`, tenant-scoped `GitHubClient`s, `admitAndDrive` (Task 6), `recoveryCursor`/`setRecoveryCursor`.
 - Produces: `runReconciler` handles both modes; multi-mode cursor format is `JSON.stringify({ installationId, repo })` stored via the existing cursor methods.
 
 - [ ] **Step 1: Multi branch in `runReconciler`** — `single` keeps today's body verbatim. Multi:
@@ -563,7 +563,7 @@ git commit -m "feat: multi-tenant reconciler with shared budget"
 
 ---
 
-### Task 5: Docs + deploy checkpoint (flag off)
+### Task 10: Docs + deploy checkpoint (flag off)
 
 **Files:**
 - Modify: `CONTEXT.md`, `AGENTS.md`, `README.md`, `wrangler.toml`
@@ -594,7 +594,7 @@ git add -A && git commit -m "docs: document tenancy runtime surface"
 git push origin main                    # deploys with TENANCY_MODE=single — no behavior change
 ```
 
-Verify: `/health` ok; **Actions → ghar-test → Run workflow** green (DO schema changed in 2a — prove provisioning end-to-end); `wrangler tail` clean on a few webhook deliveries.
+Verify: `/health` ok; **Actions → ghar-test → Run workflow** green (DO schema changed in Task 3 — prove provisioning end-to-end); `wrangler tail` clean on a few webhook deliveries.
 
 - [ ] **Step 4: Rollback readiness** — `bunx wrangler@latest rollback <version-id>`; all schema changes additive.
 
@@ -605,4 +605,4 @@ Verify: `/health` ok; **Actions → ghar-test → Run workflow** green (DO schem
 - `admitAndDrive` is the ONLY multi-mode admission path — `rg 'admitTenantJob'` in src hits exactly coordinator (definition) + handler (one call inside `admitAndDrive`).
 - Check-run copy carries no secrets/internal ids; `conclusion: "neutral"` everywhere; notices fire only for label-carrying jobs.
 - Hot-path call counts match the Global Constraints table (count DO RPCs in the webhook test with a spy if in doubt).
-- Single-mode: entire pre-2a suite green with no test-body edits in this plan.
+- Single-mode: entire pre-2a suite green with no test-body edits (Task 1's import-path updates excepted).
