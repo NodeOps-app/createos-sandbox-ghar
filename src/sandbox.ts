@@ -186,6 +186,11 @@ export async function createRunnerSandbox(
     // GitHub (missed dispatch, 1-day deregistration). Omitting it disables
     // idle auto-pause; these VMs self-delete per job anyway.
     envs: { JIT_CONFIG: jitConfig },
+    // D15: community VMs get a per-VM egress quota; allow-all tenants
+    // (NodeOps) and single mode stay unmetered.
+    ...(job.tenant && !job.tenant.allowAllRepos
+      ? { bandwidth_quota_bytes: config.communityBandwidthBytes }
+      : {}),
   });
   const createMs = Date.now() - createStart;
 
