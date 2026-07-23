@@ -352,6 +352,7 @@ describe("GitHubClient tenant identity", () => {
   // file's suite already pins. These cover the tenant branch itself.
   it("tenant identity routes org paths and jit runner group", async () => {
     const calls: string[] = [];
+    let body: unknown;
     const f = mockFetch({
       "POST /app/installations/777/access_tokens": () =>
         new Response(
@@ -360,8 +361,9 @@ describe("GitHubClient tenant identity", () => {
             expires_at: new Date(Date.now() + 3_600_000).toISOString(),
           }),
         ),
-      "POST /orgs/acme/actions/runners/generate-jitconfig": (req) => {
+      "POST /orgs/acme/actions/runners/generate-jitconfig": async (req) => {
         calls.push(req.url);
+        body = await req.clone().json();
         return new Response(JSON.stringify({ encoded_jit_config: "jit" }));
       },
     });
@@ -372,6 +374,7 @@ describe("GitHubClient tenant identity", () => {
     });
     await c.generateJitConfig("cos-1-aa", "createos");
     expect(calls[0]).toContain("/orgs/acme/");
+    expect(body).toMatchObject({ runner_group_id: 42, name: "cos-1-aa", labels: ["createos"] });
   });
 
   it("createRunnerGroup adopts an existing group on 409", async () => {
