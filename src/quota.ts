@@ -25,7 +25,11 @@ export function monthKey(nowMs: number): string {
 // count 10x too high instead of failing to match. `(?:\.\d+)?` only extends a
 // match that already started at the first digit, so it can't itself start
 // mid-number the way the old bare `\d+` did.
-const VCPU_RE = /(\d+(?:\.\d+)?)vcpu/;
+// Match the LAST vcpu token: the shape suffix is always last, so a stale label
+// carrying an old prefix ("ci-16vcpu-2vcpu-2gb" after a RUNNER_LABEL rename)
+// bills its shape, not its prefix. Belt-and-braces under the Plan 2 fix that
+// bills from a shape persisted at provision time.
+const VCPU_RE = /(\d+(?:\.\d+)?)vcpu(?!.*vcpu)/;
 
 /**
  * The billing weight of the shape a runner label names. The bare label bills

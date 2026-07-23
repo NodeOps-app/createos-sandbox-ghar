@@ -53,6 +53,13 @@ describe("weightForLabel", () => {
     expect(weightForLabel("createos-2vcpu-2gb", "createos-2", DEF)).toBe(1);
   });
 
+  it("bills the LAST vcpu token, not the stale prefix's, after a RUNNER_LABEL rename", () => {
+    // Regression: VCPU_RE.exec returns the FIRST match, so an unanchored regex
+    // read "16vcpu" out of the old prefix instead of "2vcpu" out of the actual
+    // shape suffix — an 8x overbill (weight 8 instead of 1).
+    expect(weightForLabel("ci-16vcpu-2vcpu-2gb", "createos", DEF)).toBe(1);
+  });
+
   it("best-effort parses a stale-prefix label matching neither the bare label nor the current prefix", () => {
     // Simulates a RUNNER_LABEL rename mid-flight (see AGENTS.md): a persisted
     // jobs.label ("gha-2vcpu-2gb") carries the *old* prefix, which matches
