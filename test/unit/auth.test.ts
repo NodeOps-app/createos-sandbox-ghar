@@ -110,4 +110,18 @@ describe("credentialSession registry", () => {
     resetCredentialSessionsForTests();
     expect(credentialSession(cfg())).not.toBe(first);
   });
+
+  it("keys the session on the installation id override, not config's", () => {
+    // A tenant client mints under ITS installation, so two overrides must be
+    // distinct sessions even though `cfg()`'s own installationId never changes.
+    const a = credentialSession(cfg(), fetch, "111");
+    const b = credentialSession(cfg(), fetch, "222");
+    expect(a).not.toBe(b);
+  });
+
+  it("shares a session for the same installation id override", () => {
+    const a = credentialSession(cfg(), fetch, "111");
+    const b = credentialSession(cfg(), fetch, "111");
+    expect(a).toBe(b);
+  });
 });

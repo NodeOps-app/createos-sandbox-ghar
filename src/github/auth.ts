@@ -92,14 +92,16 @@ const sessions = new Map<string, TokenCache>();
 export function credentialSession(
   config: Config,
   fetchImpl: FetchLike = fetch.bind(globalThis),
+  installationId?: string,
 ): TokenCache {
-  const key = `${config.githubAppId}|${config.githubInstallationId}|${config.githubApiUrl}`;
+  const effective = installationId ?? config.githubInstallationId;
+  const key = `${config.githubAppId}|${effective}|${config.githubApiUrl}`;
   let s = sessions.get(key);
   if (!s) {
     s = new TokenCache(
       config.githubAppId,
       config.githubAppPrivateKeyPkcs8,
-      config.githubInstallationId,
+      effective,
       config.githubApiUrl,
       fetchImpl,
     );

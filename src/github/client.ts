@@ -10,6 +10,20 @@ type RepoLite = { full_name?: string };
 type RunLite = { id?: number; status?: string };
 type JobLite = { id?: number; status?: string; labels?: string[] };
 
+/**
+ * A tenant identity for a GitHubClient to act as, instead of the single-tenant
+ * app-wide config: its own org, its own installation (so tokens mint scoped to
+ * that tenant's repos), and optionally its own runner group. Nothing constructs
+ * a GitHubClient with one yet — this is plumbing for the tenant registry
+ * (Plan 2b) to wire in later; single-mode (no tenant) stays byte-for-byte
+ * identical.
+ */
+export interface GitHubTenant {
+  orgLogin: string;
+  installationId: number;
+  runnerGroupId?: number | null;
+}
+
 export class GitHubClient {
   #tokens: TokenCache;
   #subrequests = 0;
@@ -18,11 +32,22 @@ export class GitHubClient {
     // Bound to globalThis so `this.fetchImpl(...)` keeps fetch's own `this`
     // (Workers throws Illegal invocation otherwise).
     private fetchImpl: FetchLike = fetch.bind(globalThis),
+    private tenant?: GitHubTenant,
   ) {
     // Shared per-credential session (warm-isolate), not a fresh cache per client:
     // a recovery tick minting N runners and every warm webhook provision now reuse
-    // one token + one RSA sign until it nears expiry. See credentialSession.
-    this.#tokens = credentialSession(config, fetchImpl);
+    // one token + one RSA sign until it nears expiry. See credentialSession. A
+    // tenant mints under ITS installation id, never the app-wide default.
+    this.#tokens = credentialSession(
+      config,
+      fetchImpl,
+      tenant ? String(tenant.installationId) : undefined,
+    );
+  }
+
+  /** The org this client acts on: the tenant's, or the single-tenant default. */
+  get #org(): string {
+    return this.tenant?.orgLogin ?? this.config.githubOrg;
   }
 
   async #headers(): Promise<HeadersInit> {
@@ -46,13 +71,13 @@ export class GitHubClient {
    */
   async generateJitConfig(runnerName: string, label: string): Promise<string> {
     const res = await this.fetchImpl(
-      `${this.config.githubApiUrl}/orgs/${this.config.githubOrg}/actions/runners/generate-jitconfig`,
+      `${this.config.githubApiUrl}/orgs/${this.#org}/actions/runners/generate-jitconfig`,
       {
         method: "POST",
         headers: await this.#headers(),
         body: JSON.stringify({
           name: runnerName,
-          runner_group_id: this.config.runnerGroupId,
+          runner_group_id: this.tenant?.runnerGroupId ?? this.config.runnerGroupId,
           labels: [label],
           work_folder: "_work",
         }),
@@ -197,7 +222,7 @@ export class GitHubClient {
    */
   async listRunners(): Promise<Runner[]> {
     const runners = await this.#getPaged<RunnerLite>(
-      `/orgs/${this.config.githubOrg}/actions/runners`,
+      `/orgs/${this.#org}/actions/runners`,
       "runners",
       true,
     );
@@ -240,12 +265,89 @@ export class GitHubClient {
    */
   async deleteRunner(id: number): Promise<void> {
     const res = await this.fetchImpl(
-      `${this.config.githubApiUrl}/orgs/${this.config.githubOrg}/actions/runners/${id}`,
+      `${this.config.githubApiUrl}/orgs/${this.#org}/actions/runners/${id}`,
       { method: "DELETE", headers: await this.#headers() },
     );
     if (!res.ok && res.status !== 404) {
       throw new Error(`delete runner ${id} failed: ${res.status} ${await res.text()}`);
     }
+  }
+
+  /** Creates (or idempotently adopts) the org's selected-visibility runner
+   * group. Gate 3: the GitHub-side execution boundary. */
+  async createRunnerGroup(name: string, repoIds: number[]): Promise<number> {
+    const res = await this.fetchImpl(
+      `${this.config.githubApiUrl}/orgs/${this.#org}/actions/runner-groups`,
+      {
+        method: "POST",
+        headers: await this.#headers(),
+        body: JSON.stringify({
+          name,
+          visibility: "selected",
+          selected_repository_ids: repoIds,
+        }),
+      },
+    );
+    if (res.ok) return ((await res.json()) as { id: number }).id;
+    if (res.status === 409 || res.status === 422) {
+      // Name already exists (an earlier approval attempt died mid-way):
+      // adopt it and converge its repo list instead of failing the approval.
+      const existing = await this.#findRunnerGroup(name);
+      if (existing !== null) {
+        await this.setRunnerGroupRepos(existing, repoIds);
+        return existing;
+      }
+    }
+    throw new Error(`create runner group failed: ${res.status} ${await res.text()}`);
+  }
+
+  async #findRunnerGroup(name: string): Promise<number | null> {
+    const res = await this.fetchImpl(
+      `${this.config.githubApiUrl}/orgs/${this.#org}/actions/runner-groups?per_page=100`,
+      { method: "GET", headers: await this.#headers() },
+    );
+    if (!res.ok) return null;
+    const body = (await res.json()) as { runner_groups?: { id?: number; name?: string }[] };
+    return body.runner_groups?.find((g) => g.name === name)?.id ?? null;
+  }
+
+  async setRunnerGroupRepos(groupId: number, repoIds: number[]): Promise<void> {
+    const res = await this.fetchImpl(
+      `${this.config.githubApiUrl}/orgs/${this.#org}/actions/runner-groups/${groupId}/repositories`,
+      {
+        method: "PUT",
+        headers: await this.#headers(),
+        body: JSON.stringify({ selected_repository_ids: repoIds }),
+      },
+    );
+    if (!res.ok) {
+      throw new Error(`set runner group repos failed: ${res.status} ${await res.text()}`);
+    }
+  }
+
+  /** Refusal notice on the tenant's commit. conclusion=neutral on purpose:
+   * inform without failing their CI. */
+  async createCheckRun(
+    repoFullName: string,
+    headSha: string,
+    title: string,
+    summary: string,
+  ): Promise<void> {
+    const res = await this.fetchImpl(
+      `${this.config.githubApiUrl}/repos/${repoFullName}/check-runs`,
+      {
+        method: "POST",
+        headers: await this.#headers(),
+        body: JSON.stringify({
+          name: "createos-runners",
+          head_sha: headSha,
+          status: "completed",
+          conclusion: "neutral",
+          output: { title, summary },
+        }),
+      },
+    );
+    if (!res.ok) throw new Error(`check run failed: ${res.status} ${await res.text()}`);
   }
 
   /**

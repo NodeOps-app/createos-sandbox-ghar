@@ -345,3 +345,55 @@ describe("GitHubClient.isForkJob", () => {
     );
   });
 });
+
+describe("GitHubClient tenant identity", () => {
+  // All inert until Plan 2b wires a tenant into the constructor: single-mode
+  // (no tenant) must stay byte-for-byte unchanged, which the rest of this
+  // file's suite already pins. These cover the tenant branch itself.
+  it("tenant identity routes org paths and jit runner group", async () => {
+    const calls: string[] = [];
+    const f = mockFetch({
+      "POST /app/installations/777/access_tokens": () =>
+        new Response(
+          JSON.stringify({
+            token: "t",
+            expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+          }),
+        ),
+      "POST /orgs/acme/actions/runners/generate-jitconfig": (req) => {
+        calls.push(req.url);
+        return new Response(JSON.stringify({ encoded_jit_config: "jit" }));
+      },
+    });
+    const c = new GitHubClient(await cfg(), f, {
+      orgLogin: "acme",
+      installationId: 777,
+      runnerGroupId: 42,
+    });
+    await c.generateJitConfig("cos-1-aa", "createos");
+    expect(calls[0]).toContain("/orgs/acme/");
+  });
+
+  it("createRunnerGroup adopts an existing group on 409", async () => {
+    const put: string[] = [];
+    const f = mockFetch({
+      "POST /app/installations": () =>
+        new Response(
+          JSON.stringify({
+            token: "t",
+            expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+          }),
+        ),
+      "POST /orgs/acme/actions/runner-groups": () => new Response("exists", { status: 409 }),
+      "GET /orgs/acme/actions/runner-groups?per_page=100": () =>
+        new Response(JSON.stringify({ runner_groups: [{ id: 42, name: "createos" }] })),
+      "PUT /orgs/acme/actions/runner-groups/42/repositories": (req) => {
+        put.push(req.url);
+        return new Response(null, { status: 204 });
+      },
+    });
+    const c = new GitHubClient(await cfg(), f, { orgLogin: "acme", installationId: 777 });
+    expect(await c.createRunnerGroup("createos", [1, 2])).toBe(42);
+    expect(put).toHaveLength(1);
+  });
+});
