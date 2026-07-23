@@ -42,6 +42,12 @@ RECONCILE_GRACE_MS = "180000"
 # under the Free-plan 50-subrequest cap; the reaper/orphan sweeps keep their own
 # mutation caps. Raise once installed repos routinely exceed ~budget/2.
 RECOVERY_SUBREQUEST_BUDGET = "30"
+# Multi-tenancy master switch. "single" = pre-tenant behavior. Flipping to
+# "multi" is the Plan 3 cutover — do not flip without the cutover runbook.
+TENANCY_MODE = "single"
+# Per-VM egress quota for community tenants (bytes). 100 GB.
+COMMUNITY_VM_BANDWIDTH_BYTES = "107374182400"
+APPLY_FORM_URL = ""
 
 # Secrets are set via `wrangler secret put` (never commit values here):
 # wrangler secret put GITHUB_APP_ID
