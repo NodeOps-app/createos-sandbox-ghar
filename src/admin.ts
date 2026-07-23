@@ -65,7 +65,14 @@ const TenantBody = z.object({
   approved_by: z.string().max(100).nullable(),
 });
 
-const StatusBody = z.object({ installation_id: SafeId, status: Status });
+const StatusBody = z.object({
+  installation_id: SafeId,
+  // Approval is deliberately NOT settable here: only the full upsert stamps
+  // approved_at/approved_by, and this route only ever calls
+  // adminSetTenantStatus, which updates status alone — accepting "approved"
+  // here would misrecord an approval with no audit trail (fix wave 4).
+  status: z.enum(["pending", "suspended", "revoked"]),
+});
 
 const ProjectsBody = z.object({
   installation_id: SafeId,
