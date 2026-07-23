@@ -63,7 +63,9 @@ describe("reaper", () => {
     await singleton.onCompleted(902, runnerName(902));
 
     const destroy = vi.fn().mockResolvedValue({ id: "sb_902", status: "destroying" });
-    const getSandbox = vi.fn().mockResolvedValue({ destroy });
+    const getSandbox = vi
+      .fn()
+      .mockResolvedValue({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) });
     // runReaper unconditionally threads deps through provisionAndRecord too,
     // for any pending job a freed slot promotes — none here, so this never
     // fires, but the type still requires createSandbox/listShapes present.
@@ -106,7 +108,7 @@ describe("markProvisionFailed disposes of the VM it left behind", () => {
 
     const { toDestroy } = await s.markProvisionFailed(940, "sb_940");
 
-    expect(toDestroy).toEqual({ jobId: 940, sandboxId: "sb_940" });
+    expect(toDestroy).toEqual({ jobId: 940, sandboxId: "sb_940", tenantId: null });
     expect(await s.activeCount()).toBe(0); // destroying does not hold a slot
     // The row survives, so an unconfirmed teardown is retried rather than lost.
     expect(ids(await s.sweep(Date.now(), 3_600_000))).toContain("sb_940");
@@ -118,7 +120,7 @@ describe("markProvisionFailed disposes of the VM it left behind", () => {
 
     const { toDestroy } = await s.markProvisionFailed(941, "sb_941");
 
-    expect(toDestroy).toEqual({ jobId: 941, sandboxId: "sb_941" });
+    expect(toDestroy).toEqual({ jobId: 941, sandboxId: "sb_941", tenantId: null });
     expect(ids(await s.sweep(Date.now(), 3_600_000))).toContain("sb_941");
   });
 
@@ -141,7 +143,7 @@ describe("markProvisionFailed disposes of the VM it left behind", () => {
     // The Worker still holds a live VM. Nothing to persist against, but it must
     // come back to be destroyed rather than be silently forgotten.
     const { toDestroy } = await s.markProvisionFailed(943, "sb_943");
-    expect(toDestroy).toEqual({ jobId: 943, sandboxId: "sb_943" });
+    expect(toDestroy).toEqual({ jobId: 943, sandboxId: "sb_943", tenantId: null });
   });
 });
 

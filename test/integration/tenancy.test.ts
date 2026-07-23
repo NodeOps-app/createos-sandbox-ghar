@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import type { TenantRecord } from "../../src/types";
 
@@ -87,5 +87,47 @@ describe("shouldNotifyRefusal", () => {
     expect(await s.shouldNotifyRefusal(1, "o/r", "2026-07-23")).toBe(true);
     expect(await s.shouldNotifyRefusal(1, "o/r", "2026-07-23")).toBe(false);
     expect(await s.shouldNotifyRefusal(1, "o/r", "2026-07-24")).toBe(true);
+  });
+});
+
+describe("ledger", () => {
+  it("bills tenant total + repo attribution on destroy; no bill when never booted", async () => {
+    const s = stub("led-" + Math.random());
+    await s.adminUpsertTenant(approved(1, { concurrencyCap: 5 }));
+    await s.onQueued(job(11, 1), "d1", ctx(1, 5));
+    await s.recordSandboxCreated(11, "sb1", "cos-11-aa");
+    await s.markRunning(11);
+    await s.onCompleted(11, "cos-11-aa");
+    await s.markDestroyed(11, 5_000);
+
+    // never-booted row: queued then failed before createSandbox
+    await s.onQueued(job(12, 1), "d2", ctx(1, 5));
+    await s.markProvisionFailed(12);
+
+    await runInDurableObject(s, async (_i, state) => {
+      const rows = state.storage.sql
+        .exec(
+          `SELECT repo_full_name, weighted_minutes, egress_bytes FROM usage ORDER BY repo_full_name`,
+        )
+        .toArray();
+      expect(rows).toHaveLength(2); // "" total + org1/app — nothing from job 12
+      expect(rows[0]!.repo_full_name).toBe("");
+      expect(rows[0]!.egress_bytes).toBe(5_000);
+      expect(rows[0]!.weighted_minutes as number).toBeGreaterThanOrEqual(0);
+      expect(rows[1]!.repo_full_name).toBe("org1/app");
+    });
+  });
+
+  it("admitTenantJob sees the spent balance", async () => {
+    const s = stub("led-bal-" + Math.random());
+    await s.adminUpsertTenant(approved(1, { allowAllRepos: true }));
+    await runInDurableObject(s, async (_i, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO usage (installation_id, month, repo_full_name, weighted_minutes, egress_bytes)
+         VALUES (1, '2026-07', '', 999, 0)`,
+      );
+    });
+    const ok = await s.admitTenantJob(1, "org1/x", "2026-07");
+    expect(ok.kind === "ok" && ok.usedMinutes).toBe(999);
   });
 });

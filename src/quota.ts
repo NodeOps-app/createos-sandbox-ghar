@@ -17,6 +17,12 @@ export function monthKey(nowMs: number): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
+/** The UTC calendar-day bucket: "2026-07-23". Refusal-notice dedup key. */
+export function dayKey(nowMs: number): string {
+  const d = new Date(nowMs);
+  return `${monthKey(nowMs)}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
 // Requires the decimal point immediately after the leading digits, so the
 // match anchors at the *start* of a fractional count instead of a suffix of
 // one: real createos shapes include fractional vCPU counts (s-0.5vcpu-1gb,

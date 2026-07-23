@@ -277,7 +277,9 @@ describe("launchRunner", () => {
 describe("teardownSandbox", () => {
   it("destroys an existing sandbox", async () => {
     const destroy = vi.fn().mockResolvedValue({ id: "sb_1", status: "destroying" });
-    const getSandbox = vi.fn().mockResolvedValue({ destroy });
+    const getSandbox = vi
+      .fn()
+      .mockResolvedValue({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) });
     await teardownSandbox(config, "sb_1", {
       makeClient: () => ({
         getSandbox,
@@ -304,7 +306,7 @@ describe("teardownSandbox", () => {
           listSandboxes: vi.fn().mockResolvedValue([]),
         }),
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeNull();
   });
 
   it("rethrows other errors", async () => {

@@ -24,10 +24,12 @@ import {
   setTenantStatus,
   upsertTenant,
 } from "./registry";
+import { monthKey, weightForLabel } from "./quota";
 
 interface Env {
   MAX_CONCURRENT: string;
   RUNNER_LABEL: string;
+  RUNNER_SHAPE: string;
 }
 
 type Row = {
@@ -296,7 +298,7 @@ export class Coordinator extends DurableObject<Env> {
       sandboxId,
       row.job_id,
     );
-    return { jobId: row.job_id, sandboxId };
+    return { jobId: row.job_id, sandboxId, tenantId: row.tenant_id ?? null };
   }
 
   /** Deduplicates by webhook delivery id. Returns true if this delivery is new. */
@@ -447,7 +449,9 @@ export class Coordinator extends DurableObject<Env> {
       // A raced `completed` already dropped the row, but we hold a live VM. There
       // is nothing left to persist the teardown against, so hand it back to be
       // destroyed now and let the orphaned-sandbox sweep backstop a failure.
-      toDestroy = { jobId, sandboxId: vm };
+      // The row is gone, so its tenant is unknowable — null skips the egress
+      // read rather than guessing at a cost attribution that no longer exists.
+      toDestroy = { jobId, sandboxId: vm, tenantId: null };
     }
     return { toDestroy, nextPending: this.#dequeuePending() };
   }
@@ -473,8 +477,45 @@ export class Coordinator extends DurableObject<Env> {
     return { toDestroy, nextPending: this.#dequeuePending() };
   }
 
-  /** Confirms a VM was destroyed: removes its `destroying` row. */
-  async markDestroyed(jobId: number): Promise<void> {
+  /**
+   * Confirms a VM was destroyed: bills its lifetime to the ledger, then
+   * removes its `destroying` row. The ONE point every teardown path (webhook,
+   * reaper, reconciler, provision-failure) funnels through, so this is where
+   * D9 bills VM lifetime (booted_at → destroy confirmation). A row that never
+   * booted ran no VM and bills nothing. Weight was persisted at admission
+   * (11fb56c); a NULL weight is a pre-migration row — fall back to the label
+   * parse. Billing reads the row BEFORE the guarded DELETE removes it, so a
+   * redelivered markDestroyed finds no row and bills nothing a second time.
+   */
+  async markDestroyed(jobId: number, egressBytes?: number): Promise<void> {
+    const rows = this.#sql.exec(`SELECT * FROM jobs WHERE job_id = ?`, jobId).toArray() as Row[];
+    const row = rows[0];
+    if (row?.tenant_id && row.booted_at) {
+      const weight =
+        row.weight ??
+        weightForLabel(
+          row.label ?? this.env.RUNNER_LABEL,
+          this.env.RUNNER_LABEL,
+          this.env.RUNNER_SHAPE,
+        );
+      const minutes = (Math.max(0, Date.now() - row.booted_at) / 60_000) * weight;
+      const month = monthKey(Date.now());
+      const bill = (repo: string, egress: number) =>
+        this.#sql.exec(
+          `INSERT INTO usage (installation_id, month, repo_full_name, weighted_minutes, egress_bytes)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(installation_id, month, repo_full_name) DO UPDATE SET
+             weighted_minutes = weighted_minutes + excluded.weighted_minutes,
+             egress_bytes = egress_bytes + excluded.egress_bytes`,
+          row.tenant_id,
+          month,
+          repo,
+          minutes,
+          egress,
+        );
+      bill("", egressBytes ?? 0); // tenant total — the enforcement row
+      bill(row.repo, egressBytes ?? 0); // per-Project attribution (D3)
+    }
     this.#sql.exec(`DELETE FROM jobs WHERE job_id = ? AND state = 'destroying'`, jobId);
   }
 

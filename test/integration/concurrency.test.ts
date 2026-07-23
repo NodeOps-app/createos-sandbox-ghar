@@ -29,7 +29,7 @@ describe("concurrency cap (MAX_CONCURRENT=2)", () => {
     expect(await s.activeCount()).toBe(2);
 
     const res = await s.onCompleted(1, runnerName(1));
-    expect(res.toDestroy).toEqual({ jobId: 1, sandboxId: "sb1" });
+    expect(res.toDestroy).toEqual({ jobId: 1, sandboxId: "sb1", tenantId: null });
     expect(res.nextPending?.jobId).toBe(3); // slot freed → dequeue pending
   });
 

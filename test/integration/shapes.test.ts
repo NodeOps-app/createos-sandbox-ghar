@@ -126,7 +126,7 @@ describe("shape labels end-to-end", () => {
       makeClient: () => ({
         createSandbox,
         listShapes: async () => shapeCatalog(),
-        getSandbox: async () => ({ destroy }),
+        getSandbox: async () => ({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) }),
         listSandboxes: async () => [],
       }),
     };
@@ -148,7 +148,7 @@ describe("shape labels end-to-end", () => {
         listShapes: async () => {
           throw new Error("503");
         },
-        getSandbox: async () => ({ destroy }),
+        getSandbox: async () => ({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) }),
         listSandboxes: async () => [],
       }),
     };
@@ -242,7 +242,7 @@ describe("shape labels end-to-end", () => {
     });
     const completeDeps = {
       makeClient: () => ({
-        getSandbox: async () => ({ destroy }),
+        getSandbox: async () => ({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) }),
         createSandbox: promoteCreate,
         listShapes: async () => shapeCatalog(),
         listSandboxes: async () => [],

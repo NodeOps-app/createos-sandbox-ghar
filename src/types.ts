@@ -170,6 +170,9 @@ export interface PendingJob {
 export interface TeardownTask {
   jobId: number;
   sandboxId: string;
+  /** Tenant owning this VM (multi mode); null for single-mode rows — the
+   * bandwidth-read cost gate at teardown keys on this. */
+  tenantId: number | null;
 }
 
 /**

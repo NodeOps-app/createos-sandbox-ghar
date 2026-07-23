@@ -310,12 +310,12 @@ function logSpawnTimeline(t: SpawnTimeline): void {
 export async function destroyAndConfirm(
   env: Bindings,
   config: Config,
-  task: { jobId: number; sandboxId: string },
+  task: { jobId: number; sandboxId: string; tenantId: number | null },
   deps: SandboxDeps,
 ): Promise<void> {
   try {
-    await teardownSandbox(config, task.sandboxId, deps);
-    await coordinator(env).markDestroyed(task.jobId);
+    const egress = await teardownSandbox(config, task.sandboxId, deps, task.tenantId !== null);
+    await coordinator(env).markDestroyed(task.jobId, egress ?? undefined);
   } catch (err) {
     console.error(`teardown failed sandbox=${task.sandboxId} job=${task.jobId}: ${String(err)}`);
     await notify(
