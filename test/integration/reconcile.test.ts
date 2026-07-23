@@ -1,6 +1,6 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { runReconciler } from "../../src/handler";
+import { runReconciler } from "../../src/reconcile";
 import { resetShapeCacheForTests } from "../../src/shapes";
 import { resetCredentialSessionsForTests } from "../../src/github/auth";
 import { shapeCatalog, runnerName } from "../helpers/mocks";

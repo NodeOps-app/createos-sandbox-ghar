@@ -6,7 +6,8 @@ import {
 } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CreateosSandboxValidationError } from "@nodeops-createos/sandbox";
-import { handleWebhook, runReconciler } from "../../src/handler";
+import { handleWebhook } from "../../src/handler";
+import { runReconciler } from "../../src/reconcile";
 import type { SandboxDeps } from "../../src/createos";
 import { resetShapeCacheForTests } from "../../src/shapes";
 import { sign, workflowJobPayload } from "../helpers/fixtures";

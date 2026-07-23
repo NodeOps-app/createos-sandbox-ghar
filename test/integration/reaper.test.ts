@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { runnerName } from "../helpers/mocks";
 import { describe, it, expect, vi } from "vitest";
-import { runReaper } from "../../src/handler";
+import { runReaper } from "../../src/reconcile";
 
 type Stub = ReturnType<typeof env.COORDINATOR.get>;
 async function boot(s: Stub, jobId: number, sandboxId: string) {
