@@ -1,6 +1,6 @@
 # AGENTS.md — createos-sandbox-ghar
 
-Contributor guide for humans and coding agents (Claude Code, Codex, Cursor, …). `CLAUDE.md` is a symlink to this file — one source of truth. Read this before editing.
+Contributor guide for humans and coding agents (Claude Code, Codex, Cursor, …). `CLAUDE.md` is a symlink to this file — one source of truth. Read this before editing. this repo is public and open-source
 
 ## What this is
 
