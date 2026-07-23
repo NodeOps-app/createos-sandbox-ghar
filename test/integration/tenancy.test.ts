@@ -131,3 +131,20 @@ describe("ledger", () => {
     expect(ok.kind === "ok" && ok.usedMinutes).toBe(999);
   });
 });
+
+describe("per-tenant TTL", () => {
+  it("reaps a short-TTL tenant's row at its own bound, not the global one", async () => {
+    const s = stub("ttl-" + Math.random());
+    await s.adminUpsertTenant(approved(1, { jobTtlMs: 60_000, concurrencyCap: 5 }));
+    await s.onQueued(job(11, 1), "d1", ctx(1, 5));
+    await s.recordSandboxCreated(11, "sb1", "cos-11-aa");
+    await s.markRunning(11);
+    const t0 = Date.now();
+
+    let res = await s.sweep(t0 + 30_000, 3_600_000);
+    expect(res.toDestroy).toHaveLength(0); // under both bounds
+
+    res = await s.sweep(t0 + 120_000, 3_600_000);
+    expect(res.toDestroy.map((t) => t.jobId)).toEqual([11]); // over tenant TTL, under global
+  });
+});
