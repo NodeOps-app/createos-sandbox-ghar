@@ -488,8 +488,7 @@ export class Coordinator extends DurableObject<Env> {
    * redelivered markDestroyed finds no row and bills nothing a second time.
    */
   async markDestroyed(jobId: number, egressBytes?: number): Promise<void> {
-    const rows = this.#sql.exec(`SELECT * FROM jobs WHERE job_id = ?`, jobId).toArray() as Row[];
-    const row = rows[0];
+    const row = this.#rowByJob(jobId);
     if (row?.tenant_id && row.booted_at) {
       const weight =
         row.weight ??
