@@ -129,10 +129,28 @@ describe("admin API", () => {
     expect(tenants.some((t) => t.installationId === 501 && t.status === "pending")).toBe(true);
 
     const flip = await handleAdmin(
-      req("POST", "/admin/tenants/status", { installation_id: 501, status: "approved" }),
+      req("POST", "/admin/tenants/status", { installation_id: 501, status: "suspended" }),
       B,
     );
     expect(flip.status).toBe(200);
+  });
+
+  // Fix wave 4: approval must have exactly one path — the full upsert, which
+  // stamps approved_at/approved_by. This route only calls
+  // adminSetTenantStatus (status column only), so zod must reject "approved"
+  // before it ever reaches the DO, leaving the tenant's status untouched.
+  it("400s a status-route approval attempt, leaving status untouched", async () => {
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 514 })), B);
+    const res = await handleAdmin(
+      req("POST", "/admin/tenants/status", { installation_id: 514, status: "approved" }),
+      B,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toHaveProperty("error");
+
+    const list = await handleAdmin(req("GET", "/admin/tenants"), B);
+    const tenants = (await list.json()) as TenantRecord[];
+    expect(tenants.find((t) => t.installationId === 514)?.status).toBe("pending");
   });
 
   it("400s an invalid body with zod issues", async () => {
