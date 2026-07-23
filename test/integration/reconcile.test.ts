@@ -21,6 +21,7 @@ const job = (id: number) => ({
   runId: id,
   repoFullName: "nodeops-app/api",
   label: "createos",
+  tenant: null,
 });
 async function boot(s: Stub, jobId: number, sandboxId: string) {
   await s.recordSandboxCreated(jobId, sandboxId, runnerName(jobId));

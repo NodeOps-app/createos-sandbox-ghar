@@ -11,6 +11,7 @@ const job = (jobId: number) => ({
   runId: jobId * 10,
   repoFullName: "nodeops-app/api",
   label: "createos",
+  tenant: null,
 });
 
 /** Drives a provisioning row to `running`, the way the Worker does post-boot. */
@@ -76,6 +77,7 @@ describe("Coordinator cancellation + redelivery", () => {
     runId: jobId,
     repoFullName: "nodeops-app/api",
     label: "createos",
+    tenant: null,
   });
   function stub() {
     return env.COORDINATOR.get(env.COORDINATOR.idFromName("cancel-" + Math.random()));

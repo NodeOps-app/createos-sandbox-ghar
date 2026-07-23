@@ -72,6 +72,36 @@ export interface ProjectRecord {
   addedAt: number;
 }
 
+/** Tenant fields a provision needs — joined onto every PendingJob the DO returns. */
+export interface PendingTenant {
+  installationId: number;
+  orgLogin: string;
+  runnerGroupId: number | null;
+  allowAllRepos: boolean;
+}
+
+/** DO → Worker: one-read tenant admission (gates 1, 2, and the quota balance). */
+export type TenantAdmission =
+  | { kind: "unknown-tenant" }
+  | { kind: "not-approved"; status: TenantStatus }
+  | { kind: "repo-not-approved"; orgLogin: string }
+  | {
+      kind: "ok";
+      tenant: PendingTenant;
+      concurrencyCap: number;
+      maxShape: string;
+      minuteGrant: number;
+      usedMinutes: number;
+      jobTtlMs: number;
+    };
+
+/** Worker → DO alongside onQueued in multi mode. */
+export interface TenantCtx {
+  tenantId: number;
+  weight: number; // billing weight persisted on the row (11fb56c)
+  cap: number; // the tenant's concurrency cap, pre-read by admitTenantJob
+}
+
 /** The subset of a workflow_job webhook the controller acts on. */
 export interface WorkflowJob {
   action: "queued" | "in_progress" | "completed" | "waiting";
@@ -128,6 +158,8 @@ export interface PendingJob {
    * register under exactly this label (see ADR-0004).
    */
   label: string;
+  /** Tenant owning this job (multi mode); null for single-mode rows. */
+  tenant: PendingTenant | null;
 }
 
 /**

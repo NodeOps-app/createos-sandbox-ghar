@@ -15,7 +15,7 @@ describe("reaper", () => {
   it("sweep returns VMs of jobs older than the cutoff", async () => {
     const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("reap-" + Math.random()));
     await s.onQueued(
-      { jobId: 900, runId: 900, repoFullName: "nodeops-app/api", label: "createos" },
+      { jobId: 900, runId: 900, repoFullName: "nodeops-app/api", label: "createos", tenant: null },
       "d1",
     );
     await boot(s, 900, "sb_orphan");
@@ -30,7 +30,7 @@ describe("reaper", () => {
   it("sweep leaves fresh rows alone", async () => {
     const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("reap2-" + Math.random()));
     await s.onQueued(
-      { jobId: 901, runId: 901, repoFullName: "nodeops-app/api", label: "createos" },
+      { jobId: 901, runId: 901, repoFullName: "nodeops-app/api", label: "createos", tenant: null },
       "d2",
     );
     await boot(s, 901, "sb_fresh");
@@ -42,7 +42,7 @@ describe("reaper", () => {
   it("sweep retries unconfirmed teardowns (destroying rows)", async () => {
     const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("reap3-" + Math.random()));
     await s.onQueued(
-      { jobId: 903, runId: 903, repoFullName: "nodeops-app/api", label: "createos" },
+      { jobId: 903, runId: 903, repoFullName: "nodeops-app/api", label: "createos", tenant: null },
       "d4",
     );
     await boot(s, 903, "sb_903");
@@ -55,7 +55,7 @@ describe("reaper", () => {
   it("runReaper tears down swept VMs and confirms them (singleton DO)", async () => {
     const singleton = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
     await singleton.onQueued(
-      { jobId: 902, runId: 902, repoFullName: "nodeops-app/api", label: "createos" },
+      { jobId: 902, runId: 902, repoFullName: "nodeops-app/api", label: "createos", tenant: null },
       "d3",
     );
     await boot(singleton, 902, "sb_902");
@@ -93,7 +93,7 @@ describe("reaper", () => {
  */
 async function queued(s: Stub, jobId: number) {
   await s.onQueued(
-    { jobId, runId: jobId, repoFullName: "nodeops-app/api", label: "createos" },
+    { jobId, runId: jobId, repoFullName: "nodeops-app/api", label: "createos", tenant: null },
     `pf-${jobId}`,
   );
 }
@@ -160,13 +160,19 @@ describe("age is measured from provisioning, not from queueing", () => {
   async function promoteAfterWaiting(s: Stub, jobId: number, waitMs: number) {
     for (const filler of [jobId + 100, jobId + 200]) {
       await s.onQueued(
-        { jobId: filler, runId: filler, repoFullName: "nodeops-app/api", label: "createos" },
+        {
+          jobId: filler,
+          runId: filler,
+          repoFullName: "nodeops-app/api",
+          label: "createos",
+          tenant: null,
+        },
         `fill-${filler}`,
       );
       await boot(s, filler, `sb_fill_${filler}`);
     }
     await s.onQueued(
-      { jobId, runId: jobId, repoFullName: "nodeops-app/api", label: "createos" },
+      { jobId, runId: jobId, repoFullName: "nodeops-app/api", label: "createos", tenant: null },
       `d-${jobId}`,
     );
     expect(await s.activeCount()).toBe(2); // the job is pending, not active

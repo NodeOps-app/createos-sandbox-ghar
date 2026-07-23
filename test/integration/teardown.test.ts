@@ -11,6 +11,7 @@ const job = (id: number) => ({
   runId: id,
   repoFullName: "nodeops-app/api",
   label: "createos",
+  tenant: null,
 });
 
 /**

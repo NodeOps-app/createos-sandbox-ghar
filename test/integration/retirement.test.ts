@@ -9,6 +9,7 @@ const job = (jobId: number) => ({
   runId: jobId,
   repoFullName: "nodeops-app/api",
   label: "createos",
+  tenant: null,
 });
 
 async function seeded(jobId: number, sandboxId: string): Promise<Stub> {

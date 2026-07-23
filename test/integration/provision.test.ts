@@ -37,6 +37,7 @@ const pending = (jobId: number) => ({
   runId: 1,
   repoFullName: "nodeops-app/api",
   label: "createos",
+  tenant: null,
 });
 
 /** POSTs a signed `queued` webhook for `jobId` and drains the waitUntil work. */

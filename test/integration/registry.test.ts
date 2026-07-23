@@ -44,7 +44,7 @@ describe("tenant schema migration", () => {
   it("existing job flow is untouched by the new schema", async () => {
     const s = stub("schema-flow-" + Math.random());
     const d = await s.onQueued(
-      { jobId: 1, runId: 1, repoFullName: "acme/x", label: "createos" },
+      { jobId: 1, runId: 1, repoFullName: "acme/x", label: "createos", tenant: null },
       "d1",
     );
     expect(d.action).toBe("provision");
@@ -152,8 +152,14 @@ describe("tenant registry", () => {
   it("backfill claims only NULL tenant_id rows and reports the count", async () => {
     const s = stub("reg-bf-" + Math.random());
     await s.adminUpsertTenant(tenant());
-    await s.onQueued({ jobId: 1, runId: 1, repoFullName: "acme/x", label: "createos" }, "d1");
-    await s.onQueued({ jobId: 2, runId: 1, repoFullName: "acme/y", label: "createos" }, "d2");
+    await s.onQueued(
+      { jobId: 1, runId: 1, repoFullName: "acme/x", label: "createos", tenant: null },
+      "d1",
+    );
+    await s.onQueued(
+      { jobId: 2, runId: 1, repoFullName: "acme/y", label: "createos", tenant: null },
+      "d2",
+    );
     // Simulate a row already owned by another tenant — backfill must not touch it.
     await runInDurableObject(s, async (_i, state) => {
       state.storage.sql.exec(`UPDATE jobs SET tenant_id = 99 WHERE job_id = 1`);
@@ -175,7 +181,10 @@ describe("tenant registry", () => {
 
   it("backfill refuses to claim rows for a nonexistent tenant", async () => {
     const s = stub("reg-bf-missing-" + Math.random());
-    await s.onQueued({ jobId: 1, runId: 1, repoFullName: "acme/x", label: "createos" }, "d1");
+    await s.onQueued(
+      { jobId: 1, runId: 1, repoFullName: "acme/x", label: "createos", tenant: null },
+      "d1",
+    );
 
     // See the addProjects test above for why this goes through the instance,
     // not the external stub.

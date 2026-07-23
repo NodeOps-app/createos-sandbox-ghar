@@ -45,6 +45,7 @@ describe("identifyJob", () => {
         runId: 201,
         repoFullName: "nodeops-app/api",
         label: "createos",
+        tenant: null,
       },
     });
   });

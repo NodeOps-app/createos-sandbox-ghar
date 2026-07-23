@@ -125,6 +125,7 @@ const job: PendingJob = {
   runId: 200,
   repoFullName: "nodeops-app/api",
   label: "createos",
+  tenant: null,
 };
 
 describe("createRunnerSandbox", () => {
@@ -216,6 +217,7 @@ describe("createRunnerSandbox", () => {
       runId: 1,
       repoFullName: "nodeops-app/api",
       label: "createos",
+      tenant: null,
     };
 
     await createRunnerSandbox(cfg, github, bigJob, {
@@ -240,6 +242,7 @@ describe("createRunnerSandbox", () => {
       runId: 1,
       repoFullName: "o/r",
       label: "createos-8vcpu-16gb",
+      tenant: null,
     };
 
     await createRunnerSandbox(config, github, shapedJob, {
