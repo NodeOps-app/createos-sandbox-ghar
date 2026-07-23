@@ -3,6 +3,7 @@ import { describe, it, expect, vi } from "vitest";
 import { handleAdmin } from "../../src/admin";
 import type { Bindings } from "../../src/index";
 import type { TenantRecord } from "../../src/types";
+import { mockFetch, githubRoutes } from "../helpers/mocks";
 
 const B = env as unknown as Bindings;
 
@@ -368,9 +369,17 @@ describe("admin API", () => {
   // Re-POSTing an already-approved tenant to change an unrelated field (here
   // minute_grant) must not recompute it to "now" — that destroys the original
   // approval timestamp even though no approval transition happened.
+  // allow_all_repos: true throughout this block — these tests exercise the
+  // approved_at/approved_by audit stamp, not Task 8's runner-group gate, so
+  // they sidestep it the same way NodeOps (the one real allow_all_repos
+  // tenant) does: no projects, no runner group creation.
   it("preserves approved_at across an edit that keeps status approved", async () => {
     const create = await handleAdmin(
-      req("POST", "/admin/tenants", tenantBody({ installation_id: 509, status: "approved" })),
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({ installation_id: 509, status: "approved", allow_all_repos: true }),
+      ),
       B,
     );
     const created = (await create.json()) as TenantRecord;
@@ -384,7 +393,12 @@ describe("admin API", () => {
       req(
         "POST",
         "/admin/tenants",
-        tenantBody({ installation_id: 509, status: "approved", minute_grant: 9_999 }),
+        tenantBody({
+          installation_id: 509,
+          status: "approved",
+          allow_all_repos: true,
+          minute_grant: 9_999,
+        }),
       ),
       B,
     );
@@ -403,7 +417,11 @@ describe("admin API", () => {
     expect(((await create.json()) as TenantRecord).approvedAt).toBeNull();
 
     const approve = await handleAdmin(
-      req("POST", "/admin/tenants", tenantBody({ installation_id: 510, status: "approved" })),
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({ installation_id: 510, status: "approved", allow_all_repos: true }),
+      ),
       B,
     );
     expect(((await approve.json()) as TenantRecord).approvedAt).not.toBeNull();
@@ -417,7 +435,12 @@ describe("admin API", () => {
       req(
         "POST",
         "/admin/tenants",
-        tenantBody({ installation_id: 512, status: "approved", approved_by: "sid" }),
+        tenantBody({
+          installation_id: 512,
+          status: "approved",
+          allow_all_repos: true,
+          approved_by: "sid",
+        }),
       ),
       B,
     );
@@ -448,7 +471,12 @@ describe("admin API", () => {
       req(
         "POST",
         "/admin/tenants",
-        tenantBody({ installation_id: 513, status: "approved", approved_by: "sid" }),
+        tenantBody({
+          installation_id: 513,
+          status: "approved",
+          allow_all_repos: true,
+          approved_by: "sid",
+        }),
       ),
       B,
     );
@@ -471,7 +499,12 @@ describe("admin API", () => {
       req(
         "POST",
         "/admin/tenants",
-        tenantBody({ installation_id: 513, status: "approved", approved_by: "naman" }),
+        tenantBody({
+          installation_id: 513,
+          status: "approved",
+          allow_all_repos: true,
+          approved_by: "naman",
+        }),
       ),
       B,
     );
@@ -499,5 +532,159 @@ describe("admin API", () => {
       );
       expect(res.status).toBe(400);
     }
+  });
+});
+
+// Task 8: approval into `approved` for a non-allow_all_repos tenant must
+// fail closed on the GitHub-side runner group (Gate 3 / D12) — never write
+// the registry row unless the group exists first. GitHub is stubbed through
+// the `fetchImpl` test seam; nothing here touches the network.
+describe("admin API — runner group approval gate (Task 8)", () => {
+  it("400s an approval with zero approved projects, leaving status untouched", async () => {
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 520 })), B);
+
+    const approve = await handleAdmin(
+      req("POST", "/admin/tenants", tenantBody({ installation_id: 520, status: "approved" })),
+      B,
+    );
+    expect(approve.status).toBe(400);
+    expect(await approve.json()).toHaveProperty("error");
+
+    const list = await handleAdmin(req("GET", "/admin/tenants"), B);
+    const tenants = (await list.json()) as TenantRecord[];
+    expect(tenants.find((t) => t.installationId === 520)?.status).toBe("pending");
+  });
+
+  it("502s an approval when the runner-group API fails, leaving the prior status", async () => {
+    const fetchImpl = mockFetch(
+      githubRoutes({ "POST /actions/runner-groups": () => new Response("boom", { status: 500 }) }),
+    );
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 521 })), B);
+    await handleAdmin(
+      req("POST", "/admin/projects", {
+        installation_id: 521,
+        projects: [{ repo_full_name: "acme/svc", repo_id: 31 }],
+      }),
+      B,
+    );
+
+    const approve = await handleAdmin(
+      req("POST", "/admin/tenants", tenantBody({ installation_id: 521, status: "approved" })),
+      B,
+      fetchImpl,
+    );
+    expect(approve.status).toBe(502);
+
+    const list = await handleAdmin(req("GET", "/admin/tenants"), B);
+    const tenants = (await list.json()) as TenantRecord[];
+    expect(tenants.find((t) => t.installationId === 521)?.status).toBe("pending");
+  });
+
+  it("201s an approval once the runner group is created, persisting the returned id", async () => {
+    let capturedBody: { selected_repository_ids?: number[] } | undefined;
+    const fetchImpl = mockFetch(
+      githubRoutes({
+        "POST /actions/runner-groups": async (r) => {
+          capturedBody = (await r.json()) as { selected_repository_ids?: number[] };
+          return new Response(JSON.stringify({ id: 4242 }), { status: 201 });
+        },
+      }),
+    );
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 522 })), B);
+    await handleAdmin(
+      req("POST", "/admin/projects", {
+        installation_id: 522,
+        projects: [{ repo_full_name: "acme/svc", repo_id: 32 }],
+      }),
+      B,
+    );
+
+    const approve = await handleAdmin(
+      req("POST", "/admin/tenants", tenantBody({ installation_id: 522, status: "approved" })),
+      B,
+      fetchImpl,
+    );
+    expect(approve.status).toBe(201);
+    expect(((await approve.json()) as TenantRecord).runnerGroupId).toBe(4242);
+    expect(capturedBody?.selected_repository_ids).toEqual([32]);
+  });
+
+  it("syncs the runner group with the union of ids before writing a new project, 502ing on PUT failure without persisting it", async () => {
+    const createFetch = mockFetch(
+      githubRoutes({
+        "POST /actions/runner-groups": () =>
+          new Response(JSON.stringify({ id: 5252 }), { status: 201 }),
+      }),
+    );
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 523 })), B);
+    await handleAdmin(
+      req("POST", "/admin/projects", {
+        installation_id: 523,
+        projects: [{ repo_full_name: "acme/one", repo_id: 41 }],
+      }),
+      B,
+    );
+    await handleAdmin(
+      req("POST", "/admin/tenants", tenantBody({ installation_id: 523, status: "approved" })),
+      B,
+      createFetch,
+    );
+
+    let capturedBody: { selected_repository_ids?: number[] } | undefined;
+    const syncFetch = mockFetch(
+      githubRoutes({
+        "PUT /actions/runner-groups/5252/repositories": async (r) => {
+          capturedBody = (await r.json()) as { selected_repository_ids?: number[] };
+          return new Response("boom", { status: 500 });
+        },
+      }),
+    );
+    const add = await handleAdmin(
+      req("POST", "/admin/projects", {
+        installation_id: 523,
+        projects: [{ repo_full_name: "acme/two", repo_id: 42 }],
+      }),
+      B,
+      syncFetch,
+    );
+    expect(add.status).toBe(502);
+    // existing project ("acme/one") + the one being added ("acme/two") —
+    // listProjects orders by repo_full_name, so union order is deterministic.
+    expect(capturedBody?.selected_repository_ids).toEqual([41, 42]);
+
+    const list = await handleAdmin(req("GET", "/admin/tenants"), B);
+    const tenants = (await list.json()) as TenantRecord[];
+    expect(tenants.find((t) => t.installationId === 523)).toBeDefined();
+    // The failed PUT must never have let the registry write happen.
+    const projectsRes = await handleAdmin(
+      req("DELETE", "/admin/projects", { installation_id: 523, repo_full_name: "acme/two" }),
+      B,
+    );
+    expect(projectsRes.status).toBe(404); // "acme/two" was never persisted
+  });
+
+  it("skips the runner-group route entirely for an allow_all_repos approval", async () => {
+    const fetchImpl = mockFetch(githubRoutes());
+    await handleAdmin(
+      req("POST", "/admin/tenants", tenantBody({ installation_id: 524, allow_all_repos: true })),
+      B,
+    );
+
+    const approve = await handleAdmin(
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({
+          installation_id: 524,
+          status: "approved",
+          allow_all_repos: true,
+          runner_group_id: 1,
+        }),
+      ),
+      B,
+      fetchImpl,
+    );
+    expect(approve.status).toBe(201);
+    expect(((await approve.json()) as TenantRecord).runnerGroupId).toBe(1);
   });
 });
