@@ -71,4 +71,10 @@ describe("loadConfig", () => {
   it("throws on negative number", () => {
     expect(() => loadConfig({ ...base, MAX_CONCURRENT: "-3" })).toThrow(/MAX_CONCURRENT/);
   });
+
+  it("tenancyMode defaults single, accepts multi, rejects junk", () => {
+    expect(loadConfig(base).tenancyMode).toBe("single");
+    expect(loadConfig({ ...base, TENANCY_MODE: "multi" }).tenancyMode).toBe("multi");
+    expect(() => loadConfig({ ...base, TENANCY_MODE: "dual" })).toThrow(/TENANCY_MODE/);
+  });
 });

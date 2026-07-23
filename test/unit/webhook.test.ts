@@ -68,4 +68,24 @@ describe("parseWorkflowJob", () => {
     );
     expect(job?.labels).toEqual(["createos"]);
   });
+
+  it("extracts installation.id and head_sha when present, omits when malformed", () => {
+    const body = JSON.stringify({
+      action: "queued",
+      workflow_job: { id: 1, run_id: 2, labels: ["createos"], head_sha: "abc123" },
+      repository: { full_name: "o/r" },
+      installation: { id: 555 },
+    });
+    const job = parseWorkflowJob(body)!;
+    expect(job.installationId).toBe(555);
+    expect(job.headSha).toBe("abc123");
+
+    const noInstall = JSON.stringify({
+      action: "queued",
+      workflow_job: { id: 1, run_id: 2, labels: [] },
+      repository: { full_name: "o/r" },
+      installation: { id: "nope" },
+    });
+    expect(parseWorkflowJob(noInstall)?.installationId).toBeUndefined();
+  });
 });

@@ -83,6 +83,9 @@ export function parseWorkflowJob(body: string): WorkflowJob | null {
   // runner_name is "" (or absent) until a runner picks up the job; only carry a
   // real name. On completed it identifies the sandbox that actually ran the job.
   const runnerName = isNonEmptyString(wj.runner_name) ? wj.runner_name : undefined;
+  const installation =
+    isObject(p.installation) && isPosInt(p.installation.id) ? p.installation.id : undefined;
+  const headSha = isNonEmptyString(wj.head_sha) ? wj.head_sha : undefined;
 
   return {
     action,
@@ -91,5 +94,7 @@ export function parseWorkflowJob(body: string): WorkflowJob | null {
     repoFullName: repository.full_name,
     labels,
     runnerName,
+    installationId: installation,
+    headSha,
   };
 }

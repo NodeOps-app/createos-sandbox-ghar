@@ -34,6 +34,11 @@ export interface Config {
 
   alertWebhookUrl?: string; // optional Slack-style webhook for failure alerts
   adminToken?: string; // bearer token for /admin/*; unset = admin surface disabled (404)
+
+  // Multi-tenancy master switch. "single" = the pre-tenant behavior, verbatim.
+  tenancyMode: "single" | "multi";
+  communityBandwidthBytes: number; // per-VM egress quota for community tenants (D15)
+  applyFormUrl: string; // onboarding form link used in refusal check runs ("" = generic copy)
 }
 
 /**
@@ -75,6 +80,8 @@ export interface WorkflowJob {
   repoFullName: string; // repository.full_name, "nodeops-app/api"
   labels: string[]; // workflow_job.labels
   runnerName?: string; // workflow_job.runner_name — the runner assigned the job (set once a runner picks it up: in_progress and completed)
+  installationId?: number; // installation.id — the Tenant key in multi mode
+  headSha?: string; // workflow_job.head_sha — anchor for refusal check runs
 }
 
 /** DO → Worker decision for a queued job. */
