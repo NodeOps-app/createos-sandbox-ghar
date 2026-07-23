@@ -81,6 +81,57 @@ describe("per-tenant cap", () => {
   });
 });
 
+describe("per-tenant cap at promotion", () => {
+  // MAX_CONCURRENT is 2 in vitest.config.ts. A filler (tenant-less) job takes
+  // the second global slot so BOTH tenants' jobs queue behind the global cap
+  // — that keeps the global cap out of the way once it's freed, so the
+  // per-tenant cap (gate 6) is what #dequeuePending actually has to enforce.
+  it("skips a tenant at its cap for another with headroom, promotes once headroom opens", async () => {
+    const s = stub("promo-" + Math.random());
+    await s.adminUpsertTenant(approved(1, { concurrencyCap: 1 }));
+    await s.adminUpsertTenant(approved(2, { concurrencyCap: 5 }));
+
+    await s.onQueued(job(11, 1), "d1", ctx(1, 1)); // A's one running job
+    await s.recordSandboxCreated(11, "sb11", "cos-11-aa");
+    await s.markRunning(11);
+
+    expect((await s.onQueued(job(99, 0), "d0")).action).toBe("provision"); // filler, fills global cap
+
+    expect((await s.onQueued(job(12, 1), "d2", ctx(1, 1))).action).toBe("queued"); // A2, OLDER
+    expect((await s.onQueued(job(21, 2), "d3", ctx(2, 5))).action).toBe("queued"); // B1, NEWER
+
+    // Free the filler's slot: global cap no longer binds, so the choice is
+    // decided by per-tenant headroom, not raw FIFO.
+    const res = await s.onCompleted(99);
+    expect(res.nextPending?.jobId).toBe(21); // B promoted despite being newer — A is still at cap
+
+    await runInDurableObject(s, (_i, state) => {
+      const row = state.storage.sql
+        .exec<{ state: string }>(`SELECT state FROM jobs WHERE job_id = 12`)
+        .one();
+      expect(row.state).toBe("pending"); // A2 stays parked
+    });
+
+    const res2 = await s.onCompleted(11, "cos-11-aa"); // A's running job finishes — headroom opens
+    expect(res2.nextPending?.jobId).toBe(12); // A2 now promoted
+  });
+
+  it("single-mode (NULL tenant_id) rows still promote strict oldest-first", async () => {
+    const s = stub("promo-single-" + Math.random());
+    const bare = (id: number) => job(id, 0);
+
+    expect((await s.onQueued(bare(1), "s1")).action).toBe("provision");
+    await s.recordSandboxCreated(1, "sb1", "cos-1-aa");
+    await s.markRunning(1);
+    expect((await s.onQueued(bare(2), "s2")).action).toBe("provision"); // fills global cap
+    expect((await s.onQueued(bare(3), "s3")).action).toBe("queued"); // OLDER pending
+    expect((await s.onQueued(bare(4), "s4")).action).toBe("queued"); // NEWER pending
+
+    const res = await s.onCompleted(1, "cos-1-aa");
+    expect(res.nextPending?.jobId).toBe(3); // strict FIFO, untouched by the tenant-headroom check
+  });
+});
+
 describe("shouldNotifyRefusal", () => {
   it("first call per (repo, day) true, repeats false, new day true again", async () => {
     const s = stub("ref-" + Math.random());

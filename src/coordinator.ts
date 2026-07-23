@@ -523,12 +523,28 @@ export class Coordinator extends DurableObject<Env> {
    * starts its provisioning clock; returns it, or null. Without that clock reset
    * the job inherits the age it accrued waiting for a slot and is eligible for
    * reaping before its VM can finish booting — see ROW_AGE.
+   *
+   * Eligibility is FIFO among rows that also have per-tenant headroom (gate 6),
+   * not just the global cap above — otherwise a tenant already at its
+   * concurrency_cap gets promoted past it the instant some OTHER tenant's slot
+   * frees. NULL tenant_id (single mode) has no per-tenant cap and stays
+   * unconditionally eligible, so single mode is unchanged.
    */
   #dequeuePending(): PendingJob | null {
     const cap = this.#maxConcurrent();
     if (cap > 0 && this.#active() >= cap) return null;
     const rows = this.#sql
-      .exec<Row>(`SELECT * FROM jobs WHERE state = 'pending' ORDER BY created_at ASC LIMIT 1`)
+      .exec<Row>(
+        `SELECT j.* FROM jobs j
+         WHERE j.state = 'pending'
+           AND (
+             j.tenant_id IS NULL
+             OR (SELECT COUNT(*) FROM jobs a
+                   WHERE a.state IN ${ACTIVE_STATES} AND a.tenant_id = j.tenant_id)
+                < (SELECT concurrency_cap FROM tenants t WHERE t.installation_id = j.tenant_id)
+           )
+         ORDER BY j.created_at ASC LIMIT 1`,
+      )
       .toArray();
     const row = rows[0];
     if (!row) return null;
