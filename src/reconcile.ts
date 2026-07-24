@@ -137,7 +137,8 @@ async function sweepOrphanedRunners(
   env: Bindings,
   github: GitHubClient,
   runners: Runner[],
-): Promise<void> {
+  maxDeletes: number,
+): Promise<number> {
   const live = new Set(await coordinator(env).liveJobIds());
 
   const orphans = runners.filter((r) => {
@@ -145,9 +146,9 @@ async function sweepOrphanedRunners(
     const jobId = jobIdFromRunnerName(r.name);
     return jobId !== null && !live.has(jobId);
   });
-  if (orphans.length === 0) return;
+  if (orphans.length === 0) return 0;
 
-  const batch = orphans.slice(0, MAX_RUNNER_DELETES_PER_TICK);
+  const batch = orphans.slice(0, Math.min(MAX_RUNNER_DELETES_PER_TICK, maxDeletes));
   if (batch.length < orphans.length) {
     console.warn(
       `runner sweep: ${orphans.length} orphaned registrations found, deleting ${batch.length} this tick ` +
@@ -161,6 +162,7 @@ async function sweepOrphanedRunners(
   console.log(
     `runner sweep: deleted ${batch.length - failed.length}/${batch.length} orphaned runner registration(s)`,
   );
+  return batch.length;
 }
 
 export async function runReaper(env: Bindings, deps: SandboxDeps = {}): Promise<void> {
@@ -282,66 +284,108 @@ async function runMultiTenantReconciler(
   const order = rotateFrom(scopes, parsed?.installationId);
   let budget = config.recoverySubrequestBudget;
   let nextCursor: string | null = rawCursor;
+  // Provisions started during recovery must complete within THIS invocation —
+  // the synthetic ctx below has no real ExecutionContext behind it, so unlike
+  // the webhook path, nothing else keeps them alive once `scheduled` returns.
+  // Collected here and awaited after the loop instead of fire-and-forgotten.
+  const recoveryProvisions: Promise<unknown>[] = [];
+  const recoveryCtx = {
+    waitUntil: (p: Promise<unknown>) => {
+      recoveryProvisions.push(p.catch((e) => console.error(String(e))));
+    },
+  };
   for (const s of order) {
     if (budget <= 0) break;
     const start = s.gh.subrequests;
-    const { jobs, coverage } = await discoverQueuedJobs(s.gh, {
-      budget,
-      cursor: s.tenant.installationId === parsed?.installationId ? parsed.repo : null,
-      policy: "org-wide", // project gating happens in admitAndDrive, not here
-      allowlist: [],
-    });
-    budget -= s.gh.subrequests - start;
-    nextCursor = JSON.stringify({
-      installationId: s.tenant.installationId,
-      repo: coverage.nextCursor,
-    });
-    for (const q of jobs) {
-      // A single job's admission can throw (fork-check GitHub call failing,
-      // malformed JSON) — must not abort the tenant loop or the tick. Skip
-      // only this job; GitHub still reports it queued, so it's retried next
-      // tick. Steps C/D below (and the reaper, sequenced by the caller) must
-      // still run regardless (see AGENTS.md: step D is never GitHub-gated).
-      try {
-        await admitAndDrive(
-          env,
-          config,
-          {
-            action: "queued",
-            jobId: q.jobId,
-            runId: q.runId,
-            repoFullName: q.repoFullName,
-            labels: q.labels,
-            installationId: s.tenant.installationId,
-          },
-          { waitUntil: (p) => p.catch((e) => console.error(String(e))) },
-          deps,
-          "reconcile: ",
-        );
-      } catch (err) {
-        console.error(
-          `reconcile: recovery admission failed job=${q.jobId} tenant=${s.tenant.orgLogin}: ${String(err)}`,
-        );
+    // A tenant's own discovery reads (installationRepos/activeRunIds/queuedJobs)
+    // can throw — must not skip this tenant's slot in rotation, and must never
+    // escape the function: steps C/D below are never GitHub-gated (AGENTS.md).
+    try {
+      const { jobs, coverage } = await discoverQueuedJobs(s.gh, {
+        budget,
+        cursor: s.tenant.installationId === parsed?.installationId ? parsed.repo : null,
+        policy: "org-wide", // project gating happens in admitAndDrive, not here
+        allowlist: [],
+      });
+      nextCursor = JSON.stringify({
+        installationId: s.tenant.installationId,
+        repo: coverage.nextCursor,
+      });
+      for (const q of jobs) {
+        // A single job's admission can throw (fork-check GitHub call failing,
+        // malformed JSON) — must not abort the tenant loop or the tick. Skip
+        // only this job; GitHub still reports it queued, so it's retried next
+        // tick. Steps C/D below (and the reaper, sequenced by the caller) must
+        // still run regardless (see AGENTS.md: step D is never GitHub-gated).
+        try {
+          await admitAndDrive(
+            env,
+            config,
+            {
+              action: "queued",
+              jobId: q.jobId,
+              runId: q.runId,
+              repoFullName: q.repoFullName,
+              labels: q.labels,
+              installationId: s.tenant.installationId,
+            },
+            recoveryCtx,
+            deps,
+            "reconcile: ",
+          );
+        } catch (err) {
+          console.error(
+            `reconcile: recovery admission failed job=${q.jobId} tenant=${s.tenant.orgLogin}: ${String(err)}`,
+          );
+        }
       }
-    }
-    if (coverage.budgetBound) {
-      console.warn(
-        `reconcile: budget bound at tenant ${s.tenant.orgLogin} — ` +
-          `covered ${coverage.covered}, deferred ${coverage.deferred}`,
+      if (coverage.budgetBound) {
+        console.warn(
+          `reconcile: budget bound at tenant ${s.tenant.orgLogin} — ` +
+            `covered ${coverage.covered}, deferred ${coverage.deferred}`,
+        );
+        break;
+      }
+    } catch (err) {
+      console.error(
+        `reconcile: recovery discovery failed for tenant ${s.tenant.orgLogin}: ${String(err)}`,
       );
-      break;
+      continue;
+    } finally {
+      // Deduct what the tenant spent even on a throw/break — a failed or
+      // budget-bound tenant still burned real subrequests against the shared cap.
+      budget -= s.gh.subrequests - start;
     }
   }
   if (nextCursor !== rawCursor) await co.setRecoveryCursor(nextCursor);
+  await Promise.allSettled(recoveryProvisions);
 
   // C. Orphaned registrations: per tenant, REUSING step A's runner lists (no
   //    re-fetch — cost). Same ownership proof as single mode: name parses as
   //    ours + offline + not busy + no live Coordinator row. Skipped under the
   //    same fail-safe as step A — a partial view is never acted on.
+  //
+  //    MAX_RUNNER_DELETES_PER_TICK is a SHARED cap across every tenant, not a
+  //    per-tenant allowance — N tenants must not multiply it into N×10 DELETE
+  //    subrequests in one tick, which would blow the Free-plan budget.
   if (runnersByTenant) {
+    let remaining = MAX_RUNNER_DELETES_PER_TICK;
     for (const s of scopes) {
+      if (remaining <= 0) {
+        console.warn(
+          `reconcile: shared orphaned-runner delete budget exhausted ` +
+            `(MAX_RUNNER_DELETES_PER_TICK=${MAX_RUNNER_DELETES_PER_TICK}); ` +
+            `tenant ${s.tenant.orgLogin} and any after it in rotation skipped this tick`,
+        );
+        break;
+      }
       try {
-        await sweepOrphanedRunners(env, s.gh, runnersByTenant.get(s.tenant.installationId) ?? []);
+        remaining -= await sweepOrphanedRunners(
+          env,
+          s.gh,
+          runnersByTenant.get(s.tenant.installationId) ?? [],
+          remaining,
+        );
       } catch (err) {
         console.error(
           `reconcile: orphaned-runner sweep failed for ${s.tenant.orgLogin}: ${String(err)}`,
@@ -496,7 +540,7 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
   //    list — zero extra API cost — so a failed read there skips this too.
   if (runners) {
     try {
-      await sweepOrphanedRunners(env, github, runners);
+      await sweepOrphanedRunners(env, github, runners, MAX_RUNNER_DELETES_PER_TICK);
     } catch (err) {
       console.error(`reconcile: orphaned-runner sweep failed: ${String(err)}`);
     }

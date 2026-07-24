@@ -628,10 +628,12 @@ describe("runReconciler — multi-tenant mode", () => {
         org: string;
         runners?: MockRunner[] | number; // number = simulate this HTTP status
         repos?: string[];
+        reposStatus?: number; // simulate installation/repositories failing
         jobsByRepo?: Record<string, MockJob[]>;
       }
     >,
-  ) {
+  ): { deleted: number[] } {
+    const deleted: number[] = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const req = new Request(input, init);
       const u = req.url;
@@ -651,11 +653,17 @@ describe("runReconciler — multi-tenant mode", () => {
       const t = tenants[instId];
 
       if (u.includes("generate-jitconfig")) return json({ encoded_jit_config: "BLOB" }, 201);
+      if (req.method === "DELETE" && u.includes("/actions/runners/")) {
+        deleted.push(Number(u.split("/actions/runners/")[1]));
+        return new Response(null, { status: 204 });
+      }
       if (req.method === "GET" && u.includes("/actions/runners")) {
         if (typeof t?.runners === "number") return new Response("boom", { status: t.runners });
         return json({ runners: t?.runners ?? [] });
       }
       if (u.includes("/installation/repositories")) {
+        if (typeof t?.reposStatus === "number")
+          return new Response("boom", { status: t.reposStatus });
         return json({ repositories: (t?.repos ?? []).map((full_name) => ({ full_name })) });
       }
       if (u.includes("/jobs")) {
@@ -673,6 +681,7 @@ describe("runReconciler — multi-tenant mode", () => {
       }
       return new Response("unmocked " + u, { status: 404 });
     }) as typeof fetch;
+    return { deleted };
   }
 
   it("recovery admits a queued job from an approved project and refuses one from an unapproved repo", async () => {
@@ -776,6 +785,143 @@ describe("runReconciler — multi-tenant mode", () => {
 
     await s.adminSetTenantStatus(40201, "revoked");
     await s.adminSetTenantStatus(40202, "revoked");
+    globalThis.fetch = realFetch;
+  });
+
+  // Bug 4: a per-tenant discovery throw used to escape runMultiTenantReconciler
+  // entirely, taking steps C and D down with it. Tenant A's installationRepos()
+  // read 500s (discoverQueuedJobs throws); tenant B must still get its recovery
+  // turn, and step D — GitHub-independent by design — must still run.
+  it("a per-tenant discovery throw skips only that tenant — recovery continues and step D still runs", async () => {
+    const s = stub("singleton");
+    await s.adminUpsertTenant(approvedTenant(50301));
+    await s.adminUpsertTenant(approvedTenant(50302));
+    await s.adminAddProjects(50302, [{ repoFullName: "mt-org-50302/api", repoId: 1 }]);
+
+    patchMultiGitHub({
+      50301: { org: "mt-org-50301", runners: [], reposStatus: 500 },
+      50302: {
+        org: "mt-org-50302",
+        runners: [],
+        repos: ["mt-org-50302/api"],
+        jobsByRepo: {
+          "mt-org-50302/api": [{ id: 503021, status: "queued", labels: ["createos"] }],
+        },
+      },
+    });
+
+    const orphan = vm(vmName(50399));
+    const createSandbox = vi.fn().mockResolvedValue({
+      id: "sb503021",
+      runCommand: vi.fn().mockResolvedValue({ result: { stdout: "started" }, exec_ms: 1 }),
+    });
+    const deps = {
+      makeClient: () => ({
+        createSandbox,
+        listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([orphan]),
+      }),
+    };
+
+    await expect(runReconciler(multiEnv(), deps)).resolves.toBeUndefined();
+
+    // Tenant B's recovery still ran despite tenant A's discovery throw.
+    expect(createSandbox).toHaveBeenCalledOnce();
+    // Step D — never gated on GitHub — still ran despite the mid-loop throw.
+    expect(orphan.destroy).toHaveBeenCalledOnce();
+
+    await s.adminSetTenantStatus(50301, "revoked");
+    await s.adminSetTenantStatus(50302, "revoked");
+    globalThis.fetch = realFetch;
+  });
+
+  // Bug 5: recovery used to hand provisioning to a synthetic ctx with no real
+  // ExecutionContext behind it, so it was never actually awaited inside the
+  // invocation. createSandbox resolves after a real macrotask delay here — if
+  // the provision were still fire-and-forgotten, `await runReconciler` could
+  // return before this delayed call ever fires.
+  it("a recovery-admitted job's provision completes within the reconciler invocation", async () => {
+    const s = stub("singleton");
+    await s.adminUpsertTenant(approvedTenant(50401));
+    await s.adminAddProjects(50401, [{ repoFullName: "mt-org-50401/api", repoId: 1 }]);
+
+    patchMultiGitHub({
+      50401: {
+        org: "mt-org-50401",
+        runners: [],
+        repos: ["mt-org-50401/api"],
+        jobsByRepo: {
+          "mt-org-50401/api": [{ id: 504011, status: "queued", labels: ["createos"] }],
+        },
+      },
+    });
+
+    const createSandbox = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                id: "sb504011",
+                runCommand: vi
+                  .fn()
+                  .mockResolvedValue({ result: { stdout: "started" }, exec_ms: 1 }),
+              }),
+            5,
+          ),
+        ),
+    );
+    const deps = {
+      makeClient: () => ({
+        createSandbox,
+        listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
+    };
+
+    await runReconciler(multiEnv(), deps);
+
+    expect(createSandbox).toHaveBeenCalledOnce();
+
+    await s.adminSetTenantStatus(50401, "revoked");
+    globalThis.fetch = realFetch;
+  });
+
+  // Bug 6: MAX_RUNNER_DELETES_PER_TICK must be a budget SHARED across tenants,
+  // not applied independently per tenant — otherwise N tenants multiply it into
+  // N×10 DELETE subrequests in one tick.
+  it("the orphaned-runner delete cap is shared across tenants, not per-tenant", async () => {
+    const s = stub("singleton");
+    await s.adminUpsertTenant(approvedTenant(50501));
+    await s.adminUpsertTenant(approvedTenant(50502));
+
+    const orphansFor = (base: number, count: number): MockRunner[] =>
+      Array.from({ length: count }, (_, i) => ({
+        id: base + i,
+        name: runnerName(base + i),
+        status: "offline",
+      }));
+
+    const gh = patchMultiGitHub({
+      50501: { org: "mt-org-50501", runners: orphansFor(60001, 12) },
+      50502: { org: "mt-org-50502", runners: orphansFor(60101, 12) },
+    });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(runReconciler(multiEnv(), {})).resolves.toBeUndefined();
+
+    // 24 orphans exist across both tenants, but only MAX_RUNNER_DELETES_PER_TICK
+    // (10) may be spent this tick — shared, not 10 per tenant.
+    expect(gh.deleted.length).toBe(10);
+    expect(
+      warn.mock.calls.some((c) => String(c[0]).includes("shared orphaned-runner delete budget")),
+    ).toBe(true);
+    warn.mockRestore();
+
+    await s.adminSetTenantStatus(50501, "revoked");
+    await s.adminSetTenantStatus(50502, "revoked");
     globalThis.fetch = realFetch;
   });
 });
