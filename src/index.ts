@@ -1,5 +1,6 @@
 import { Coordinator } from "./coordinator";
-import { handleWebhook, runReaper, runReconciler } from "./handler";
+import { handleWebhook } from "./handler";
+import { runReaper, runReconciler } from "./reconcile";
 
 export { Coordinator };
 

@@ -47,6 +47,7 @@ export function identifyJob(candidate: JobCandidate, config: Config): Identified
       runId: candidate.runId,
       repoFullName: candidate.repoFullName,
       label: requested[0]!,
+      tenant: null, // Task 6 wires the real tenant onto the webhook intake path
     },
   };
 }

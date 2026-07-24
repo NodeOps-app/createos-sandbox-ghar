@@ -37,6 +37,14 @@ function posInt(env: Record<string, unknown>, key: string, fallback: number): nu
   return n;
 }
 
+// The tenancy switch is a trust boundary like PROVISION_POLICY: an unknown
+// value must fail startup, not silently mean "single".
+function mode(env: Record<string, unknown>): "single" | "multi" {
+  const v = (env.TENANCY_MODE as string) || "single";
+  if (v !== "single" && v !== "multi") throw new Error(`invalid TENANCY_MODE: ${v}`);
+  return v;
+}
+
 export function loadConfig(env: Record<string, unknown>): Config {
   const policy = (env.PROVISION_POLICY as string) || "org-wide";
   if (!POLICIES.includes(policy as ProvisionPolicy)) {
@@ -71,5 +79,8 @@ export function loadConfig(env: Record<string, unknown>): Config {
     recoverySubrequestBudget: num(env, "RECOVERY_SUBREQUEST_BUDGET", 30),
     alertWebhookUrl: (env.ALERT_WEBHOOK_URL as string) || undefined,
     adminToken: (env.ADMIN_TOKEN as string) || undefined,
+    tenancyMode: mode(env),
+    communityBandwidthBytes: num(env, "COMMUNITY_VM_BANDWIDTH_BYTES", 107_374_182_400),
+    applyFormUrl: (env.APPLY_FORM_URL as string) || "",
   };
 }

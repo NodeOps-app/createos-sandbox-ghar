@@ -10,6 +10,7 @@ const job = (id: number) => ({
   runId: id,
   repoFullName: "nodeops-app/api",
   label: "createos",
+  tenant: null,
 });
 
 async function boot(s: ReturnType<typeof stub>, jobId: number, sandboxId: string) {
@@ -28,7 +29,7 @@ describe("concurrency cap (MAX_CONCURRENT=2)", () => {
     expect(await s.activeCount()).toBe(2);
 
     const res = await s.onCompleted(1, runnerName(1));
-    expect(res.toDestroy).toEqual({ jobId: 1, sandboxId: "sb1" });
+    expect(res.toDestroy).toEqual({ jobId: 1, sandboxId: "sb1", tenantId: null });
     expect(res.nextPending?.jobId).toBe(3); // slot freed → dequeue pending
   });
 
@@ -55,11 +56,17 @@ describe("concurrency cap (MAX_CONCURRENT=2)", () => {
     const co = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
 
     // MAX_CONCURRENT is 2 in vitest.config.ts — fill both slots.
-    await co.onQueued({ jobId: 901, runId: 1, repoFullName: "o/r", label: "createos" }, "d-901");
-    await co.onQueued({ jobId: 902, runId: 1, repoFullName: "o/r", label: "createos" }, "d-902");
+    await co.onQueued(
+      { jobId: 901, runId: 1, repoFullName: "o/r", label: "createos", tenant: null },
+      "d-901",
+    );
+    await co.onQueued(
+      { jobId: 902, runId: 1, repoFullName: "o/r", label: "createos", tenant: null },
+      "d-902",
+    );
 
     const third = await co.onQueued(
-      { jobId: 903, runId: 1, repoFullName: "o/r", label: "createos-8vcpu-16gb" },
+      { jobId: 903, runId: 1, repoFullName: "o/r", label: "createos-8vcpu-16gb", tenant: null },
       "d-903",
     );
     expect(third.action).toBe("queued");

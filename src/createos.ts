@@ -23,6 +23,8 @@ export interface SandboxHandle {
 /** What teardownSandbox needs from a sandbox looked up by id. */
 interface DestroyableSandbox {
   destroy(options?: RequestOptions): Promise<DestroyedResponse>;
+  /** Best-effort egress read at teardown (cost gate: tenant-billed VMs only). */
+  getBandwidth(): Promise<{ used_bytes: number }>;
 }
 
 /**

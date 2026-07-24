@@ -6,7 +6,8 @@ import {
 } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CreateosSandboxValidationError } from "@nodeops-createos/sandbox";
-import { handleWebhook, runReconciler } from "../../src/handler";
+import { handleWebhook } from "../../src/handler";
+import { runReconciler } from "../../src/reconcile";
 import type { SandboxDeps } from "../../src/createos";
 import { resetShapeCacheForTests } from "../../src/shapes";
 import { sign, workflowJobPayload } from "../helpers/fixtures";
@@ -125,7 +126,7 @@ describe("shape labels end-to-end", () => {
       makeClient: () => ({
         createSandbox,
         listShapes: async () => shapeCatalog(),
-        getSandbox: async () => ({ destroy }),
+        getSandbox: async () => ({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) }),
         listSandboxes: async () => [],
       }),
     };
@@ -147,7 +148,7 @@ describe("shape labels end-to-end", () => {
         listShapes: async () => {
           throw new Error("503");
         },
-        getSandbox: async () => ({ destroy }),
+        getSandbox: async () => ({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) }),
         listSandboxes: async () => [],
       }),
     };
@@ -241,7 +242,7 @@ describe("shape labels end-to-end", () => {
     });
     const completeDeps = {
       makeClient: () => ({
-        getSandbox: async () => ({ destroy }),
+        getSandbox: async () => ({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) }),
         createSandbox: promoteCreate,
         listShapes: async () => shapeCatalog(),
         listSandboxes: async () => [],

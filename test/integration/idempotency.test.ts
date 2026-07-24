@@ -11,6 +11,7 @@ const job = (jobId: number) => ({
   runId: jobId * 10,
   repoFullName: "nodeops-app/api",
   label: "createos",
+  tenant: null,
 });
 
 /** Drives a provisioning row to `running`, the way the Worker does post-boot. */
@@ -33,7 +34,7 @@ describe("Coordinator idempotency", () => {
     await s.onQueued(job(2), "d1");
     await boot(s, 2, "sb_2");
     const res = await s.onCompleted(2, runnerName(2));
-    expect(res.toDestroy).toEqual({ jobId: 2, sandboxId: "sb_2" });
+    expect(res.toDestroy).toEqual({ jobId: 2, sandboxId: "sb_2", tenantId: null });
     expect(await s.activeCount()).toBe(0); // slot freed even before teardown confirmed
     await s.markDestroyed(2);
   });
@@ -64,7 +65,7 @@ describe("Coordinator sandbox ownership (create → record → launch)", () => {
     expect(dec.action).toBe("launch");
     // completed arrives before markRunning — the recorded VM must still be destroyed.
     const res = await s.onCompleted(21, runnerName(21));
-    expect(res.toDestroy).toEqual({ jobId: 21, sandboxId: "sb_21" });
+    expect(res.toDestroy).toEqual({ jobId: 21, sandboxId: "sb_21", tenantId: null });
     await s.markRunning(21); // late no-op: row is already destroying
     expect(await s.activeCount()).toBe(0);
   });
@@ -76,6 +77,7 @@ describe("Coordinator cancellation + redelivery", () => {
     runId: jobId,
     repoFullName: "nodeops-app/api",
     label: "createos",
+    tenant: null,
   });
   function stub() {
     return env.COORDINATOR.get(env.COORDINATOR.idFromName("cancel-" + Math.random()));
@@ -96,7 +98,7 @@ describe("Coordinator cancellation + redelivery", () => {
     expect(dec.action).toBe("launch");
     await s.markRunning(11);
     const first = await s.onCompleted(11, runnerName(11));
-    expect(first.toDestroy).toEqual({ jobId: 11, sandboxId: "sb11" });
+    expect(first.toDestroy).toEqual({ jobId: 11, sandboxId: "sb11", tenantId: null });
     const second = await s.onCompleted(11, runnerName(11)); // redelivery (teardown still pending)
     expect(second.toDestroy).toBeNull(); // row already destroying
   });

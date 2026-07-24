@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { monthKey, weightForLabel, weightedMinutes } from "../../src/quota";
+import { dayKey, monthKey, weightForLabel, weightedMinutes } from "../../src/quota";
 
 const BARE = "createos";
 const DEF = "s-4vcpu-4gb";
@@ -12,6 +12,16 @@ describe("monthKey", () => {
   it("rolls at the UTC month boundary, not local time", () => {
     expect(monthKey(Date.UTC(2026, 11, 31, 23, 59, 59))).toBe("2026-12");
     expect(monthKey(Date.UTC(2027, 0, 1, 0, 0, 0))).toBe("2027-01");
+  });
+});
+
+describe("dayKey", () => {
+  it("formats the UTC calendar day zero-padded", () => {
+    expect(dayKey(Date.UTC(2026, 6, 23, 23, 59))).toBe("2026-07-23");
+  });
+
+  it("rolls at the UTC day boundary, not local time", () => {
+    expect(dayKey(Date.UTC(2026, 6, 23, 24, 0))).toBe("2026-07-24");
   });
 });
 

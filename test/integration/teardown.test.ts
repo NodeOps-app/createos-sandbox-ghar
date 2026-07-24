@@ -11,6 +11,7 @@ const job = (id: number) => ({
   runId: id,
   repoFullName: "nodeops-app/api",
   label: "createos",
+  tenant: null,
 });
 
 /**
@@ -45,7 +46,7 @@ describe("teardown by runner identity (ADR-0003)", () => {
     const res = await s.onCompleted(2, runnerName(1));
 
     // Must tear down sb-1 — the VM that actually ran job 2.
-    expect(res.toDestroy).toEqual({ jobId: 1, sandboxId: "sb-1" });
+    expect(res.toDestroy).toEqual({ jobId: 1, sandboxId: "sb-1", tenantId: null });
 
     // Keying on job_id would destroy sb-2, which is still busy running job 1's
     // work. That is the wrong-VM teardown ADR-0003 exists to prevent.
@@ -65,14 +66,14 @@ describe("teardown by runner identity (ADR-0003)", () => {
 
     // Wires crossed both ways: job 1's runner ran job 2, job 2's ran job 1.
     const first = await s.onCompleted(2, runnerName(1));
-    expect(first.toDestroy).toEqual({ jobId: 1, sandboxId: "sb-1" });
+    expect(first.toDestroy).toEqual({ jobId: 1, sandboxId: "sb-1", tenantId: null });
     await s.markDestroyed(1);
 
     // sb-2 must still be tracked — completing job 2 must not have freed it.
     expect(await s.activeCount()).toBe(1);
 
     const second = await s.onCompleted(1, runnerName(2));
-    expect(second.toDestroy).toEqual({ jobId: 2, sandboxId: "sb-2" });
+    expect(second.toDestroy).toEqual({ jobId: 2, sandboxId: "sb-2", tenantId: null });
     await s.markDestroyed(2);
 
     // Both VMs destroyed, both rows gone: no leak, no double-destroy.
@@ -89,6 +90,6 @@ describe("teardown by runner identity (ADR-0003)", () => {
     // Cancelled-before-pickup: GitHub sends no runner_name, so job id is the
     // only owner available and the fallback must still find the row.
     const res = await s.onCompleted(7);
-    expect(res.toDestroy).toEqual({ jobId: 7, sandboxId: "sb-7" });
+    expect(res.toDestroy).toEqual({ jobId: 7, sandboxId: "sb-7", tenantId: null });
   });
 });

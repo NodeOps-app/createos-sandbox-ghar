@@ -209,18 +209,35 @@ export async function launchRunner(sandbox: SandboxHandle): Promise<void> {
 /**
  * Destroys a sandbox. Idempotent: an already-gone VM (NotFound) is treated as
  * success, so a redelivered `completed` webhook or a double reaper pass is safe.
+ *
+ * `readEgress` gates a best-effort bandwidth read before the destroy — set only
+ * for tenant-billed VMs (the cost gate), and skipped entirely when the VM is
+ * already gone (a self-deleted runner never pays for a bandwidth subrequest).
+ * Returns the egress `used_bytes`, or null when unavailable/self-deleted.
  */
 export async function teardownSandbox(
   config: Config,
   sandboxId: string,
   deps: SandboxDeps = {},
-): Promise<void> {
+  readEgress = false,
+): Promise<number | null> {
   const c = makeSandboxClient(config, deps);
   try {
     const handle = await c.getSandbox(sandboxId);
+    let egress: number | null = null;
+    if (readEgress) {
+      // Best-effort and alert-only: a bandwidth read must never block a
+      // destroy, and it is skipped entirely for un-billed VMs (cost gate).
+      try {
+        egress = (await handle.getBandwidth()).used_bytes;
+      } catch (err) {
+        console.warn(`bandwidth read failed sandbox=${sandboxId}: ${String(err)}`);
+      }
+    }
     await handle.destroy();
+    return egress;
   } catch (err) {
-    if (err instanceof CreateosSandboxNotFoundError) return;
+    if (err instanceof CreateosSandboxNotFoundError) return null;
     throw err;
   }
 }

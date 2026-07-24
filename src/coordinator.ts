@@ -11,6 +11,8 @@ import type {
   ProjectRecord,
   TenantRecord,
   TenantStatus,
+  TenantAdmission,
+  TenantCtx,
 } from "./types";
 import {
   addProjects,
@@ -22,10 +24,12 @@ import {
   setTenantStatus,
   upsertTenant,
 } from "./registry";
+import { monthKey, weightForLabel } from "./quota";
 
 interface Env {
   MAX_CONCURRENT: string;
   RUNNER_LABEL: string;
+  RUNNER_SHAPE: string;
 }
 
 type Row = {
@@ -41,6 +45,7 @@ type Row = {
   booted_at: number | null;
   job_started_at: number | null;
   tenant_id: number | null;
+  weight: number | null;
 };
 
 /**
@@ -137,6 +142,12 @@ export class Coordinator extends DurableObject<Env> {
         egress_bytes     INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (installation_id, month, repo_full_name)
       );
+      CREATE TABLE IF NOT EXISTS refusal_notices (
+        installation_id INTEGER NOT NULL,
+        repo_full_name  TEXT NOT NULL,
+        day             TEXT NOT NULL,
+        PRIMARY KEY (installation_id, repo_full_name, day)
+      );
     `);
     // Migrate DOs created before a column existed: CREATE TABLE IF NOT EXISTS
     // won't add one to a live table. A NULL `label` is a row from before shape
@@ -147,9 +158,11 @@ export class Coordinator extends DurableObject<Env> {
     // only feeds the spawn-timeline log, so old code ignoring it is harmless. A
     // NULL `tenant_id` is a row from before multi-tenancy, owned by the seeded
     // first tenant once backfilled; until then no code reads it, so old and new
-    // code agree. All migrations are additive, so a Worker rollback (which does
-    // NOT revert DO SQLite) leaves the old code reading rows it still
-    // understands.
+    // code agree. A NULL `weight` is a row that predates per-tenant billing
+    // weight: quota.ts's label parse recovers the vCPU weight from the row's
+    // label at teardown instead, so old and new code still agree on the bill.
+    // All migrations are additive, so a Worker rollback (which does NOT revert
+    // DO SQLite) leaves the old code reading rows it still understands.
     const cols = this.#sql.exec(`PRAGMA table_info(jobs)`).toArray() as { name: string }[];
     const has = (c: string) => cols.some((col) => col.name === c);
     if (!has("runner_name")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN runner_name TEXT`);
@@ -161,6 +174,7 @@ export class Coordinator extends DurableObject<Env> {
       this.#sql.exec(`ALTER TABLE jobs ADD COLUMN job_started_at INTEGER`);
     }
     if (!has("tenant_id")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN tenant_id INTEGER`);
+    if (!has("weight")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN weight REAL`);
   }
 
   /**
@@ -197,18 +211,44 @@ export class Coordinator extends DurableObject<Env> {
     return this.env.RUNNER_LABEL || "createos";
   }
 
+  /**
+   * The one place a Row becomes a PendingJob, so the tenant join lives here
+   * once rather than at every call site that promotes a row (onCompleted,
+   * markProvisionFailed, sweep, reapUnregistered all funnel through
+   * #dequeuePending → here).
+   */
   #toPending(row: Row): PendingJob {
+    const t = row.tenant_id != null ? getTenant(this.#sql, row.tenant_id) : null;
     return {
       jobId: row.job_id,
       runId: row.run_id,
       repoFullName: row.repo,
       label: row.label ?? this.#defaultLabel(),
+      tenant: t
+        ? {
+            installationId: t.installationId,
+            orgLogin: t.orgLogin,
+            runnerGroupId: t.runnerGroupId,
+            allowAllRepos: t.allowAllRepos,
+          }
+        : null,
     };
   }
 
   #active(): number {
     const r = this.#sql
       .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM jobs WHERE state IN ${ACTIVE_STATES}`)
+      .one();
+    return r.n;
+  }
+
+  /** Same active-slot count as #active, scoped to one tenant — gate 6. */
+  #activeForTenant(tenantId: number): number {
+    const r = this.#sql
+      .exec<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM jobs WHERE state IN ${ACTIVE_STATES} AND tenant_id = ?`,
+        tenantId,
+      )
       .one();
     return r.n;
   }
@@ -258,7 +298,7 @@ export class Coordinator extends DurableObject<Env> {
       sandboxId,
       row.job_id,
     );
-    return { jobId: row.job_id, sandboxId };
+    return { jobId: row.job_id, sandboxId, tenantId: row.tenant_id ?? null };
   }
 
   /** Deduplicates by webhook delivery id. Returns true if this delivery is new. */
@@ -274,8 +314,19 @@ export class Coordinator extends DurableObject<Env> {
   /**
    * A job queued. Idempotent on job_id AND delivery id. Decides provision-now
    * (slot free) vs pending (at cap). Returns the decision for the Worker to act.
+   *
+   * `tenantCtx` (multi mode only) stamps `tenant_id`/`weight` onto the row from
+   * the Worker's admitTenantJob read — NOT from `job.tenant`, which #toPending
+   * fills in on the way OUT and is meaningless as input here. Gate 6 (the
+   * tenant's own concurrency cap) is checked ADDITIONALLY to the existing
+   * global MAX_CONCURRENT test (gate 10, the operator's plan-capacity
+   * backstop); either binding queues the job.
    */
-  async onQueued(job: PendingJob, deliveryId: string): Promise<QueuedDecision> {
+  async onQueued(
+    job: PendingJob,
+    deliveryId: string,
+    tenantCtx?: TenantCtx,
+  ): Promise<QueuedDecision> {
     const now = Date.now();
     this.#firstSeen(deliveryId, now);
 
@@ -284,13 +335,16 @@ export class Coordinator extends DurableObject<Env> {
     }
 
     const cap = this.#maxConcurrent();
-    const atCap = cap > 0 && this.#active() >= cap;
+    const globalAtCap = cap > 0 && this.#active() >= cap;
+    const tenantAtCap =
+      tenantCtx != null && this.#activeForTenant(tenantCtx.tenantId) >= tenantCtx.cap;
+    const atCap = globalAtCap || tenantAtCap;
     const state = atCap ? "pending" : "provisioning";
     // A row that boots immediately starts its provisioning clock now; one that
     // queues has no clock until #dequeuePending promotes it (see ROW_AGE).
     this.#sql.exec(
-      `INSERT INTO jobs (job_id, run_id, repo, sandbox_id, runner_name, label, state, created_at, provision_started_at, booted_at)
-       VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, NULL)`,
+      `INSERT INTO jobs (job_id, run_id, repo, sandbox_id, runner_name, label, state, created_at, provision_started_at, booted_at, tenant_id, weight)
+       VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, NULL, ?, ?)`,
       job.jobId,
       job.runId,
       job.repoFullName,
@@ -298,6 +352,8 @@ export class Coordinator extends DurableObject<Env> {
       state,
       now,
       atCap ? null : now,
+      tenantCtx?.tenantId ?? null,
+      tenantCtx?.weight ?? null,
     );
     return { action: atCap ? "queued" : "provision", jobId: job.jobId };
   }
@@ -393,7 +449,9 @@ export class Coordinator extends DurableObject<Env> {
       // A raced `completed` already dropped the row, but we hold a live VM. There
       // is nothing left to persist the teardown against, so hand it back to be
       // destroyed now and let the orphaned-sandbox sweep backstop a failure.
-      toDestroy = { jobId, sandboxId: vm };
+      // The row is gone, so its tenant is unknowable — null skips the egress
+      // read rather than guessing at a cost attribution that no longer exists.
+      toDestroy = { jobId, sandboxId: vm, tenantId: null };
     }
     return { toDestroy, nextPending: this.#dequeuePending() };
   }
@@ -419,8 +477,44 @@ export class Coordinator extends DurableObject<Env> {
     return { toDestroy, nextPending: this.#dequeuePending() };
   }
 
-  /** Confirms a VM was destroyed: removes its `destroying` row. */
-  async markDestroyed(jobId: number): Promise<void> {
+  /**
+   * Confirms a VM was destroyed: bills its lifetime to the ledger, then
+   * removes its `destroying` row. The ONE point every teardown path (webhook,
+   * reaper, reconciler, provision-failure) funnels through, so this is where
+   * D9 bills VM lifetime (booted_at → destroy confirmation). A row that never
+   * booted ran no VM and bills nothing. Weight was persisted at admission
+   * (11fb56c); a NULL weight is a pre-migration row — fall back to the label
+   * parse. Billing reads the row BEFORE the guarded DELETE removes it, so a
+   * redelivered markDestroyed finds no row and bills nothing a second time.
+   */
+  async markDestroyed(jobId: number, egressBytes?: number): Promise<void> {
+    const row = this.#rowByJob(jobId);
+    if (row?.tenant_id && row.booted_at) {
+      const weight =
+        row.weight ??
+        weightForLabel(
+          row.label ?? this.env.RUNNER_LABEL,
+          this.env.RUNNER_LABEL,
+          this.env.RUNNER_SHAPE,
+        );
+      const minutes = (Math.max(0, Date.now() - row.booted_at) / 60_000) * weight;
+      const month = monthKey(Date.now());
+      const bill = (repo: string, egress: number) =>
+        this.#sql.exec(
+          `INSERT INTO usage (installation_id, month, repo_full_name, weighted_minutes, egress_bytes)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(installation_id, month, repo_full_name) DO UPDATE SET
+             weighted_minutes = weighted_minutes + excluded.weighted_minutes,
+             egress_bytes = egress_bytes + excluded.egress_bytes`,
+          row.tenant_id,
+          month,
+          repo,
+          minutes,
+          egress,
+        );
+      bill("", egressBytes ?? 0); // tenant total — the enforcement row
+      bill(row.repo, egressBytes ?? 0); // per-Project attribution (D3)
+    }
     this.#sql.exec(`DELETE FROM jobs WHERE job_id = ? AND state = 'destroying'`, jobId);
   }
 
@@ -529,6 +623,68 @@ export class Coordinator extends DurableObject<Env> {
     this.#sql.exec(`DELETE FROM deliveries WHERE seen_at < ?`, cutoff);
     // Stale-orphan teardowns above vacated slots; pull surviving pending jobs in.
     return { toDestroy, nextPending: this.#drainPending() };
+  }
+
+  // ── Tenant admission (webhook hot path; pure reads, no writes but INSERT-OR-IGNORE) ──
+
+  /**
+   * Gates 1+2 and the quota balance in ONE hot-path read. Runs before onQueued
+   * so an unapproved org/repo costs exactly one RPC and no row insert. Passive:
+   * pure SELECTs, no clock, no writes.
+   */
+  admitTenantJob(installationId: number, repoFullName: string, month: string): TenantAdmission {
+    const t = getTenant(this.#sql, installationId);
+    if (!t) return { kind: "unknown-tenant" };
+    if (t.status !== "approved") return { kind: "not-approved", status: t.status };
+    if (!t.allowAllRepos) {
+      const ok = this.#sql
+        .exec(
+          `SELECT 1 FROM projects WHERE installation_id = ? AND repo_full_name = ?`,
+          installationId,
+          repoFullName,
+        )
+        .toArray();
+      if (ok.length === 0) return { kind: "repo-not-approved", orgLogin: t.orgLogin };
+    }
+    const used = this.#sql
+      .exec(
+        `SELECT weighted_minutes FROM usage
+          WHERE installation_id = ? AND month = ? AND repo_full_name = ''`,
+        installationId,
+        month,
+      )
+      .toArray() as { weighted_minutes: number }[];
+    return {
+      kind: "ok",
+      tenant: {
+        installationId: t.installationId,
+        orgLogin: t.orgLogin,
+        runnerGroupId: t.runnerGroupId,
+        allowAllRepos: t.allowAllRepos,
+      },
+      concurrencyCap: t.concurrencyCap,
+      maxShape: t.maxShape,
+      minuteGrant: t.minuteGrant,
+      usedMinutes: used[0]?.weighted_minutes ?? 0,
+      jobTtlMs: t.jobTtlMs,
+    };
+  }
+
+  /**
+   * One refusal notice per (tenant, repo, UTC day): INSERT OR IGNORE, and the
+   * caller posts a check run only when this returns true. Bounds check-run spam
+   * and its GitHub-call cost by construction.
+   */
+  shouldNotifyRefusal(installationId: number, repoFullName: string, day: string): boolean {
+    this.#sql.exec(
+      `INSERT OR IGNORE INTO refusal_notices (installation_id, repo_full_name, day)
+       VALUES (?, ?, ?)`,
+      installationId,
+      repoFullName,
+      day,
+    );
+    const row = this.#sql.exec(`SELECT changes() AS n`).one() as { n: number };
+    return row.n === 1;
   }
 
   // ── Tenant registry (admin-frequency; never on the webhook hot path) ──

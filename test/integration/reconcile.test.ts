@@ -1,6 +1,6 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { runReconciler } from "../../src/handler";
+import { runReconciler } from "../../src/reconcile";
 import { resetShapeCacheForTests } from "../../src/shapes";
 import { resetCredentialSessionsForTests } from "../../src/github/auth";
 import { shapeCatalog, runnerName } from "../helpers/mocks";
@@ -21,6 +21,7 @@ const job = (id: number) => ({
   runId: id,
   repoFullName: "nodeops-app/api",
   label: "createos",
+  tenant: null,
 });
 async function boot(s: Stub, jobId: number, sandboxId: string) {
   await s.recordSandboxCreated(jobId, sandboxId, runnerName(jobId));
@@ -42,7 +43,7 @@ describe("reapUnregistered (runner-identity liveness)", () => {
     await s.onQueued(job(8002), "d2");
     await boot(s, 8002, "sb8002");
     const res = await s.reapUnregistered(Date.now() + 1, [], 0);
-    expect(res.toDestroy).toContainEqual({ jobId: 8002, sandboxId: "sb8002" });
+    expect(res.toDestroy).toContainEqual({ jobId: 8002, sandboxId: "sb8002", tenantId: null });
     expect(await s.activeCount()).toBe(0); // flipped to destroying → off the cap
   });
 
@@ -73,7 +74,7 @@ describe("reapUnregistered (runner-identity liveness)", () => {
 
     // 8101's runner is gone; 8102 still online → only 8101 reaped, freeing one slot.
     const res = await s.reapUnregistered(Date.now() + 1, [runnerName(8102)], 0);
-    expect(res.toDestroy).toContainEqual({ jobId: 8101, sandboxId: "sb8101" });
+    expect(res.toDestroy).toContainEqual({ jobId: 8101, sandboxId: "sb8101", tenantId: null });
     expect(res.nextPending).toContainEqual(job(8103)); // pending pulled into the freed slot
     expect(await s.activeCount()).toBe(2); // 8102 running + 8103 now provisioning
   });
@@ -137,7 +138,9 @@ const depsWith = (sandboxes: ReturnType<typeof vm>[]) => ({
   makeClient: () => ({
     createSandbox: vi.fn(),
     listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
-    getSandbox: vi.fn().mockResolvedValue({ destroy: vi.fn() }),
+    getSandbox: vi
+      .fn()
+      .mockResolvedValue({ destroy: vi.fn(), getBandwidth: async () => ({ used_bytes: 0 }) }),
     listSandboxes: vi.fn().mockResolvedValue(sandboxes),
   }),
 });
@@ -388,7 +391,9 @@ describe("runReconciler — orphaned runner sweep", () => {
     makeClient: () => ({
       createSandbox: vi.fn(),
       listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
-      getSandbox: vi.fn().mockResolvedValue({ destroy: vi.fn() }),
+      getSandbox: vi
+        .fn()
+        .mockResolvedValue({ destroy: vi.fn(), getBandwidth: async () => ({ used_bytes: 0 }) }),
       listSandboxes: vi.fn().mockResolvedValue([]),
     }),
   });

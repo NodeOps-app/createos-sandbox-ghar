@@ -37,6 +37,7 @@ const pending = (jobId: number) => ({
   runId: 1,
   repoFullName: "nodeops-app/api",
   label: "createos",
+  tenant: null,
 });
 
 /** POSTs a signed `queued` webhook for `jobId` and drains the waitUntil work. */
@@ -179,7 +180,7 @@ describe("a provision that fails after the VM exists never leaks it", () => {
       id: "sb_launchfail",
       runCommand: vi.fn().mockRejectedValue(new Error("exec refused")),
     });
-    const getSandbox = vi.fn().mockResolvedValue({ destroy });
+    const getSandbox = vi.fn().mockResolvedValue({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) });
 
     await postQueued(510, {
       makeClient: () => ({
@@ -222,7 +223,7 @@ describe("a provision that fails after the VM exists never leaks it", () => {
   it("destroys the VM when the job is cancelled mid-create", async () => {
     patchGitHub();
     const destroy = vi.fn().mockResolvedValue({ id: "sb_cancelled", status: "destroying" });
-    const getSandbox = vi.fn().mockResolvedValue({ destroy });
+    const getSandbox = vi.fn().mockResolvedValue({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) });
     // The job completes WHILE createSandbox is in flight — so by the time we go to
     // record the VM, its row is already gone. The VM is real and must still die.
     const createSandbox = vi.fn().mockImplementation(async () => {

@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { runnerName } from "../helpers/mocks";
 import { describe, it, expect, vi } from "vitest";
-import { runReaper } from "../../src/handler";
+import { runReaper } from "../../src/reconcile";
 
 type Stub = ReturnType<typeof env.COORDINATOR.get>;
 async function boot(s: Stub, jobId: number, sandboxId: string) {
@@ -15,7 +15,7 @@ describe("reaper", () => {
   it("sweep returns VMs of jobs older than the cutoff", async () => {
     const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("reap-" + Math.random()));
     await s.onQueued(
-      { jobId: 900, runId: 900, repoFullName: "nodeops-app/api", label: "createos" },
+      { jobId: 900, runId: 900, repoFullName: "nodeops-app/api", label: "createos", tenant: null },
       "d1",
     );
     await boot(s, 900, "sb_orphan");
@@ -30,7 +30,7 @@ describe("reaper", () => {
   it("sweep leaves fresh rows alone", async () => {
     const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("reap2-" + Math.random()));
     await s.onQueued(
-      { jobId: 901, runId: 901, repoFullName: "nodeops-app/api", label: "createos" },
+      { jobId: 901, runId: 901, repoFullName: "nodeops-app/api", label: "createos", tenant: null },
       "d2",
     );
     await boot(s, 901, "sb_fresh");
@@ -42,7 +42,7 @@ describe("reaper", () => {
   it("sweep retries unconfirmed teardowns (destroying rows)", async () => {
     const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("reap3-" + Math.random()));
     await s.onQueued(
-      { jobId: 903, runId: 903, repoFullName: "nodeops-app/api", label: "createos" },
+      { jobId: 903, runId: 903, repoFullName: "nodeops-app/api", label: "createos", tenant: null },
       "d4",
     );
     await boot(s, 903, "sb_903");
@@ -55,7 +55,7 @@ describe("reaper", () => {
   it("runReaper tears down swept VMs and confirms them (singleton DO)", async () => {
     const singleton = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
     await singleton.onQueued(
-      { jobId: 902, runId: 902, repoFullName: "nodeops-app/api", label: "createos" },
+      { jobId: 902, runId: 902, repoFullName: "nodeops-app/api", label: "createos", tenant: null },
       "d3",
     );
     await boot(singleton, 902, "sb_902");
@@ -63,7 +63,9 @@ describe("reaper", () => {
     await singleton.onCompleted(902, runnerName(902));
 
     const destroy = vi.fn().mockResolvedValue({ id: "sb_902", status: "destroying" });
-    const getSandbox = vi.fn().mockResolvedValue({ destroy });
+    const getSandbox = vi
+      .fn()
+      .mockResolvedValue({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) });
     // runReaper unconditionally threads deps through provisionAndRecord too,
     // for any pending job a freed slot promotes — none here, so this never
     // fires, but the type still requires createSandbox/listShapes present.
@@ -93,7 +95,7 @@ describe("reaper", () => {
  */
 async function queued(s: Stub, jobId: number) {
   await s.onQueued(
-    { jobId, runId: jobId, repoFullName: "nodeops-app/api", label: "createos" },
+    { jobId, runId: jobId, repoFullName: "nodeops-app/api", label: "createos", tenant: null },
     `pf-${jobId}`,
   );
 }
@@ -106,7 +108,7 @@ describe("markProvisionFailed disposes of the VM it left behind", () => {
 
     const { toDestroy } = await s.markProvisionFailed(940, "sb_940");
 
-    expect(toDestroy).toEqual({ jobId: 940, sandboxId: "sb_940" });
+    expect(toDestroy).toEqual({ jobId: 940, sandboxId: "sb_940", tenantId: null });
     expect(await s.activeCount()).toBe(0); // destroying does not hold a slot
     // The row survives, so an unconfirmed teardown is retried rather than lost.
     expect(ids(await s.sweep(Date.now(), 3_600_000))).toContain("sb_940");
@@ -118,7 +120,7 @@ describe("markProvisionFailed disposes of the VM it left behind", () => {
 
     const { toDestroy } = await s.markProvisionFailed(941, "sb_941");
 
-    expect(toDestroy).toEqual({ jobId: 941, sandboxId: "sb_941" });
+    expect(toDestroy).toEqual({ jobId: 941, sandboxId: "sb_941", tenantId: null });
     expect(ids(await s.sweep(Date.now(), 3_600_000))).toContain("sb_941");
   });
 
@@ -141,7 +143,7 @@ describe("markProvisionFailed disposes of the VM it left behind", () => {
     // The Worker still holds a live VM. Nothing to persist against, but it must
     // come back to be destroyed rather than be silently forgotten.
     const { toDestroy } = await s.markProvisionFailed(943, "sb_943");
-    expect(toDestroy).toEqual({ jobId: 943, sandboxId: "sb_943" });
+    expect(toDestroy).toEqual({ jobId: 943, sandboxId: "sb_943", tenantId: null });
   });
 });
 
@@ -160,13 +162,19 @@ describe("age is measured from provisioning, not from queueing", () => {
   async function promoteAfterWaiting(s: Stub, jobId: number, waitMs: number) {
     for (const filler of [jobId + 100, jobId + 200]) {
       await s.onQueued(
-        { jobId: filler, runId: filler, repoFullName: "nodeops-app/api", label: "createos" },
+        {
+          jobId: filler,
+          runId: filler,
+          repoFullName: "nodeops-app/api",
+          label: "createos",
+          tenant: null,
+        },
         `fill-${filler}`,
       );
       await boot(s, filler, `sb_fill_${filler}`);
     }
     await s.onQueued(
-      { jobId, runId: jobId, repoFullName: "nodeops-app/api", label: "createos" },
+      { jobId, runId: jobId, repoFullName: "nodeops-app/api", label: "createos", tenant: null },
       `d-${jobId}`,
     );
     expect(await s.activeCount()).toBe(2); // the job is pending, not active

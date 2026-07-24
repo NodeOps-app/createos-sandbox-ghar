@@ -125,6 +125,7 @@ const job: PendingJob = {
   runId: 200,
   repoFullName: "nodeops-app/api",
   label: "createos",
+  tenant: null,
 };
 
 describe("createRunnerSandbox", () => {
@@ -216,6 +217,7 @@ describe("createRunnerSandbox", () => {
       runId: 1,
       repoFullName: "nodeops-app/api",
       label: "createos",
+      tenant: null,
     };
 
     await createRunnerSandbox(cfg, github, bigJob, {
@@ -240,6 +242,7 @@ describe("createRunnerSandbox", () => {
       runId: 1,
       repoFullName: "o/r",
       label: "createos-8vcpu-16gb",
+      tenant: null,
     };
 
     await createRunnerSandbox(config, github, shapedJob, {
@@ -272,10 +275,11 @@ describe("launchRunner", () => {
 });
 
 describe("teardownSandbox", () => {
-  it("destroys an existing sandbox", async () => {
+  it("destroys an existing sandbox; readEgress defaults false (no bandwidth read, null return)", async () => {
     const destroy = vi.fn().mockResolvedValue({ id: "sb_1", status: "destroying" });
-    const getSandbox = vi.fn().mockResolvedValue({ destroy });
-    await teardownSandbox(config, "sb_1", {
+    const getBandwidth = vi.fn().mockResolvedValue({ used_bytes: 0 });
+    const getSandbox = vi.fn().mockResolvedValue({ destroy, getBandwidth });
+    const result = await teardownSandbox(config, "sb_1", {
       makeClient: () => ({
         getSandbox,
         createSandbox: vi.fn(),
@@ -284,6 +288,56 @@ describe("teardownSandbox", () => {
       }),
     });
     expect(destroy).toHaveBeenCalledOnce();
+    expect(getBandwidth).not.toHaveBeenCalled();
+    expect(result).toBeNull();
+  });
+
+  it("readEgress=true reads bandwidth before destroying and returns used_bytes", async () => {
+    const destroy = vi.fn().mockResolvedValue({ id: "sb_2", status: "destroying" });
+    const getBandwidth = vi.fn().mockResolvedValue({ used_bytes: 4242 });
+    const getSandbox = vi.fn().mockResolvedValue({ destroy, getBandwidth });
+    const result = await teardownSandbox(
+      config,
+      "sb_2",
+      {
+        makeClient: () => ({
+          getSandbox,
+          createSandbox: vi.fn(),
+          listShapes: vi.fn(),
+          listSandboxes: vi.fn().mockResolvedValue([]),
+        }),
+      },
+      true,
+    );
+    expect(result).toBe(4242);
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it("readEgress=true still destroys and returns null when the bandwidth read rejects (best-effort)", async () => {
+    const destroy = vi.fn().mockResolvedValue({ id: "sb_3", status: "destroying" });
+    const getBandwidth = vi.fn().mockRejectedValue(new Error("bw down"));
+    const getSandbox = vi.fn().mockResolvedValue({ destroy, getBandwidth });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await teardownSandbox(
+      config,
+      "sb_3",
+      {
+        makeClient: () => ({
+          getSandbox,
+          createSandbox: vi.fn(),
+          listShapes: vi.fn(),
+          listSandboxes: vi.fn().mockResolvedValue([]),
+        }),
+      },
+      true,
+    );
+    expect(result).toBeNull();
+    expect(destroy).toHaveBeenCalledOnce(); // never blocked by the failed read
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0]![0]).toEqual(
+      expect.stringContaining("bandwidth read failed sandbox=sb_3"),
+    );
+    warn.mockRestore();
   });
 
   it("swallows NotFound (idempotent)", async () => {
@@ -301,7 +355,7 @@ describe("teardownSandbox", () => {
           listSandboxes: vi.fn().mockResolvedValue([]),
         }),
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeNull();
   });
 
   it("rethrows other errors", async () => {

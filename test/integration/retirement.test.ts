@@ -9,6 +9,7 @@ const job = (jobId: number) => ({
   runId: jobId,
   repoFullName: "nodeops-app/api",
   label: "createos",
+  tenant: null,
 });
 
 async function seeded(jobId: number, sandboxId: string): Promise<Stub> {
@@ -24,7 +25,7 @@ async function expectDestroyingRetry(stub: Stub, jobId: number, sandboxId: strin
   expect(await stub.activeCount()).toBe(0);
   expect(await stub.liveJobIds()).toContain(jobId);
   const retry = await stub.sweep(Date.now(), 3_600_000);
-  expect(retry.toDestroy).toContainEqual({ jobId, sandboxId });
+  expect(retry.toDestroy).toContainEqual({ jobId, sandboxId, tenantId: null });
   await stub.markDestroyed(jobId);
   expect(await stub.liveJobIds()).not.toContain(jobId);
 }
@@ -36,7 +37,7 @@ describe("canonical Coordinator row retirement", () => {
 
     const result = await stub.onCompleted(960, runnerName(960));
 
-    expect(result.toDestroy).toEqual({ jobId: 960, sandboxId: "sb-960" });
+    expect(result.toDestroy).toEqual({ jobId: 960, sandboxId: "sb-960", tenantId: null });
     await expectDestroyingRetry(stub, 960, "sb-960");
   });
 
@@ -45,7 +46,7 @@ describe("canonical Coordinator row retirement", () => {
 
     const result = await stub.markProvisionFailed(961);
 
-    expect(result.toDestroy).toEqual({ jobId: 961, sandboxId: "sb-961" });
+    expect(result.toDestroy).toEqual({ jobId: 961, sandboxId: "sb-961", tenantId: null });
     await expectDestroyingRetry(stub, 961, "sb-961");
   });
 
@@ -55,7 +56,7 @@ describe("canonical Coordinator row retirement", () => {
 
     const result = await stub.reapUnregistered(Date.now() + 1, [], 0);
 
-    expect(result.toDestroy).toContainEqual({ jobId: 962, sandboxId: "sb-962" });
+    expect(result.toDestroy).toContainEqual({ jobId: 962, sandboxId: "sb-962", tenantId: null });
     await expectDestroyingRetry(stub, 962, "sb-962");
   });
 
@@ -65,7 +66,7 @@ describe("canonical Coordinator row retirement", () => {
 
     const result = await stub.sweep(Date.now() + 1, 0);
 
-    expect(result.toDestroy).toContainEqual({ jobId: 963, sandboxId: "sb-963" });
+    expect(result.toDestroy).toContainEqual({ jobId: 963, sandboxId: "sb-963", tenantId: null });
     await expectDestroyingRetry(stub, 963, "sb-963");
   });
 
