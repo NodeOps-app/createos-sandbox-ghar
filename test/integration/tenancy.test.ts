@@ -72,7 +72,7 @@ describe("per-tenant cap", () => {
     const s = stub("cap-p-" + Math.random());
     await s.adminUpsertTenant(approved(1));
     await s.onQueued(job(11, 1), "d1", ctx(1));
-    await s.recordSandboxCreated(11, "sb1", "cos-11-aa");
+    await s.recordSandboxCreated(11, "sb1", "cos-11-aa", "default");
     await s.markRunning(11);
     await s.onQueued(job(12, 1), "d2", ctx(1)); // pending behind cap
     const res = await s.onCompleted(11, "cos-11-aa", 1);
@@ -93,7 +93,7 @@ describe("per-tenant cap at promotion", () => {
     await s.adminUpsertTenant(approved(2, { concurrencyCap: 5 }));
 
     await s.onQueued(job(11, 1), "d1", ctx(1, 1)); // A's one running job
-    await s.recordSandboxCreated(11, "sb11", "cos-11-aa");
+    await s.recordSandboxCreated(11, "sb11", "cos-11-aa", "default");
     await s.markRunning(11);
 
     expect((await s.onQueued(job(99, 0), "d0")).action).toBe("provision"); // filler, fills global cap
@@ -122,7 +122,7 @@ describe("per-tenant cap at promotion", () => {
     const bare = (id: number) => job(id, 0);
 
     expect((await s.onQueued(bare(1), "s1")).action).toBe("provision");
-    await s.recordSandboxCreated(1, "sb1", "cos-1-aa");
+    await s.recordSandboxCreated(1, "sb1", "cos-1-aa", "default");
     await s.markRunning(1);
     expect((await s.onQueued(bare(2), "s2")).action).toBe("provision"); // fills global cap
     expect((await s.onQueued(bare(3), "s3")).action).toBe("queued"); // OLDER pending
@@ -181,7 +181,7 @@ describe("lifecycle events are scoped to the sending installation", () => {
     await s.adminUpsertTenant(approved(2, { concurrencyCap: 5 }));
 
     await s.onQueued(job(11, 1), "d1", ctx(1, 5)); // A's VM, running
-    await s.recordSandboxCreated(11, "sb11", "cos-11-aa");
+    await s.recordSandboxCreated(11, "sb11", "cos-11-aa", "default");
     await s.markRunning(11);
 
     const attack = await s.onCompleted(11, "cos-11-aa", 2); // B claims A's runner
@@ -201,7 +201,7 @@ describe("lifecycle events are scoped to the sending installation", () => {
     const s = stub("xt-start-" + Math.random());
     await s.adminUpsertTenant(approved(1, { concurrencyCap: 5 }));
     await s.onQueued(job(11, 1), "d1", ctx(1, 5));
-    await s.recordSandboxCreated(11, "sb11", "cos-11-aa");
+    await s.recordSandboxCreated(11, "sb11", "cos-11-aa", "default");
     await s.markRunning(11);
 
     expect(await s.markJobStarted(11, "cos-11-aa", 2)).toBeNull(); // B: no read, no stamp
@@ -212,7 +212,7 @@ describe("lifecycle events are scoped to the sending installation", () => {
     const s = stub("xt-none-" + Math.random());
     await s.adminUpsertTenant(approved(1, { concurrencyCap: 5 }));
     await s.onQueued(job(11, 1), "d1", ctx(1, 5));
-    await s.recordSandboxCreated(11, "sb11", "cos-11-aa");
+    await s.recordSandboxCreated(11, "sb11", "cos-11-aa", "default");
     await s.markRunning(11);
 
     // Fails closed rather than falling back to the old global lookup.
@@ -231,7 +231,7 @@ describe("weight recomputed at promotion", () => {
     await s.adminUpsertTenant(approved(1, { concurrencyCap: 1 }));
 
     await s.onQueued(job(11, 1), "d1", ctx(1, 1)); // A's one running job, fills tenant cap
-    await s.recordSandboxCreated(11, "sb11", "cos-11-aa");
+    await s.recordSandboxCreated(11, "sb11", "cos-11-aa", "default");
     await s.markRunning(11);
 
     await s.onQueued(job(12, 1), "d2", ctx(1, 1, 999)); // queued behind tenant cap, WRONG weight
@@ -279,7 +279,7 @@ describe("ledger", () => {
     const s = stub("led-" + Math.random());
     await s.adminUpsertTenant(approved(1, { concurrencyCap: 5 }));
     await s.onQueued(job(11, 1), "d1", ctx(1, 5));
-    await s.recordSandboxCreated(11, "sb1", "cos-11-aa");
+    await s.recordSandboxCreated(11, "sb1", "cos-11-aa", "default");
     await s.markRunning(11);
     await s.onCompleted(11, "cos-11-aa", 1);
     await s.markDestroyed(11, 5_000);
@@ -321,7 +321,7 @@ describe("per-tenant TTL", () => {
     const s = stub("ttl-" + Math.random());
     await s.adminUpsertTenant(approved(1, { jobTtlMs: 60_000, concurrencyCap: 5 }));
     await s.onQueued(job(11, 1), "d1", ctx(1, 5));
-    await s.recordSandboxCreated(11, "sb1", "cos-11-aa");
+    await s.recordSandboxCreated(11, "sb1", "cos-11-aa", "default");
     await s.markRunning(11);
     const t0 = Date.now();
 

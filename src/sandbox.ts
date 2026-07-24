@@ -1,7 +1,13 @@
 import { CreateosSandboxNotFoundError } from "@nodeops-createos/sandbox";
 import type { Config, PendingJob } from "./types";
 import type { GitHubClient } from "./github/client";
-import { makeSandboxClient, type SandboxDeps, type SandboxHandle } from "./createos";
+import {
+  isFailoverEligible,
+  makeSandboxClient,
+  regionByName,
+  type SandboxDeps,
+  type SandboxHandle,
+} from "./createos";
 import { shapeForLabel } from "./shapes";
 
 // Re-exported so existing consumers (handler.ts, index.ts, tests) keep importing
@@ -146,6 +152,9 @@ export async function createRunnerSandbox(
   sandboxId: string;
   runnerName: string;
   sandbox: SandboxHandle;
+  /** Name of the region whose control plane booted the VM. The caller persists
+   * it on the job row; teardown dials that region (see TeardownTask.region). */
+  region: string;
   timings: { mintMs: number; createMs: number };
 }> {
   const attemptId =
@@ -172,24 +181,49 @@ export async function createRunnerSandbox(
   // our own VMs.
   const sandboxName = sandboxNameFor(job.jobId, runnerName, config);
 
-  const c = makeSandboxClient(config, deps);
-  const createStart = Date.now();
-  const sandbox = await c.createSandbox({
-    shape: shapeForLabel(job.label, config),
-    rootfs: config.runnerTemplate,
-    disk_mib: config.runnerDiskMib,
-    name: sandboxName,
-    // CI jobs pull from arbitrary hosts (npm/pip/apt/git/ghcr/…); the createos
-    // default egress allowlist blocks them. `["*"]` = allow all egress.
-    egress: ["*"],
-    // Do NOT set auto_pause_after_seconds: a paused runner goes offline to
-    // GitHub (missed dispatch, 1-day deregistration). Omitting it disables
-    // idle auto-pause; these VMs self-delete per job anyway.
-    envs: { JIT_CONFIG: jitConfig },
-  });
-  const createMs = Date.now() - createStart;
-
-  return { sandboxId: sandbox.id, runnerName, sandbox, timings: { mintMs, createMs } };
+  // Region failover: the JIT config is minted ONCE and reused on every attempt
+  // — it is a GitHub credential, indifferent to which control plane boots the
+  // VM. Retry only on region-level faults (isFailoverEligible: 5xx/connection/
+  // timeout — capacity exhaustion is a bare 503); a 4xx is a request defect and
+  // fails identically everywhere. A single configured region loops exactly once,
+  // i.e. the pre-region behavior. If an attempt throws AFTER the VM booted
+  // server-side (response lost), that VM leaks under a stable per-job name the
+  // orphaned-sandbox sweep reclaims — same as the pre-failover leak path.
+  for (const [i, region] of config.createosRegions.entries()) {
+    const c = makeSandboxClient(config, deps, region);
+    const createStart = Date.now();
+    try {
+      const sandbox = await c.createSandbox({
+        shape: shapeForLabel(job.label, config),
+        rootfs: config.runnerTemplate,
+        disk_mib: config.runnerDiskMib,
+        name: sandboxName,
+        // CI jobs pull from arbitrary hosts (npm/pip/apt/git/ghcr/…); the createos
+        // default egress allowlist blocks them. `["*"]` = allow all egress.
+        egress: ["*"],
+        // Do NOT set auto_pause_after_seconds: a paused runner goes offline to
+        // GitHub (missed dispatch, 1-day deregistration). Omitting it disables
+        // idle auto-pause; these VMs self-delete per job anyway.
+        envs: { JIT_CONFIG: jitConfig },
+      });
+      const createMs = Date.now() - createStart;
+      return {
+        sandboxId: sandbox.id,
+        runnerName,
+        sandbox,
+        region: region.name,
+        timings: { mintMs, createMs },
+      };
+    } catch (err) {
+      if (i === config.createosRegions.length - 1 || !isFailoverEligible(err)) throw err;
+      console.warn(
+        `createSandbox failed in region ${region.name} job=${job.jobId}: ${String(err)} — ` +
+          `failing over to ${config.createosRegions[i + 1]!.name}`,
+      );
+    }
+  }
+  // Unreachable: the last iteration either returns or throws. TS needs the exit.
+  throw new Error("createRunnerSandbox: region loop exited without a result");
 }
 
 /**
@@ -218,10 +252,14 @@ export async function launchRunner(sandbox: SandboxHandle): Promise<void> {
 export async function teardownSandbox(
   config: Config,
   sandboxId: string,
+  /** Region whose control plane owns this VM (from the job row); null/undefined
+   * = pre-region row → primary. An unknown name throws BEFORE any API call —
+   * see regionByName: guessing here is how a live VM reads as "already gone". */
+  region: string | null | undefined,
   deps: SandboxDeps = {},
   readEgress = false,
 ): Promise<number | null> {
-  const c = makeSandboxClient(config, deps);
+  const c = makeSandboxClient(config, deps, regionByName(config, region));
   try {
     const handle = await c.getSandbox(sandboxId);
     let egress: number | null = null;

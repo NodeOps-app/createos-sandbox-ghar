@@ -1,4 +1,4 @@
-import type { Config, ProvisionPolicy } from "./types";
+import type { Config, ProvisionPolicy, Region } from "./types";
 
 const POLICIES: ProvisionPolicy[] = ["org-wide", "repo-allowlist", "fork-gated"];
 
@@ -45,6 +45,37 @@ function mode(env: Record<string, unknown>): "single" | "multi" {
   return v;
 }
 
+/**
+ * The CreateOS control planes provisioning may use, primary first. Parsed from
+ * CREATEOS_REGIONS ("us=https://api-us.sb.createos.sh,eu=https://api-eu.sb.createos.sh");
+ * when unset, CREATEOS_BASE_URL becomes a single region named "default" — the
+ * pre-region behavior, verbatim. A region NAME is persisted on every job row and
+ * read back at teardown, so it must be stable across deploys (like RUNNER_LABEL):
+ * renaming a region strands every row the old name owns.
+ */
+function regions(env: Record<string, unknown>): Region[] {
+  const raw = (env.CREATEOS_REGIONS as string) || "";
+  if (!raw.trim()) {
+    return [{ name: "default", baseUrl: req(env, "CREATEOS_BASE_URL").replace(/\/+$/, "") }];
+  }
+  const out: Region[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw.split(",")) {
+    const m = /^([a-z0-9][a-z0-9-]*)=(https:\/\/\S+)$/.exec(entry.trim());
+    if (!m) {
+      throw new Error(
+        `invalid CREATEOS_REGIONS entry: ${JSON.stringify(entry)} (want name=https://host)`,
+      );
+    }
+    const name = m[1]!;
+    const baseUrl = m[2]!;
+    if (seen.has(name)) throw new Error(`duplicate CREATEOS_REGIONS region: ${name}`);
+    seen.add(name);
+    out.push({ name, baseUrl: baseUrl.replace(/\/+$/, "") });
+  }
+  return out;
+}
+
 export function loadConfig(env: Record<string, unknown>): Config {
   const policy = (env.PROVISION_POLICY as string) || "org-wide";
   if (!POLICIES.includes(policy as ProvisionPolicy)) {
@@ -62,7 +93,7 @@ export function loadConfig(env: Record<string, unknown>): Config {
     githubAppPrivateKeyPkcs8: req(env, "GITHUB_APP_PRIVATE_KEY"),
     githubInstallationId: req(env, "GITHUB_INSTALLATION_ID"),
     githubWebhookSecret: req(env, "GITHUB_WEBHOOK_SECRET"),
-    createosBaseUrl: req(env, "CREATEOS_BASE_URL"),
+    createosRegions: regions(env),
     createosApiKey: req(env, "CREATEOS_API_KEY"),
     runnerLabel: (env.RUNNER_LABEL as string) || "createos",
     runnerGroupId: posInt(env, "RUNNER_GROUP_ID", 1),

@@ -77,4 +77,52 @@ describe("loadConfig", () => {
     expect(loadConfig({ ...base, TENANCY_MODE: "multi" }).tenancyMode).toBe("multi");
     expect(() => loadConfig({ ...base, TENANCY_MODE: "dual" })).toThrow(/TENANCY_MODE/);
   });
+
+  describe("createosRegions", () => {
+    it("wraps CREATEOS_BASE_URL as a single 'default' region when CREATEOS_REGIONS is unset", () => {
+      expect(loadConfig(base).createosRegions).toEqual([
+        { name: "default", baseUrl: "https://api.createos" },
+      ]);
+    });
+
+    it("parses CREATEOS_REGIONS primary-first and strips trailing slashes", () => {
+      const { CREATEOS_BASE_URL: _omit, ...rest } = base;
+      const c = loadConfig({
+        ...rest,
+        CREATEOS_REGIONS: "us=https://api-us.sb.createos.sh/,eu=https://api-eu.sb.createos.sh/",
+      });
+      expect(c.createosRegions).toEqual([
+        { name: "us", baseUrl: "https://api-us.sb.createos.sh" },
+        { name: "eu", baseUrl: "https://api-eu.sb.createos.sh" },
+      ]);
+    });
+
+    it("lets CREATEOS_REGIONS stand alone (CREATEOS_BASE_URL not required)", () => {
+      const { CREATEOS_BASE_URL: _omit, ...rest } = base;
+      expect(() =>
+        loadConfig({ ...rest, CREATEOS_REGIONS: "us=https://api-us.sb.createos.sh" }),
+      ).not.toThrow();
+    });
+
+    it("still requires CREATEOS_BASE_URL when CREATEOS_REGIONS is unset", () => {
+      const { CREATEOS_BASE_URL: _omit, ...rest } = base;
+      expect(() => loadConfig(rest)).toThrow(/CREATEOS_BASE_URL/);
+    });
+
+    it("rejects malformed entries, non-https urls, and duplicate names", () => {
+      const { CREATEOS_BASE_URL: _omit, ...rest } = base;
+      for (const bad of [
+        "us",
+        "us=",
+        "=https://api-us.sb.createos.sh",
+        "us=http://api-us.sb.createos.sh",
+        "us=https://a,us=https://b",
+        "US=https://api-us.sb.createos.sh",
+        "us:https://api-us.sb.createos.sh",
+        "us = https://api-us.sb.createos.sh",
+      ]) {
+        expect(() => loadConfig({ ...rest, CREATEOS_REGIONS: bad })).toThrow(/CREATEOS_REGIONS/);
+      }
+    });
+  });
 });

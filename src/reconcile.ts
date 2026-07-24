@@ -17,7 +17,7 @@ import {
   sandboxNamesAreSweepable,
   type SandboxDeps,
 } from "./sandbox";
-import { makeSandboxClient } from "./createos";
+import { makeSandboxClient, type ListedSandbox } from "./createos";
 import {
   coordinator,
   provisionAndRecord,
@@ -25,7 +25,7 @@ import {
   admitAndDrive,
   warnAdmission,
 } from "./handler";
-import type { PendingJob, Config, QueuedJob, Runner } from "./types";
+import type { PendingJob, Config, QueuedJob, Region, Runner } from "./types";
 
 /**
  * Deletes at most this many orphaned runner registrations per cron tick.
@@ -80,33 +80,82 @@ async function sweepOrphanedSandboxes(
     return;
   }
 
-  const client = makeSandboxClient(config, deps);
-  const sandboxes = await client.listSandboxes();
-  const live = new Set(await coordinator(env).liveJobIds());
-
-  const orphans = sandboxes.filter((s) => {
-    if (s.status === "destroyed" || s.status === "failed") return false;
-    if (!s.name) return false;
-    const jobId = jobIdFromSandboxName(s.name, config);
-    return jobId !== null && !live.has(jobId);
-  });
-  if (orphans.length === 0) return;
-
-  const batch = orphans.slice(0, MAX_SANDBOX_DESTROYS_PER_TICK);
-  if (batch.length < orphans.length) {
-    console.warn(
-      `sandbox sweep: ${orphans.length} orphaned VMs found, destroying ${batch.length} this tick ` +
-        `(MAX_SANDBOX_DESTROYS_PER_TICK=${MAX_SANDBOX_DESTROYS_PER_TICK}); the rest follow next cron`,
-    );
+  // Phase 1 — list EVERY region before reading the DO. The ordering is the
+  // safety invariant, same as it was single-region ("Listing createos BEFORE
+  // reading the DO closes the other direction", above): a VM created after its
+  // region's list is simply absent from that list (the next tick reclaims it),
+  // and a job row created after the liveJobIds snapshot is present in it and
+  // spares its VM. Inverting it — snapshotting live first — lets a VM booted
+  // between the snapshot and a region's list look ownerless, and the sweep
+  // would destroy a live boot. A region whose list fails is skipped; one
+  // control plane being down must not blind the sweep of the other (the same
+  // isolation the failover relies on).
+  const listed: { region: Region; sandboxes: ListedSandbox[] }[] = [];
+  for (const region of config.createosRegions) {
+    try {
+      listed.push({
+        region,
+        sandboxes: await makeSandboxClient(config, deps, region).listSandboxes(),
+      });
+    } catch (err) {
+      console.error(`sandbox sweep: list failed region=${region.name}: ${String(err)}`);
+    }
   }
 
-  const results = await Promise.allSettled(batch.map((s) => s.destroy()));
-  const failed = results.filter((r) => r.status === "rejected");
-  for (const f of failed) console.error(`sandbox sweep: destroy failed: ${String(f.reason)}`);
-  console.log(
-    `sandbox sweep: destroyed ${batch.length - failed.length}/${batch.length} orphaned VM(s): ` +
-      batch.map((s) => s.name).join(", "),
-  );
+  // Read the DO once, AFTER every list; every region's sweep tests against the
+  // same ownership oracle. Ownership is name-derived and region-independent — a
+  // leaked VM is reclaimed from the region its name is found in, regardless of
+  // which region the (missing) row would have named.
+  const live = new Set(await coordinator(env).liveJobIds());
+
+  // Phase 2 — evaluate + destroy. The per-tick budget is SHARED across regions
+  // (N regions must not multiply the per-tick subrequest spend the budget
+  // exists to bound), and the starting region ROTATES one slot per 5-min cron
+  // bucket: a fixed order plus an earlier region that always has candidates
+  // (or whose destroys keep failing — attempts consume budget too, they cost
+  // the same subrequests) would starve every later region's cleanup forever.
+  let remaining = MAX_SANDBOX_DESTROYS_PER_TICK;
+  const start = listed.length === 0 ? 0 : Math.floor(Date.now() / 300_000) % listed.length;
+  const ordered = [...listed.slice(start), ...listed.slice(0, start)];
+  for (const { region, sandboxes } of ordered) {
+    if (remaining <= 0) {
+      console.warn(
+        `sandbox sweep: shared destroy budget exhausted (MAX_SANDBOX_DESTROYS_PER_TICK=` +
+          `${MAX_SANDBOX_DESTROYS_PER_TICK}); region=${region.name} and any after it deferred to ` +
+          `next cron (rotation starts there next tick)`,
+      );
+      break;
+    }
+
+    const orphans = sandboxes.filter((s) => {
+      if (s.status === "destroyed" || s.status === "failed") return false;
+      if (!s.name) return false;
+      const jobId = jobIdFromSandboxName(s.name, config);
+      return jobId !== null && !live.has(jobId);
+    });
+    if (orphans.length === 0) continue;
+
+    const batch = orphans.slice(0, remaining);
+    if (batch.length < orphans.length) {
+      console.warn(
+        `sandbox sweep: region=${region.name} ${orphans.length} orphaned VMs found, destroying ` +
+          `${batch.length} this tick (MAX_SANDBOX_DESTROYS_PER_TICK=${MAX_SANDBOX_DESTROYS_PER_TICK} ` +
+          `shared across regions); the rest follow next cron`,
+      );
+    }
+
+    const results = await Promise.allSettled(batch.map((s) => s.destroy()));
+    const failed = results.filter((r) => r.status === "rejected");
+    for (const f of failed) {
+      console.error(`sandbox sweep: destroy failed region=${region.name}: ${String(f.reason)}`);
+    }
+    console.log(
+      `sandbox sweep: region=${region.name} destroyed ${batch.length - failed.length}/${batch.length} ` +
+        `orphaned VM(s): ` +
+        batch.map((s) => s.name).join(", "),
+    );
+    remaining -= batch.length;
+  }
 }
 
 /**

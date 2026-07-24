@@ -1,5 +1,6 @@
 import { env, SELF, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { CreateosSandboxServerError } from "@nodeops-createos/sandbox";
 import { handleWebhook } from "../../src/handler";
 import { resetCredentialSessionsForTests } from "../../src/github/auth";
 import { sign, workflowJobPayload } from "../helpers/fixtures";
@@ -180,7 +181,9 @@ describe("a provision that fails after the VM exists never leaks it", () => {
       id: "sb_launchfail",
       runCommand: vi.fn().mockRejectedValue(new Error("exec refused")),
     });
-    const getSandbox = vi.fn().mockResolvedValue({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) });
+    const getSandbox = vi
+      .fn()
+      .mockResolvedValue({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) });
 
     await postQueued(510, {
       makeClient: () => ({
@@ -223,7 +226,9 @@ describe("a provision that fails after the VM exists never leaks it", () => {
   it("destroys the VM when the job is cancelled mid-create", async () => {
     patchGitHub();
     const destroy = vi.fn().mockResolvedValue({ id: "sb_cancelled", status: "destroying" });
-    const getSandbox = vi.fn().mockResolvedValue({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) });
+    const getSandbox = vi
+      .fn()
+      .mockResolvedValue({ destroy, getBandwidth: async () => ({ used_bytes: 0 }) });
     // The job completes WHILE createSandbox is in flight — so by the time we go to
     // record the VM, its row is already gone. The VM is real and must still die.
     const createSandbox = vi.fn().mockImplementation(async () => {
@@ -255,7 +260,7 @@ describe("spawn timeline (markJobStarted / in_progress)", () => {
   it("stamps job_started_at once and returns the phase timestamps", async () => {
     const co = iso();
     await co.onQueued(pending(600), "dlv-600");
-    await co.recordSandboxCreated(600, "sb_600", "cos-600-aa");
+    await co.recordSandboxCreated(600, "sb_600", "cos-600-aa", "default");
     await co.markRunning(600);
 
     const t = await co.markJobStarted(600, "cos-600-aa");
@@ -273,7 +278,7 @@ describe("spawn timeline (markJobStarted / in_progress)", () => {
   it("attributes timing by runner identity, not the provisioning job id", async () => {
     const co = iso();
     await co.onQueued(pending(601), "dlv-601");
-    await co.recordSandboxCreated(601, "sb_601", "cos-601-bb");
+    await co.recordSandboxCreated(601, "sb_601", "cos-601-bb", "default");
     await co.markRunning(601);
 
     // Under backlog GitHub can dispatch a different queued job to our runner; the
@@ -289,7 +294,7 @@ describe("spawn timeline (markJobStarted / in_progress)", () => {
   it("in_progress webhook stamps the timeline and no longer no-ops", async () => {
     const co = singleton();
     await co.onQueued(pending(602), "dlv-602");
-    await co.recordSandboxCreated(602, "sb_602", "cos-602-cc");
+    await co.recordSandboxCreated(602, "sb_602", "cos-602-cc", "default");
     await co.markRunning(602);
 
     const body = workflowJobPayload({
@@ -312,5 +317,86 @@ describe("spawn timeline (markJobStarted / in_progress)", () => {
     expect(res.status).toBe(202);
     expect(await res.text()).toBe("in_progress"); // was "noop" before wiring
     expect(await co.markJobStarted(602, "cos-602-cc")).toBeNull(); // webhook already stamped it
+  });
+});
+
+/**
+ * Region failover end-to-end: CREATEOS_REGIONS=us,eu — the primary's
+ * createSandbox 503s (capacity exhausted surfaces as a bare 503), so the VM
+ * boots in eu; the row learns `region = eu`; and the completed webhook's
+ * teardown dials the eu control plane — never the us one, whose 404 would
+ * read as "already destroyed" and leak the VM.
+ */
+describe("region failover (us 503s → eu boots, teardown dials eu)", () => {
+  it("queued → boots in eu on us 503 → completed destroys via the eu client", async () => {
+    patchGitHub();
+    const usCreate = vi
+      .fn()
+      .mockRejectedValue(
+        new CreateosSandboxServerError("service unavailable", new Response(null, { status: 503 })),
+      );
+    const euCreate = vi.fn().mockResolvedValue({
+      id: "sb_eu",
+      runCommand: vi
+        .fn()
+        .mockResolvedValue({ result: { stdout: "started", stderr: "", exit_code: 0 }, exec_ms: 1 }),
+    });
+    const usGet = vi.fn();
+    const euDestroy = vi.fn().mockResolvedValue({ id: "sb_eu", status: "destroying" });
+    const euGet = vi
+      .fn()
+      .mockResolvedValue({ destroy: euDestroy, getBandwidth: async () => ({ used_bytes: 0 }) });
+    const deps = {
+      makeClient: (_config: unknown, region?: { name: string }) => ({
+        createSandbox: region?.name === "eu" ? euCreate : usCreate,
+        getSandbox: region?.name === "eu" ? euGet : usGet,
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
+    };
+    const regionalEnv = {
+      ...env,
+      CREATEOS_REGIONS: "us=https://api-us.local,eu=https://api-eu.local",
+    };
+
+    // Queued: the us create 503s, eu boots the VM.
+    const body = workflowJobPayload({ action: "queued", jobId: 700 });
+    const req = new Request("https://ctrl.local/webhook", {
+      method: "POST",
+      headers: {
+        "X-Hub-Signature-256": await sign(env.GITHUB_WEBHOOK_SECRET as string, body),
+        "X-GitHub-Delivery": "dlv-700",
+      },
+      body,
+    });
+    const ctx = createExecutionContext();
+    const res = await handleWebhook(req, regionalEnv as any, ctx, deps as any);
+    await waitOnExecutionContext(ctx);
+
+    expect(await res.text()).toBe("provision");
+    expect(usCreate).toHaveBeenCalledOnce();
+    expect(euCreate).toHaveBeenCalledOnce();
+
+    // Completed webhook: teardown runs through the eu client end-to-end. The
+    // row having learned `region = eu` is exactly what euGet being dialed (and
+    // usGet NEVER being dialed) proves.
+    const body2 = workflowJobPayload({ action: "completed", jobId: 700 });
+    const req2 = new Request("https://ctrl.local/webhook", {
+      method: "POST",
+      headers: {
+        "X-Hub-Signature-256": await sign(env.GITHUB_WEBHOOK_SECRET as string, body2),
+        "X-GitHub-Delivery": "dlv-700c",
+      },
+      body: body2,
+    });
+    const ctx2 = createExecutionContext();
+    await handleWebhook(req2, regionalEnv as any, ctx2, deps as any);
+    await waitOnExecutionContext(ctx2);
+
+    expect(euGet).toHaveBeenCalledWith("sb_eu");
+    expect(euDestroy).toHaveBeenCalledOnce();
+    expect(usGet).not.toHaveBeenCalled();
+
+    globalThis.fetch = realFetch;
   });
 });
