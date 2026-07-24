@@ -152,10 +152,11 @@ Then tell the applicant to switch `runs-on:` (Part A, last step).
   ("not approved, apply here"), no VM.
 - **Approved-repo job** → VM boots under their `createos` runner group (org →
   Settings → Actions → Runner groups), runs green, self-deletes.
-- **Egress cap (D15):** a community (non-`allow_all_repos`) VM is created with
-  `bandwidth_quota_bytes` set (100 GB default). Confirm on the CreateOS
-  dashboard / `getBandwidth` — this is the live check that proves the control
-  plane honors the field.
+- **Egress cap (D15):** a community (non-`allow_all_repos`) VM is topped up to
+  the 100 GB quota right after create (the control plane rejects the quota at
+  create; the worker calls `bandwidth/recharge` with the delta over the 5 GiB
+  account default). Confirm on the CreateOS dashboard / `getBandwidth` that the
+  quota reflects the cap.
 
 ---
 
@@ -178,3 +179,39 @@ curl -sf -X POST $WORKER/admin/tenants/status \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H "content-type: application/json" \
   -d '{"installation_id": '$INSTALL_ID', "status": "suspended"}'
 ```
+
+---
+
+## Top up / change a tenant's limits
+
+`minute_grant` is a **monthly ceiling** compared against cumulative usage — not a
+balance that decrements. Usage (`usedMinutes`) only ever goes up within a month
+and resets on the 1st (UTC). So "adding minutes" = **raising the ceiling** above
+current usage.
+
+Use the onboarding script — it is idempotent: on an existing tenant it keeps
+every current setting and changes only the flags you pass.
+
+```bash
+# raise the grant to 1000 weighted-min/month (repos unchanged, limits adopted from registry)
+ADMIN_TOKEN=$TOK ./scripts/onboard-tenant.sh <org> <repo> --minute-grant 1000
+```
+
+Other limits the same way — pass only what you want to change:
+
+```bash
+ADMIN_TOKEN=$TOK ./scripts/onboard-tenant.sh <org> <repo> \
+  --concurrency-cap 10 \     # max parallel VMs for this tenant
+  --max-shape s-8vcpu-16gb \ # shape ceiling
+  --job-ttl-ms 3600000       # per-job wall-time cap
+```
+
+How much to raise by: `usedMinutes` is cumulative, so set the new grant to
+`current_usage + desired_additional`. There is no `/admin/usage` read endpoint
+yet — until there is, just set a comfortably larger absolute value (the gate
+trips again only when cumulative usage crosses it).
+
+**Raw-curl equivalent** (full-record upsert — send EVERY field, change only
+`minute_grant`; omitting a field resets it): re-send the tenant's current record
+with the new `minute_grant`. The script is the safer path because it reads the
+current record and re-sends it for you.
