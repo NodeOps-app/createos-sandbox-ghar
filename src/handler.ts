@@ -79,6 +79,26 @@ export async function provisionAndRecord(
       await teardownSandbox(config, sandboxId, deps);
       return;
     }
+    // D15: community VMs get a per-VM egress quota; allow-all tenants (NodeOps)
+    // and single mode stay unmetered. The control plane REJECTS the quota at
+    // create (400 "not settable at create; use …/bandwidth/recharge"), so we top
+    // up here — AFTER ownership is recorded (a Worker crash mid-call leaves a
+    // tracked, reaper-reclaimed VM, not an orphan) and BEFORE launch. Recharge
+    // is ADDITIVE and a fresh VM already carries the account default (5 GiB,
+    // probed 2026-07-24), so we add only the delta to the configured cap.
+    // Best-effort: a failed top-up leaves the VM on its default quota rather
+    // than failing the whole provision.
+    if (job.tenant && !job.tenant.allowAllRepos) {
+      try {
+        const bw = await sandbox.getBandwidth();
+        const delta = config.communityBandwidthBytes - (bw.quota_bytes ?? 0);
+        if (delta > 0) await sandbox.rechargeBandwidth(delta);
+      } catch (err) {
+        console.warn(
+          `bandwidth recharge failed sandbox=${sandboxId} job=${job.jobId}: ${String(err)}`,
+        );
+      }
+    }
     await launchRunner(sandbox);
   } catch (err) {
     await failProvision(env, config, job, deps, err, sandboxId);

@@ -238,6 +238,8 @@ describe("shape labels end-to-end", () => {
       return {
         id: "sb_promoted",
         runCommand: vi.fn().mockResolvedValue({ result: { exit_code: 0 } }),
+        getBandwidth: vi.fn().mockResolvedValue({ quota_bytes: 0, used_bytes: 0 }),
+        rechargeBandwidth: vi.fn().mockResolvedValue({}),
       };
     });
     const completeDeps = {

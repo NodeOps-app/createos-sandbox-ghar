@@ -183,11 +183,16 @@ describe("multi-mode webhook admission", () => {
     await s.adminUpsertTenant(approvedTenant(20200));
     await s.adminAddProjects(20200, [{ repoFullName: "acme20200/api", repoId: 1 }]);
 
+    const rechargeBandwidth = vi.fn().mockResolvedValue({});
+    // Fresh VM carries the 5 GiB account default; the community cap tops up the delta.
+    const getBandwidth = vi.fn().mockResolvedValue({ quota_bytes: 5_368_709_120, used_bytes: 0 });
     const createSandbox = vi.fn().mockResolvedValue({
       id: "sb_20200",
       runCommand: vi
         .fn()
         .mockResolvedValue({ result: { stdout: "started", stderr: "", exit_code: 0 }, exec_ms: 1 }),
+      getBandwidth,
+      rechargeBandwidth,
     });
 
     const res = await postQueued(
@@ -206,9 +211,13 @@ describe("multi-mode webhook admission", () => {
     expect(gh.jitUrls).toHaveLength(1);
     expect(gh.jitUrls[0]).toContain("/orgs/acme20200/");
 
+    // The control plane rejects bandwidth_quota_bytes at create; the community
+    // cap is topped up post-create via rechargeBandwidth, only the delta over
+    // the fresh VM's 5 GiB default.
     expect(createSandbox).toHaveBeenCalledOnce();
     const request = createSandbox.mock.calls[0]![0];
-    expect(request.bandwidth_quota_bytes).toBe(107_374_182_400);
+    expect(request.bandwidth_quota_bytes).toBeUndefined();
+    expect(rechargeBandwidth).toHaveBeenCalledWith(107_374_182_400 - 5_368_709_120);
 
     globalThis.fetch = realFetch;
   });
@@ -218,11 +227,15 @@ describe("multi-mode webhook admission", () => {
     const s = singleton();
     await s.adminUpsertTenant(approvedTenant(20300, { allowAllRepos: true }));
 
+    const rechargeBandwidth = vi.fn().mockResolvedValue({});
+    const getBandwidth = vi.fn().mockResolvedValue({ quota_bytes: 5_368_709_120, used_bytes: 0 });
     const createSandbox = vi.fn().mockResolvedValue({
       id: "sb_20300",
       runCommand: vi
         .fn()
         .mockResolvedValue({ result: { stdout: "started", stderr: "", exit_code: 0 }, exec_ms: 1 }),
+      getBandwidth,
+      rechargeBandwidth,
     });
 
     const res = await postQueued(
@@ -241,6 +254,8 @@ describe("multi-mode webhook admission", () => {
     expect(createSandbox).toHaveBeenCalledOnce();
     const request = createSandbox.mock.calls[0]![0];
     expect(request.bandwidth_quota_bytes).toBeUndefined();
+    // allow-all tenants are unmetered: no quota recharge
+    expect(rechargeBandwidth).not.toHaveBeenCalled();
 
     globalThis.fetch = realFetch;
   });
