@@ -459,10 +459,23 @@ export async function handleWebhook(
     return new Response("ambiguous-label", { status: 202 });
   }
 
+  // Lifecycle events are attacker-reachable in multi mode: the App is public,
+  // so any installation can emit a genuinely-signed `completed` naming a runner
+  // it does not own. Carry the sending installation into every row lookup so a
+  // tenant can only ever address its own VMs. Single mode has one
+  // operator-owned installation and NULL-tenant rows, so it asserts nothing.
+  const owner = config.tenancyMode === "multi" ? job.installationId : undefined;
+  if (config.tenancyMode === "multi" && owner === undefined) {
+    // Fails closed: the VM stays, and the reaper reclaims it once its runner
+    // goes offline. Admitting the event unscoped is what we must never do.
+    console.warn(`job ${job.jobId} (${job.repoFullName}): ${job.action} with no installation id`);
+    return new Response("no-installation", { status: 202 });
+  }
+
   if (job.action === "completed") {
     // runner_name identifies the VM that ACTUALLY ran the job (may differ from
     // the provisioning job under backlog); the DO tears down that one.
-    const result = await co.onCompleted(job.jobId, job.runnerName);
+    const result = await co.onCompleted(job.jobId, job.runnerName, owner);
     ctx.waitUntil(
       (async () => {
         if (result.toDestroy) await destroyAndConfirm(env, config, result.toDestroy, deps);
@@ -478,7 +491,7 @@ export async function handleWebhook(
     // observation off a webhook we already receive (no lifecycle change, no
     // extra GitHub/CreateOS call). runner_name is the VM that actually ran it,
     // so timing is attributed to the runner even under backlog reassignment.
-    const timeline = await co.markJobStarted(job.jobId, job.runnerName);
+    const timeline = await co.markJobStarted(job.jobId, job.runnerName, owner);
     if (timeline) logSpawnTimeline(timeline);
     return new Response("in_progress", { status: 202 });
   }

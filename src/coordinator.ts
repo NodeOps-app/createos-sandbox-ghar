@@ -284,6 +284,32 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   /**
+   * Ownership test for the two webhook-reachable lifecycle lookups. The App is
+   * PUBLIC, so every installation's `workflow_job` events are signed with the
+   * same secret and are all genuine: a tenant can name its own self-hosted
+   * runner `cos-<someone-elses-job>-aa`, complete a job on it, and have GitHub
+   * send us a valid `completed` naming that runner. Unscoped, `#rowByRunner`
+   * would resolve it to ANOTHER tenant's row and we would destroy that tenant's
+   * VM mid-job. So a row is addressable only by the installation that owns it.
+   *
+   * Fails closed on both edges: a caller that presents no installation reaches
+   * only NULL-`tenant_id` rows (single mode, and pre-multi rows whose owner was
+   * never backfilled), and a caller that presents one reaches only its own. A
+   * lifecycle event we refuse leaks nothing durable — the row keeps its VM and
+   * the reaper reclaims it once the runner goes offline.
+   */
+  #ownedBy(row: Row | undefined, tenantId: number | undefined, event: string): Row | undefined {
+    if (!row) return undefined;
+    if ((row.tenant_id ?? undefined) === tenantId) return row;
+    console.warn(
+      `${event}: installation ${tenantId ?? "none"} addressed job ${row.job_id} ` +
+        `(runner ${row.runner_name ?? "none"}) owned by installation ` +
+        `${row.tenant_id ?? "none"} — ignored`,
+    );
+    return undefined;
+  }
+
+  /**
    * Canonical Job-row retirement. A row with a live VM becomes Destroying and
    * returns the durable teardown effect; a VM-less row is deleted immediately.
    * Reapplying this to an existing Destroying row is idempotent.
@@ -404,10 +430,18 @@ export class Coordinator extends DurableObject<Env> {
    * hold no row for, a redelivery (already stamped), or a row already torn down
    * (a job so fast its `completed` beat its `in_progress`), so the Worker logs
    * exactly one timeline per spawn and never a fake duration.
+   *
+   * `tenantId` scopes both lookups to the sending installation — see #ownedBy.
    */
-  async markJobStarted(jobId: number, runnerName?: string): Promise<SpawnTimeline | null> {
-    let row = runnerName ? this.#rowByRunner(runnerName) : undefined;
-    if (!row) row = this.#rowByJob(jobId);
+  async markJobStarted(
+    jobId: number,
+    runnerName?: string,
+    tenantId?: number,
+  ): Promise<SpawnTimeline | null> {
+    let row = runnerName
+      ? this.#ownedBy(this.#rowByRunner(runnerName), tenantId, "in_progress")
+      : undefined;
+    if (!row) row = this.#ownedBy(this.#rowByJob(jobId), tenantId, "in_progress");
     if (!row || row.state === "destroying" || row.job_started_at !== null) return null;
 
     const now = Date.now();
@@ -463,13 +497,23 @@ export class Coordinator extends DurableObject<Env> {
    * triggered provisioning, so job_id alone is the wrong owner. Falls back to
    * job_id (steady state / cancelled before pickup). Keeps the row in
    * `destroying` until the Worker confirms teardown, then frees the next slot.
+   *
+   * Runner identity is ATTACKER-CHOSEN on a public App, so `tenantId` scopes
+   * both lookups to the sending installation — see #ownedBy.
    */
-  async onCompleted(jobId: number, runnerName?: string): Promise<CompletedResult> {
-    let row = runnerName ? this.#rowByRunner(runnerName) : undefined;
-    if (!row) row = this.#rowByJob(jobId);
+  async onCompleted(
+    jobId: number,
+    runnerName?: string,
+    tenantId?: number,
+  ): Promise<CompletedResult> {
+    let row = runnerName
+      ? this.#ownedBy(this.#rowByRunner(runnerName), tenantId, "completed")
+      : undefined;
+    if (!row) row = this.#ownedBy(this.#rowByJob(jobId), tenantId, "completed");
 
     if (!row || row.state === "destroying") {
-      // unknown job, redelivery, or teardown already in flight → no-op destroy.
+      // unknown job, foreign tenant, redelivery, or teardown already in flight
+      // → no-op destroy.
       return { toDestroy: null, nextPending: this.#dequeuePending() };
     }
 

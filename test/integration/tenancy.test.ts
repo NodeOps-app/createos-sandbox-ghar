@@ -75,7 +75,7 @@ describe("per-tenant cap", () => {
     await s.recordSandboxCreated(11, "sb1", "cos-11-aa");
     await s.markRunning(11);
     await s.onQueued(job(12, 1), "d2", ctx(1)); // pending behind cap
-    const res = await s.onCompleted(11, "cos-11-aa");
+    const res = await s.onCompleted(11, "cos-11-aa", 1);
     expect(res.nextPending?.jobId).toBe(12);
     expect(res.nextPending?.tenant?.orgLogin).toBe("org1");
     expect(res.nextPending?.tenant?.runnerGroupId).toBe(9);
@@ -113,7 +113,7 @@ describe("per-tenant cap at promotion", () => {
       expect(row.state).toBe("pending"); // A2 stays parked
     });
 
-    const res2 = await s.onCompleted(11, "cos-11-aa"); // A's running job finishes — headroom opens
+    const res2 = await s.onCompleted(11, "cos-11-aa", 1); // A's running job finishes — headroom opens
     expect(res2.nextPending?.jobId).toBe(12); // A2 now promoted
   });
 
@@ -169,6 +169,57 @@ describe("per-tenant cap at promotion", () => {
   });
 });
 
+describe("lifecycle events are scoped to the sending installation", () => {
+  // The App is PUBLIC, so every installation's events are signed with the same
+  // secret and are all genuine. Tenant B can name its own self-hosted runner
+  // after tenant A's, complete a job on it, and GitHub sends us a valid
+  // `completed` carrying A's runner name. Unscoped, that destroyed A's VM
+  // mid-job — the row lookup keys on runner identity, which the sender chooses.
+  it("refuses a foreign tenant's completed naming another tenant's runner", async () => {
+    const s = stub("xt-done-" + Math.random());
+    await s.adminUpsertTenant(approved(1, { concurrencyCap: 5 }));
+    await s.adminUpsertTenant(approved(2, { concurrencyCap: 5 }));
+
+    await s.onQueued(job(11, 1), "d1", ctx(1, 5)); // A's VM, running
+    await s.recordSandboxCreated(11, "sb11", "cos-11-aa");
+    await s.markRunning(11);
+
+    const attack = await s.onCompleted(11, "cos-11-aa", 2); // B claims A's runner
+    expect(attack.toDestroy).toBeNull();
+    await runInDurableObject(s, (_i, state) => {
+      const row = state.storage.sql
+        .exec<{ state: string }>(`SELECT state FROM jobs WHERE job_id = 11`)
+        .one();
+      expect(row.state).toBe("running"); // A's VM untouched, not even parked
+    });
+
+    const owner = await s.onCompleted(11, "cos-11-aa", 1); // A's own webhook still tears down
+    expect(owner.toDestroy?.sandboxId).toBe("sb11");
+  });
+
+  it("refuses a foreign tenant's in_progress, leaving the timeline unstamped", async () => {
+    const s = stub("xt-start-" + Math.random());
+    await s.adminUpsertTenant(approved(1, { concurrencyCap: 5 }));
+    await s.onQueued(job(11, 1), "d1", ctx(1, 5));
+    await s.recordSandboxCreated(11, "sb11", "cos-11-aa");
+    await s.markRunning(11);
+
+    expect(await s.markJobStarted(11, "cos-11-aa", 2)).toBeNull(); // B: no read, no stamp
+    expect(await s.markJobStarted(11, "cos-11-aa", 1)).not.toBeNull(); // A: still the FIRST stamp
+  });
+
+  it("a tenant-owned row is unreachable by a caller presenting no installation", async () => {
+    const s = stub("xt-none-" + Math.random());
+    await s.adminUpsertTenant(approved(1, { concurrencyCap: 5 }));
+    await s.onQueued(job(11, 1), "d1", ctx(1, 5));
+    await s.recordSandboxCreated(11, "sb11", "cos-11-aa");
+    await s.markRunning(11);
+
+    // Fails closed rather than falling back to the old global lookup.
+    expect((await s.onCompleted(11, "cos-11-aa")).toDestroy).toBeNull();
+  });
+});
+
 describe("weight recomputed at promotion", () => {
   // Weight is stamped from tenantCtx at ENQUEUE, but a pending row can sit
   // across a RUNNER_SHAPE change and boot the shape live at PROMOTION time —
@@ -194,7 +245,7 @@ describe("weight recomputed at promotion", () => {
       expect(row.weight).toBe(999); // stamped as-is at enqueue, not yet recomputed
     });
 
-    const res = await s.onCompleted(11, "cos-11-aa"); // frees tenant headroom, promotes 12
+    const res = await s.onCompleted(11, "cos-11-aa", 1); // frees tenant headroom, promotes 12
     expect(res.nextPending?.jobId).toBe(12);
 
     // RUNNER_LABEL/RUNNER_SHAPE come from wrangler.toml (vitest.config.ts's
@@ -230,7 +281,7 @@ describe("ledger", () => {
     await s.onQueued(job(11, 1), "d1", ctx(1, 5));
     await s.recordSandboxCreated(11, "sb1", "cos-11-aa");
     await s.markRunning(11);
-    await s.onCompleted(11, "cos-11-aa");
+    await s.onCompleted(11, "cos-11-aa", 1);
     await s.markDestroyed(11, 5_000);
 
     // never-booted row: queued then failed before createSandbox
