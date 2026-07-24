@@ -8,6 +8,11 @@ export default defineWorkersConfig({
         miniflare: {
           compatibilityFlags: ["nodejs_compat"],
           bindings: {
+            // Pin the default tenancy for the pre-tenant integration fixtures:
+            // vitest reads wrangler.toml, which prod now sets to "multi" — without
+            // this, every pre-tenant webhook test hits multi-mode admission with no
+            // installation.id and refuses. Multi-mode suites override this per-suite.
+            TENANCY_MODE: "single",
             MAX_CONCURRENT: "2",
             GITHUB_ORG: "nodeops-app",
             RUNNER_LABEL: "createos",
