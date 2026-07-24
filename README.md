@@ -303,6 +303,32 @@ curl -X POST https://<worker>.workers.dev/admin/backfill \
   -d '{"installation_id": 12345678}'
 ```
 
+## Onboarding a community tenant
+
+`TENANCY_MODE=multi`, one public App (`createos-runners`), install-gated admission
+(ADR [0006](docs/adr/0006-one-app-public-install-gated.md)). An org **installs**
+the App freely, but only registry-**approved** Tenants get runners; unapproved
+installs get one neutral check run pointing at `APPLY_FORM_URL`.
+
+1. **Application** arrives via the apply link (fields per
+   [`docs/community/onboarding-form.md`](docs/community/onboarding-form.md)).
+2. **Review** and size the Tenant: `minute_grant`, `concurrency_cap`,
+   `max_shape`, `job_ttl_ms`.
+3. They **install the public App** on their org, selecting the repos. Their
+   installation id is the trailing number in the install's settings URL, or via
+   `GET /orgs/<org>/installation` (`.id`).
+4. **Create the Tenant** `status: "pending"` (`POST /admin/tenants`, their
+   installation id) **+ approve their repos** (`POST /admin/projects`; repo ids
+   from `GET /repos/<owner>/<repo>` → `.id`).
+5. **Approve**: `POST /admin/tenants` with `status: "approved"` — the runner
+   group is auto-created scoped to their repos (fail-closed: a 502 means fix
+   GitHub-side and retry; the Tenant stays unapproved).
+6. Tell them: swap `runs-on: ubuntu-latest` → `runs-on: createos` (or a shaped
+   label within their ceiling).
+
+NodeOps is Tenant #1 with `allow_all_repos: true` — the only Tenant with that
+flag; it skips runner-group creation and uses the org-wide Default group.
+
 ## Security notes
 
 - **`PROVISION_POLICY=org-wide` serves every repo in the org, including fork PRs.** Safety then rests on VM isolation + ephemerality (each job gets a throwaway KVM VM; GitHub withholds secrets from fork PRs unless approved) and on `MAX_CONCURRENT` to bound the blast radius — **set it to a finite value in production**. For tighter control use `repo-allowlist`, or `fork-gated` (checks the run's head repo via the API).

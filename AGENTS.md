@@ -32,7 +32,9 @@ Then read, in order: `CONTEXT.md` (domain vocabulary — use these words), `src/
 ```
 workflow_job webhook → src/index.ts (POST /webhook) → src/handler.ts
   verify HMAC (webhook.ts) → parse + label filter (webhook.ts)
-  → policy check (policy.ts) → Coordinator DO (coordinator.ts): onQueued
+  → admission (admitAndDrive — single mode: policy.ts; multi mode: tenant gate
+    ladder — lookup Tenant by installation.id, require approved, Project allowlist,
+    shape ceiling, ledger under grant) → Coordinator DO (coordinator.ts): onQueued
   → if provision: mint JIT config (github/client.ts → auth.ts → jwt.ts)
        → createSandbox (sandbox.ts) → DO.recordSandboxCreated (records VM + runner
          name BEFORE launch; says destroy if the job already completed)
@@ -92,7 +94,7 @@ bun run build:template   # rebuild the ghar-runner rootfs (needs CREATEOS_* env)
 - **Never call `fetch` as a method** (`this.x.fetch(...)`, `obj.fetch(...)`) — Workers throws `Illegal invocation` when `fetch`'s `this` isn't `globalThis`. Bind at the injection seam (`fetch.bind(globalThis)`) or call through a local var. Tests mock `fetch`, so they will **not** catch this; only a real run does.
 - **`RUNNER_DISK_MIB` must be ≤ your CreateOS plan's disk cap** or `createSandbox` returns 403. The code default (30720) exceeds the common 10240 cap.
 - **`GITHUB_INSTALLATION_ID` is the numeric installation id**, not the App client id (`Iv23…`). The wrong one makes token minting 404.
-- **The Cloudflare Free plan is a hard constraint.** The DO must stay `new_sqlite_classes`; keep it passive (state only) so it hibernates; do all blocking network I/O (createSandbox poll, GitHub API, destroy) in the Worker, not the DO; the reaper is a **cron trigger**, not a DO alarm.
+- **The account is on Workers Paid (upgraded for multi-tenancy).** The Free-plan subrequest (50) and daily-request caps that shaped this design no longer bind — but the "keep the DO passive/hibernating" discipline still stands: the DO must stay `new_sqlite_classes`, hold state only, and do no blocking network I/O (createSandbox poll, GitHub API, destroy all stay in the Worker); the reaper remains a **cron trigger**, not a DO alarm. Don't let Paid relax the DO into an always-on actor — hibernation is still the cost model.
 - `vitest.config.ts` `miniflare.bindings` holds a **throwaway test-only PKCS#8 key** — not a secret. Real secrets live in `.dev.vars` (gitignored) or `wrangler secret`.
 - The runner launch script is embedded in `template/Dockerfile` via `printf` (the template builder permits `RUN` only — no `COPY`/heredoc). That Dockerfile is its single source of truth.
 - **The microVM's `/dev` is a devtmpfs mounted at boot, so it shadows whatever the image put there.** It ships without `/dev/fd` and without `/dev/shm`, and both of those are load-bearing for CI: no `/dev/fd` means bash process substitution (`<(...)`, `diff <(a) <(b)`, `tee /dev/stderr`) fails outright — which is how asdf's golang plugin died mid-checksum (`sha256sum: /dev/fd/63: No such file or directory`), taking every asdf repo with it — and no `/dev/shm` means no POSIX shared memory (Python `multiprocessing`, headless Chromium). `start-runner.sh` symlinks the four `/dev/fd` entries and mounts a tmpfs on `/dev/shm` before the runner starts. **These fixups cannot move into a `RUN`**: devtmpfs would just cover them at boot. Anything you add to `/dev` belongs in the launch script.
