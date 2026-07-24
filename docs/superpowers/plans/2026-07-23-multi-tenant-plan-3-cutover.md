@@ -1,5 +1,13 @@
 # Multi-Tenant Plan 3: Cutover Implementation Plan
 
+> **⚠️ SUPERSEDED — do not follow.** Executed 2026-07-24, but the deployment
+> **reused the existing public App** (`createos-runners`) rather than creating a
+> new one and swapping secrets. The authoritative record of what actually shipped
+> is **ADR [0006](../../adr/0006-one-app-public-install-gated.md)**. Tasks 2/3/6
+> (create new App, install it, retire old App) and the Task 5 secret-swap below
+> **did not happen** — following them now would cause a webhook outage and could
+> strand installation-keyed tenant data. Kept for history only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Most tasks here are OPERATIONAL (dashboard + curl + secrets), not code — execute them in order, verify each before the next, and STOP at every marked confirmation gate.
 
 **Goal:** Move production from the private single-tenant App to the public multi-tenant App: Workers Paid, public App created and installed, NodeOps seeded as Tenant #1, `TENANCY_MODE=multi` flipped, old App retired, first community tenant onboarded.
