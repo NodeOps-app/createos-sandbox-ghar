@@ -38,10 +38,11 @@ RUNNER_GROUP_ID = "1"
 REAPER_MAX_AGE_MS = "1800000"
 RECONCILE_GRACE_MS = "180000"
 # Max GitHub subrequests the 5-min recovery scan may spend before it defers the
-# rest to the next tick (cursor-resumed). Caps the O(installed-repos) read fan-out
-# under the Free-plan 50-subrequest cap; the reaper/orphan sweeps keep their own
-# mutation caps. Raise once installed repos routinely exceed ~budget/2.
-RECOVERY_SUBREQUEST_BUDGET = "30"
+# rest to the next tick (cursor-resumed). Was 30 under the Free-plan 50-cap; on
+# Workers Paid (10,000/invocation) the bound is CreateOS/GitHub courtesy and cron
+# wall-time, not the platform. 200 covers every current tenant in one tick; the
+# warn-on-bind + (tenant, repo) cursor remain the overflow behavior.
+RECOVERY_SUBREQUEST_BUDGET = "200"
 # Multi-tenancy master switch. "single" = pre-tenant behavior. Flipping to
 # "multi" is the Plan 3 cutover — do not flip without the cutover runbook.
 TENANCY_MODE = "single"
