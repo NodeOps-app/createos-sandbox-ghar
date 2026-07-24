@@ -115,10 +115,27 @@ export async function handleAdmin(
     return new Response("not found", { status: 404 });
 
   const co = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
-  const route = `${req.method} ${new URL(req.url).pathname}`;
+  const url = new URL(req.url);
+  const route = `${req.method} ${url.pathname}`;
 
   try {
-    if (route === "GET /admin/tenants") return json(await co.adminListTenants());
+    if (route === "GET /admin/tenants") {
+      // ?id=<installation_id> reads a single tenant (+ its projects) via
+      // adminGetTenant — the read the onboarding script and operators actually
+      // want. No id = the full list. 404 (not an empty list) for an unknown id,
+      // so a mistyped id reads as "not found", not "no tenants".
+      const idParam = url.searchParams.get("id");
+      if (idParam !== null) {
+        const id = Number(idParam);
+        if (!Number.isSafeInteger(id) || id <= 0) {
+          return json({ error: "invalid id", installation_id: idParam }, 400);
+        }
+        const got = await co.adminGetTenant(id);
+        if (!got) return json({ error: "tenant not found", installation_id: id }, 404);
+        return json(got);
+      }
+      return json(await co.adminListTenants());
+    }
 
     if (route === "POST /admin/tenants") {
       const b = TenantBody.parse(await req.json());
