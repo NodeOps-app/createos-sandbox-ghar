@@ -43,12 +43,15 @@ RECONCILE_GRACE_MS = "180000"
 # wall-time, not the platform. 200 covers every current tenant in one tick; the
 # warn-on-bind + (tenant, repo) cursor remain the overflow behavior.
 RECOVERY_SUBREQUEST_BUDGET = "200"
-# Multi-tenancy master switch. "single" = pre-tenant behavior. Flipping to
-# "multi" is the Plan 3 cutover — do not flip without the cutover runbook.
-TENANCY_MODE = "single"
+# Multi-tenancy master switch. "single" = pre-tenant behavior. "multi" = tenant
+# registry gates admission (Plan 3 cutover 2026-07-24; reuses the existing public
+# App — no secret swap).
+TENANCY_MODE = "multi"
 # Per-VM egress quota for community tenants (bytes). 100 GB.
 COMMUNITY_VM_BANDWIDTH_BYTES = "107374182400"
-APPLY_FORM_URL = ""
+# Apply link shown on refusal check-runs (D17). Points at the repo README until a
+# dedicated Google Form exists.
+APPLY_FORM_URL = "https://github.com/NodeOps-app/createos-sandbox-ghar#readme"
 
 # Secrets are set via `wrangler secret put` (never commit values here):
 # wrangler secret put GITHUB_APP_ID
