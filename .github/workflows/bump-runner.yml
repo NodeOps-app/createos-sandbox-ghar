@@ -4,19 +4,46 @@ name: bump-runner
 # so runners never hit GitHub's "version deprecated" rejection. No-op on the
 # days the version is unchanged. Runs off-peak to minimise the brief window
 # where the template is absent during rm + rebuild.
+#
+# Split into three jobs on purpose. This workflow holds two of the most
+# valuable credentials the project has: the production CREATEOS_API_KEY and
+# write access to `main` — and a push to `main` IS a production deploy (see
+# AGENTS.md), on a Worker that serves every tenant. As one job, every step ran
+# holding both, so any code that executed (the CLI installer above all) could
+# reach both. Now: `resolve` only reads, `template` holds the CreateOS key with
+# NO repo write, and `publish` holds repo write with NO CreateOS key.
 on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
-permissions:
-  contents: write
+# Least privilege by default; each job opts back in to exactly what it needs.
+permissions: {}
+
+env:
+  # createos-cli is pinned to an immutable release tag AND its published digest.
+  # It used to be `curl .../createos-cli/main/install.sh | sh` — a script read
+  # from a MUTABLE branch of another repo and piped into a shell that held
+  # CREATEOS_API_KEY and a push-capable checkout, so a compromise of that repo
+  # was a compromise of this one. Release assets can be replaced too, which is
+  # why the digest is recorded here rather than fetched alongside the binary.
+  # Bump both lines together — the digest is published as <asset>.sha256 on the
+  # release, and a mismatch means the asset changed under a tag we already trust.
+  CREATEOS_CLI_VERSION: v0.0.19
+  CREATEOS_CLI_SHA256: 40307310666837ab6fe7affdffa3d20b5685900c777c0fa570941f27905f367b
 
 jobs:
-  bump:
+  resolve:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      latest: ${{ steps.v.outputs.latest }}
+      changed: ${{ steps.v.outputs.latest != steps.v.outputs.current }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Resolve versions
         id: v
@@ -26,35 +53,73 @@ jobs:
           set -euo pipefail
           latest=$(gh api repos/actions/runner/releases/latest --jq .tag_name | sed 's/^v//')
           current=$(sed -n 's/^ARG RUNNER_VERSION=//p' template/Dockerfile)
-          # Guard against anything unexpected in the tag before it reaches a shell/sed.
-          case "$latest" in
-            [0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "unexpected runner version: '$latest'" >&2; exit 1 ;;
-          esac
+          # Strictly numeric: this value is interpolated into a sed expression
+          # and a commit message downstream. The old glob (`[0-9]*.[0-9]*.[0-9]*`)
+          # accepted anything after the first digit — `1.2.3/x` included, which
+          # breaks the s/// delimiter.
+          printf '%s' "$latest" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "unexpected runner version: '$latest'" >&2
+            exit 1
+          }
           echo "latest=$latest"   >> "$GITHUB_OUTPUT"
           echo "current=$current" >> "$GITHUB_OUTPUT"
           echo "runner: current=$current latest=$latest"
 
-      - name: Install createos CLI
-        if: steps.v.outputs.latest != steps.v.outputs.current
-        run: curl -sfL https://raw.githubusercontent.com/NodeOps-app/createos-cli/main/install.sh | sh -
+  template:
+    needs: resolve
+    if: needs.resolve.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    # contents: read is for the cross-repo release download only. No write:
+    # this is the job that holds CREATEOS_API_KEY.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install createos CLI (pinned release, digest-verified)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$CREATEOS_CLI_VERSION" \
+            --repo NodeOps-app/createos-cli \
+            --pattern createos-linux-amd64 \
+            --output createos
+          echo "${CREATEOS_CLI_SHA256}  createos" | sha256sum -c -
+          chmod +x createos
+          echo "$PWD" >> "$GITHUB_PATH"
 
       - name: Rebuild template with latest runner
-        if: steps.v.outputs.latest != steps.v.outputs.current
         env:
           CREATEOS_API_KEY: ${{ secrets.CREATEOS_API_KEY }}
-          LATEST: ${{ steps.v.outputs.latest }}
+          LATEST: ${{ needs.resolve.outputs.latest }}
         run: |
           set -euo pipefail
           sed -i "s/^ARG RUNNER_VERSION=.*/ARG RUNNER_VERSION=${LATEST}/" template/Dockerfile
           createos sb template rm ghar-runner --yes || true
           createos sb template submit ghar-runner -f template/Dockerfile
 
+  publish:
+    # Only after the template is actually live: committing first would leave
+    # `main` claiming a runner version the template does not have.
+    needs: [resolve, template]
+    if: needs.resolve.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # The one checkout that keeps its credentials — it has to push. This job
+      # runs no third-party code and holds no CreateOS key.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
       - name: Commit the version bump
-        if: steps.v.outputs.latest != steps.v.outputs.current
         env:
-          LATEST: ${{ steps.v.outputs.latest }}
+          LATEST: ${{ needs.resolve.outputs.latest }}
         run: |
+          set -euo pipefail
+          sed -i "s/^ARG RUNNER_VERSION=.*/ARG RUNNER_VERSION=${LATEST}/" template/Dockerfile
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add template/Dockerfile
