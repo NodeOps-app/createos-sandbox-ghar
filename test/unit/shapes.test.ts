@@ -3,6 +3,7 @@ import type { Shape } from "@nodeops-createos/sandbox";
 import { loadConfig } from "../../src/config";
 import {
   shapeForLabel,
+  shapeWithinCeiling,
   usableShapes,
   fetchCatalog,
   resetShapeCacheForTests,
@@ -69,6 +70,31 @@ describe("shapeForLabel", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(() => shapeForLabel("createos", renamed)).toThrow(/does not match/);
     expect(warn.mock.calls.some((c) => String(c[0]).includes("stale/corrupt"))).toBe(true);
+  });
+});
+
+describe("shapeWithinCeiling", () => {
+  it("passes equal shapes", () => {
+    expect(shapeWithinCeiling("s-4vcpu-8gb", "s-4vcpu-8gb")).toBe(true);
+  });
+
+  it("fails a shape whose vcpu exceeds the ceiling", () => {
+    expect(shapeWithinCeiling("s-8vcpu-16gb", "s-4vcpu-8gb")).toBe(false);
+  });
+
+  it("fails a shape whose memory exceeds the ceiling even with fewer vcpu", () => {
+    expect(shapeWithinCeiling("s-2vcpu-16gb", "s-4vcpu-8gb")).toBe(false);
+  });
+
+  it("passes a fractional-vcpu shape well under the ceiling", () => {
+    expect(shapeWithinCeiling("s-0.5vcpu-512mb", "s-4vcpu-8gb")).toBe(true);
+  });
+
+  it("fails closed on unparseable input and warns", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(shapeWithinCeiling("junk", "s-4vcpu-8gb")).toBe(false);
+    expect(shapeWithinCeiling("s-4vcpu-8gb", "junk")).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(2);
   });
 });
 

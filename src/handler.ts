@@ -2,11 +2,19 @@ import type { Bindings } from "./index";
 import { loadConfig } from "./config";
 import { verifySignature, parseWorkflowJob } from "./webhook";
 import { createJobAdmission, identifyJob, type AdmissionDecision } from "./admission";
-import { fetchCatalog } from "./shapes";
+import { fetchCatalog, shapeForLabel, shapeWithinCeiling } from "./shapes";
 import { GitHubClient } from "./github/client";
 import { createRunnerSandbox, launchRunner, teardownSandbox, type SandboxDeps } from "./sandbox";
 import { notify } from "./notify";
-import type { PendingJob, Config, ProvisionFailedResult, SpawnTimeline } from "./types";
+import { monthKey, dayKey, weightForLabel } from "./quota";
+import type {
+  PendingJob,
+  Config,
+  ProvisionFailedResult,
+  SpawnTimeline,
+  WorkflowJob,
+  TenantStatus,
+} from "./types";
 
 export function coordinator(env: Bindings) {
   return env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
@@ -25,7 +33,17 @@ export async function provisionAndRecord(
   deps: SandboxDeps = {},
 ): Promise<void> {
   const config = loadConfig(env as Record<string, unknown>);
-  const github = new GitHubClient(config);
+  const github = new GitHubClient(
+    config,
+    undefined,
+    job.tenant
+      ? {
+          orgLogin: job.tenant.orgLogin,
+          installationId: job.tenant.installationId,
+          runnerGroupId: job.tenant.runnerGroupId,
+        }
+      : undefined,
+  );
   const co = coordinator(env);
 
   let sandboxId: string;
@@ -201,6 +219,168 @@ export function warnAdmission(
   console.warn(`${scope}job ${candidate.jobId} (${candidate.repoFullName}): catalog-unavailable`);
 }
 
+function contactCopy(config: Config): string {
+  return config.applyFormUrl ? ` — details/apply: ${config.applyFormUrl}` : ".";
+}
+
+function refusalCopy(
+  admission:
+    | { kind: "unknown-tenant" }
+    | { kind: "not-approved"; status: TenantStatus }
+    | { kind: "repo-not-approved"; orgLogin: string },
+  config: Config,
+): { title: string; summary: string } {
+  if (admission.kind === "repo-not-approved") {
+    return {
+      title: "This repository is not approved for CreateOS runners",
+      summary: `The org is onboarded, but this repo is not on its approved list${contactCopy(config)}`,
+    };
+  }
+  if (admission.kind === "not-approved") {
+    return {
+      title: `CreateOS runner access is ${admission.status}`,
+      summary: `This org's access is currently "${admission.status}"${contactCopy(config)}`,
+    };
+  }
+  return {
+    title: "This org is not approved for CreateOS runners",
+    summary: `CreateOS Sandbox runners are free for approved projects${contactCopy(config)}`,
+  };
+}
+
+/**
+ * Posts the refusal check run at most once per (tenant, repo, UTC day) — the
+ * DO's INSERT-OR-IGNORE is the dedup, so cost is bounded by construction.
+ * Best-effort: needs head_sha, checks:write, and a mintable token for the
+ * payload's own installation; any failure is logged, never surfaced.
+ */
+async function notifyRefusal(
+  env: Bindings,
+  config: Config,
+  job: WorkflowJob,
+  copy: { title: string; summary: string },
+): Promise<void> {
+  if (job.installationId === undefined || job.headSha === undefined) return;
+  try {
+    const fresh = await coordinator(env).shouldNotifyRefusal(
+      job.installationId,
+      job.repoFullName,
+      dayKey(Date.now()),
+    );
+    if (!fresh) return;
+    const gh = new GitHubClient(config, undefined, {
+      orgLogin: job.repoFullName.split("/")[0]!,
+      installationId: job.installationId,
+    });
+    await gh.createCheckRun(job.repoFullName, job.headSha, copy.title, copy.summary);
+  } catch (err) {
+    console.warn(`refusal notice failed ${job.repoFullName}#${job.jobId}: ${String(err)}`);
+  }
+}
+
+/**
+ * Multi-mode admission + drive: label → tenant gates → shape ceiling → quota
+ * → catalog → onQueued/provision. The ONE path a queued job takes in multi
+ * mode, whether it arrived by webhook or recovery scan (`scope` labels the
+ * caller for logs, same convention as warnAdmission). Returns the decision
+ * word used as the webhook response body.
+ */
+export async function admitAndDrive(
+  env: Bindings,
+  config: Config,
+  job: WorkflowJob,
+  ctx: { waitUntil(p: Promise<unknown>): void },
+  deps: SandboxDeps,
+  scope: string,
+): Promise<string> {
+  const co = coordinator(env);
+  // Label first: pure, filters every non-createos job in the granted repos at
+  // zero DO/GitHub cost. Refusal notices only fire for jobs that explicitly
+  // asked for our label.
+  const ident = identifyJob(job, config);
+  if (ident.kind === "none") return "no-label";
+  if (ident.kind === "ambiguous") {
+    warnAdmission(scope, job, { kind: "refused", reason: "ambiguous-label", labels: ident.labels });
+    return "ambiguous-label";
+  }
+  if (job.installationId === undefined) {
+    console.warn(`${scope}job ${job.jobId} (${job.repoFullName}): no installation id on payload`);
+    return "no-installation";
+  }
+
+  const admission = await co.admitTenantJob(
+    job.installationId,
+    job.repoFullName,
+    monthKey(Date.now()),
+  );
+  if (admission.kind !== "ok") {
+    ctx.waitUntil(notifyRefusal(env, config, job, refusalCopy(admission, config)));
+    return admission.kind;
+  }
+
+  const shape = shapeForLabel(ident.job.label, config);
+  if (!shapeWithinCeiling(shape, admission.maxShape)) {
+    ctx.waitUntil(
+      notifyRefusal(env, config, job, {
+        title: "Requested runner size exceeds this org's limit",
+        summary:
+          `\`${ident.job.label}\` maps to \`${shape}\`, above your approved ceiling ` +
+          `\`${admission.maxShape}\`. Use a smaller \`runs-on\` label${contactCopy(config)}`,
+      }),
+    );
+    return "shape-over-ceiling";
+  }
+
+  if (admission.usedMinutes >= admission.minuteGrant) {
+    ctx.waitUntil(
+      notifyRefusal(env, config, job, {
+        title: "CreateOS runner minutes exhausted",
+        summary:
+          `This org has used ${Math.round(admission.usedMinutes)} of its ` +
+          `${admission.minuteGrant} weighted minutes for ${monthKey(Date.now())}. ` +
+          `Quota resets on the 1st (UTC)${contactCopy(config)}`,
+      }),
+    );
+    ctx.waitUntil(
+      notify(config, `ghar quota exhausted — ${admission.tenant.orgLogin} (${job.repoFullName})`),
+    );
+    return "quota-exhausted";
+  }
+
+  // Catalog validation exactly as the single path does it (shared rule), on a
+  // config scoped to the REQUESTING tenant: `shouldProvision`'s org-match and
+  // PROVISION_POLICY are single-tenant operator settings — gates 1/2 (tenant +
+  // project approval, just read above) are what multi mode actually enforces
+  // at this level, so this override neutralizes both into a no-op rather than
+  // refusing every tenant whose org isn't the deploy's own GITHUB_ORG.
+  const catalogConfig: Config = {
+    ...config,
+    githubOrg: admission.tenant.orgLogin,
+    provisionPolicy: "org-wide",
+  };
+  const catalogAdmit = createJobAdmission(catalogConfig, {
+    isForkJob: () => Promise.resolve(false), // gates 1-2 replace fork policy in multi mode
+    loadCatalog: () => fetchCatalog(config, deps),
+  });
+  const admitted = await catalogAdmit(job);
+  if (admitted.kind === "refused") {
+    warnAdmission(scope, job, admitted);
+    return admitted.reason;
+  }
+
+  const pending: PendingJob = { ...admitted.job, tenant: admission.tenant };
+  const delivery = job.deliveryId ?? crypto.randomUUID();
+  const decision = await co.onQueued(pending, delivery, {
+    tenantId: admission.tenant.installationId,
+    weight: weightForLabel(ident.job.label, config.runnerLabel, config.runnerShape),
+    cap: admission.concurrencyCap,
+  });
+  if (decision.action === "provision") {
+    ctx.waitUntil(provisionAndRecord(env, pending, deps));
+  }
+  return decision.action;
+}
+
 export async function handleWebhook(
   req: Request,
   env: Bindings,
@@ -224,6 +404,11 @@ export async function handleWebhook(
   // policy or the catalog would leak every shaped VM during a shapes outage or a
   // policy that has since changed — teardown must depend only on who the job is.
   if (job.action === "queued") {
+    if (config.tenancyMode === "multi") {
+      job.deliveryId = delivery;
+      const word = await admitAndDrive(env, config, job, ctx, deps, "");
+      return new Response(word, { status: 202 });
+    }
     const github = new GitHubClient(config);
     const admit = createJobAdmission(config, {
       isForkJob: (repoFullName, runId) => github.isForkJob(repoFullName, runId),

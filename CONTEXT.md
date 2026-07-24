@@ -50,6 +50,12 @@ Glossary for the GitHub Actions runner controller. Terms only, no implementation
 
 - **Grant** — a Tenant's weighted minutes per UTC calendar month.
 
+- **Tenant admission** — in `TENANCY_MODE=multi`, the ordered gate ladder a queued Job clears before it becomes a Pending Job: identify exactly one Runner label (same first step as single-mode Job admission), look up the Tenant by installation id and require it `approved`, require the repo on the Project allowlist (unless the Tenant is `allow_all_repos`), require the requested Shape within the Tenant's ceiling, require the Tenant's Ledger balance under its Grant, then the same shared catalog validation that single mode runs. A Tenant's own concurrency cap gates additionally to the deploy-wide Concurrency cap — either binding queues the Job. One function (`admitAndDrive`) is the only path through this ladder, walked identically by the webhook and by the Reconciler's re-drive, so a recovered Job can never be admitted more leniently than a fresh one.
+
+- **Refusal notice** — a neutral GitHub check run (`conclusion: neutral`, so it informs without failing the Job's CI) posted on the commit when Tenant admission refuses a Job past the label gate. Deduplicated to one per repo per UTC day, so a noisy misconfigured repo gets a single notice rather than one per queued Job.
+
+- **Job TTL** — a Tenant's `job_ttl_ms`: the max wall-time its own Sandboxes get before the Reaper sweep tears them down, in place of the deploy-wide `REAPER_MAX_AGE_MS` for that Tenant's rows. Untenanted rows (single mode, or pre-migration) keep the deploy-wide bound.
+
 - **Weighted minute** — one wall-clock minute of Sandbox lifetime × shape vCPU ÷ 2.
 
-- **Ledger** — per-Tenant, per-month usage rows; the month is part of the key, so a new month is a new row and there is no reset step.
+- **Ledger** — per-Tenant, per-month usage rows; the month is part of the key, so a new month is a new row and there is no reset step. Billed at destroy confirmation (`markDestroyed`), using the weight persisted on the row when it last entered `provisioning` — stamped at enqueue for a Job that booted immediately, or recomputed at promotion for one that queued first — so the bill always reflects the shape the VM actually booted, even if `RUNNER_SHAPE` changed while the Job waited. A NULL weight (a row that predates per-Tenant billing) falls back to parsing it from the row's label.

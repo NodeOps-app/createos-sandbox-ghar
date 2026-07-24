@@ -140,6 +140,25 @@ export async function usableShapes(
  */
 export type Catalog = { ok: true; usable: Set<string> } | { ok: false };
 
+const SHAPE_SIZE_RE = /^s-(\d+(?:\.\d+)?)vcpu-(\d+)(gb|mb)$/;
+
+const shapeMb = (m: RegExpExecArray) => Number(m[2]) * (m[3] === "gb" ? 1024 : 1);
+
+/**
+ * Gate 5: is `shape` within the tenant's ceiling on BOTH axes? Fail closed:
+ * anything unparseable is over the ceiling — a shape we cannot size must not
+ * slip past a security gate — and warns (no-silent-bounds).
+ */
+export function shapeWithinCeiling(shape: string, ceiling: string): boolean {
+  const s = SHAPE_SIZE_RE.exec(shape);
+  const c = SHAPE_SIZE_RE.exec(ceiling);
+  if (!s || !c) {
+    console.warn(`shape ceiling: cannot parse "${shape}" vs "${ceiling}"; refusing`);
+    return false;
+  }
+  return Number(s[1]) <= Number(c[1]) && shapeMb(s) <= shapeMb(c);
+}
+
 /**
  * Fetches the live shape catalog for the admission check, converting a failed
  * fetch into `{ok: false}` rather than throwing — the caller (webhook

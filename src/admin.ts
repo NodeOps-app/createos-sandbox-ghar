@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Bindings } from "./index";
 import { loadConfig } from "./config";
 import { timingSafeEqual } from "./webhook";
+import { GitHubClient } from "./github/client";
 import type { TenantRecord } from "./types";
 
 /**
@@ -102,7 +103,13 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
-export async function handleAdmin(req: Request, env: Bindings): Promise<Response> {
+export async function handleAdmin(
+  req: Request,
+  env: Bindings,
+  // Test seam only — production callers omit it and GitHubClient falls back
+  // to fetch.bind(globalThis). Never hit the network in tests (mockFetch).
+  fetchImpl?: typeof fetch,
+): Promise<Response> {
   const config = loadConfig(env as Record<string, unknown>);
   if (!(await authorized(req, config.adminToken)))
     return new Response("not found", { status: 404 });
@@ -139,6 +146,37 @@ export async function handleAdmin(req: Request, env: Bindings): Promise<Response
       // fresh again, same as any other transition into approved.
       const approvedAt = enteringApproved ? Date.now() : (existing?.tenant.approvedAt ?? null);
       const approvedBy = enteringApproved ? b.approved_by : (existing?.tenant.approvedBy ?? null);
+
+      let runnerGroupId = b.runner_group_id;
+      if (b.status === "approved" && !b.allow_all_repos) {
+        // Gate 3 is GitHub-side: EVERY approved-scoped write must carry a
+        // scoped runner group, not just the transition into `approved` — an
+        // already-approved tenant re-upserted with a null/absent group (or
+        // flipped from allow_all_repos) must not silently fall back to the
+        // org's Default group (visibility: all repos), which would let an
+        // unapproved repo schedule onto the tenant's runners (D12). This
+        // makes createRunnerGroup idempotent-adopt (409 → existing group id)
+        // on every such upsert — one extra GitHub call, cheap at admin
+        // frequency, and the price of the fail-closed guarantee.
+        const projects = existing ? existing.projects : [];
+        if (projects.length === 0) {
+          return json({ error: "cannot approve: no approved projects; add projects first" }, 400);
+        }
+        try {
+          const gh = new GitHubClient(config, fetchImpl, {
+            orgLogin: b.org_login,
+            installationId: b.installation_id,
+          });
+          runnerGroupId = await gh.createRunnerGroup(
+            "createos",
+            projects.map((p) => p.repoId),
+          );
+        } catch (err) {
+          console.error(`runner group creation failed org=${b.org_login}: ${String(err)}`);
+          return json({ error: `runner group creation failed: ${String(err)}` }, 502);
+        }
+      }
+
       const record: TenantRecord = {
         installationId: b.installation_id,
         orgLogin: b.org_login,
@@ -148,7 +186,7 @@ export async function handleAdmin(req: Request, env: Bindings): Promise<Response
         concurrencyCap: b.concurrency_cap,
         maxShape: b.max_shape,
         jobTtlMs: b.job_ttl_ms,
-        runnerGroupId: b.runner_group_id,
+        runnerGroupId,
         contact: b.contact,
         notes: b.notes,
         approvedAt,
@@ -186,13 +224,36 @@ export async function handleAdmin(req: Request, env: Bindings): Promise<Response
       // reads a plain value over RPC (no error to misinterpret) instead of
       // inspecting a thrown error, and it never exercises the fragile
       // throw-across-stub path in the first place.
-      if (!(await co.adminGetTenant(b.installation_id))) {
+      const existing = await co.adminGetTenant(b.installation_id);
+      if (!existing) {
         return json({ error: "tenant not found", installation_id: b.installation_id }, 404);
       }
+      // Write-then-sync, in that order, so a GitHub failure can never leave
+      // the group WIDER than the registry — only the reverse (group
+      // narrower, registry ahead) is tolerated: that repo simply can't get a
+      // runner until the sync retries and catches up.
       await co.adminAddProjects(
         b.installation_id,
         b.projects.map((p) => ({ repoFullName: p.repo_full_name, repoId: p.repo_id })),
       );
+      if (
+        existing.tenant.status === "approved" &&
+        !existing.tenant.allowAllRepos &&
+        existing.tenant.runnerGroupId !== null
+      ) {
+        const union = new Set(existing.projects.map((p) => p.repoId));
+        for (const p of b.projects) union.add(p.repo_id);
+        try {
+          const gh = new GitHubClient(config, fetchImpl, {
+            orgLogin: existing.tenant.orgLogin,
+            installationId: existing.tenant.installationId,
+          });
+          await gh.setRunnerGroupRepos(existing.tenant.runnerGroupId, [...union]);
+        } catch (err) {
+          console.error(`runner group sync failed org=${existing.tenant.orgLogin}: ${String(err)}`);
+          return json({ error: `runner group sync failed: ${String(err)}` }, 502);
+        }
+      }
       return json({ ok: true, added: b.projects.length });
     }
 
@@ -200,8 +261,34 @@ export async function handleAdmin(req: Request, env: Bindings): Promise<Response
       const b = ProjectDeleteBody.parse(await req.json());
       // Same pre-check as POST /admin/tenants/status: proves the TENANT
       // exists, but not that this repo was ever a project under it.
-      if (!(await co.adminGetTenant(b.installation_id))) {
+      const existing = await co.adminGetTenant(b.installation_id);
+      if (!existing) {
         return json({ error: "tenant not found", installation_id: b.installation_id }, 404);
+      }
+      const target = existing.projects.find((p) => p.repoFullName === b.repo_full_name);
+      // Only sync when the repo is actually a tracked project — otherwise the
+      // delete below is a guaranteed 404 no-op and the removal changes nothing
+      // for GitHub to reflect. A dropped repo narrows the group, which is the
+      // permitted direction (never wider than the registry is about to be).
+      if (
+        target &&
+        existing.tenant.status === "approved" &&
+        !existing.tenant.allowAllRepos &&
+        existing.tenant.runnerGroupId !== null
+      ) {
+        const remaining = existing.projects
+          .filter((p) => p.repoFullName !== b.repo_full_name)
+          .map((p) => p.repoId);
+        try {
+          const gh = new GitHubClient(config, fetchImpl, {
+            orgLogin: existing.tenant.orgLogin,
+            installationId: existing.tenant.installationId,
+          });
+          await gh.setRunnerGroupRepos(existing.tenant.runnerGroupId, remaining);
+        } catch (err) {
+          console.error(`runner group sync failed org=${existing.tenant.orgLogin}: ${String(err)}`);
+          return json({ error: `runner group sync failed: ${String(err)}` }, 502);
+        }
       }
       // removeProject is an unconditional DELETE; a valid-shaped but mistyped
       // repo_full_name affects zero rows. Reporting {ok:true} anyway told the

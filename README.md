@@ -189,6 +189,9 @@ Set in `wrangler.toml [vars]` unless marked secret (`wrangler secret put`).
 | `RECOVERY_SUBREQUEST_BUDGET` | | `30` | Max GitHub subrequests the 5-min recovery scan spends before deferring the tail repos to the next tick (cursor-resumed). Caps the O(installed-repos) fan-out under the Free-plan 50-subrequest cap. Raise once installed repos routinely exceed ~half this. |
 | `ALERT_WEBHOOK_URL` | ✅ | — | Optional Slack-compatible webhook for provision/teardown failures. |
 | `ADMIN_TOKEN` | ✅ | — | Bearer token for the `/admin/*` tenant-registry API. Unset = the whole surface 404s (see [Tenant registry](#tenant-registry-admin-api)). |
+| `TENANCY_MODE` | | `single` | `single` \| `multi`. Multi-tenancy master switch — `single` is today's pre-tenant behavior. Flipping to `multi` is the Plan 3 cutover; do not flip without a seeded tenant registry and the cutover runbook (refuses every job otherwise, fails closed). |
+| `COMMUNITY_VM_BANDWIDTH_BYTES` | | `107374182400` (100 GB) | Per-VM egress quota for community tenants. Unused while `TENANCY_MODE=single`. |
+| `APPLY_FORM_URL` | | — | Link surfaced in refusal notices for orgs that want to apply for access. Unused while `TENANCY_MODE=single`. |
 
 ## Choosing a runner size
 
@@ -238,11 +241,15 @@ Failures are logged (`wrangler tail`). For pushed alerts, set the optional `ALER
 ## Tenant registry (admin API)
 
 The Worker keeps a registry of Tenants (approved GitHub orgs) and Projects (approved repos
-inside them) for the upcoming multi-tenant rollout — see [CONTEXT.md](CONTEXT.md) for the
-Tenant/Project/Grant vocabulary. **Approval is manual by design**: an applicant is vetted by
-a human, then an operator records the decision through these routes. Nothing in the webhook
-path reads this registry yet — provisioning, quota enforcement and usage billing are a
-follow-up change; today the registry only stores state.
+inside them) — see [CONTEXT.md](CONTEXT.md) for the Tenant/Project/Grant vocabulary.
+**Approval is manual by design**: an applicant is vetted by a human, then an operator records
+the decision through these routes. Approving a tenant that isn't `allow_all_repos` now creates
+a GitHub runner group scoped to its approved projects, and fails closed: a tenant reaches
+`approved` only once that group exists (`400` if it has no approved projects yet, `502` on a
+GitHub failure), so its runners can never land in the org-wide Default group. When
+`TENANCY_MODE=multi` ([Configuration](#configuration)), the webhook path enforces this
+registry — tenant/project approval, shape ceiling, monthly grant — on every queued job; in
+`single` mode (today's default) the registry only stores state and the webhook path ignores it.
 
 Set the `ADMIN_TOKEN` secret to enable the API:
 

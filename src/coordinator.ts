@@ -523,18 +523,54 @@ export class Coordinator extends DurableObject<Env> {
    * starts its provisioning clock; returns it, or null. Without that clock reset
    * the job inherits the age it accrued waiting for a slot and is eligible for
    * reaping before its VM can finish booting — see ROW_AGE.
+   *
+   * Eligibility is FIFO among rows that also have per-tenant headroom (gate 6)
+   * AND whose tenant is still `approved`, not just the global cap above —
+   * otherwise a tenant already at its concurrency_cap gets promoted past it
+   * the instant some OTHER tenant's slot frees, and a tenant suspended or
+   * revoked (adminSetTenantStatus) while it has pending rows keeps draining
+   * its backlog straight into provisioning, bypassing admitTenantJob entirely.
+   * NULL tenant_id (single mode) has no per-tenant cap or status and stays
+   * unconditionally eligible, so single mode is unchanged.
    */
   #dequeuePending(): PendingJob | null {
     const cap = this.#maxConcurrent();
     if (cap > 0 && this.#active() >= cap) return null;
     const rows = this.#sql
-      .exec<Row>(`SELECT * FROM jobs WHERE state = 'pending' ORDER BY created_at ASC LIMIT 1`)
+      .exec<Row>(
+        `SELECT j.* FROM jobs j
+         WHERE j.state = 'pending'
+           AND (
+             j.tenant_id IS NULL
+             OR (
+               (SELECT status FROM tenants t WHERE t.installation_id = j.tenant_id) = 'approved'
+               AND (SELECT COUNT(*) FROM jobs a
+                     WHERE a.state IN ${ACTIVE_STATES} AND a.tenant_id = j.tenant_id)
+                  < (SELECT concurrency_cap FROM tenants t WHERE t.installation_id = j.tenant_id)
+             )
+           )
+         ORDER BY j.created_at ASC LIMIT 1`,
+      )
       .toArray();
     const row = rows[0];
     if (!row) return null;
+    // Weight was stamped at ENQUEUE from tenantCtx, which can go stale if the
+    // row sits pending across a RUNNER_SHAPE change — it boots the NEW shape
+    // but would bill the OLD weight. Recompute from the current config at the
+    // moment it actually promotes. Single-mode rows (tenant_id NULL) are never
+    // billed, so their weight (NULL) is left untouched.
+    const weight =
+      row.tenant_id != null
+        ? weightForLabel(
+            row.label ?? this.env.RUNNER_LABEL,
+            this.env.RUNNER_LABEL,
+            this.env.RUNNER_SHAPE,
+          )
+        : row.weight;
     this.#sql.exec(
-      `UPDATE jobs SET state = 'provisioning', provision_started_at = ? WHERE job_id = ?`,
+      `UPDATE jobs SET state = 'provisioning', provision_started_at = ?, weight = ? WHERE job_id = ?`,
       Date.now(),
+      weight,
       row.job_id,
     );
     return this.#toPending(row);
@@ -595,8 +631,9 @@ export class Coordinator extends DurableObject<Env> {
    *   1. `destroying` rows whose teardown was never confirmed (destroy
    *      failed/pending); destroy is idempotent + NotFound-safe so re-issuing
    *      an in-flight one is harmless.
-   *   2. `running` / `provisioning` orphans older than maxAgeMs (missed
-   *      `completed` webhook, stuck boot), flipped to `destroying`.
+   *   2. `running` / `provisioning` orphans older than their tenant's
+   *      `job_ttl_ms` (or maxAgeMs, untenanted) — missed `completed` webhook,
+   *      stuck boot — flipped to `destroying`.
    * Rows that never got a VM are dropped outright. The Worker destroys each and
    * confirms via markDestroyed; a failed destroy stays `destroying` for the
    * next sweep.
@@ -612,8 +649,17 @@ export class Coordinator extends DurableObject<Env> {
       if (task) toDestroy.push(task);
     }
 
+    // gate 8: a tenant's job_ttl_ms is its max VM wall-time; NULL tenant_id
+    // (single mode / pre-migration) keeps the global maxAgeMs.
     for (const row of this.#sql
-      .exec<Row>(`SELECT * FROM jobs WHERE state IN ${ACTIVE_STATES} AND ${ROW_AGE} < ?`, cutoff)
+      .exec<Row>(
+        `SELECT * FROM jobs WHERE state IN ${ACTIVE_STATES} AND ? - ${ROW_AGE} > COALESCE(
+          (SELECT job_ttl_ms FROM tenants WHERE tenants.installation_id = jobs.tenant_id),
+          ?
+        )`,
+        nowMs,
+        maxAgeMs,
+      )
       .toArray()) {
       const task = this.#retireRow(row);
       if (task) toDestroy.push(task);
