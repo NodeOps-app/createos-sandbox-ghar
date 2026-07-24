@@ -609,7 +609,7 @@ describe("admin API — runner group approval gate (Task 8)", () => {
     expect(capturedBody?.selected_repository_ids).toEqual([32]);
   });
 
-  it("syncs the runner group with the union of ids before writing a new project, 502ing on PUT failure without persisting it", async () => {
+  it("writes the project first: a PUT sync failure 502s but leaves the project persisted (fail-closed narrow, never wide)", async () => {
     const createFetch = mockFetch(
       githubRoutes({
         "POST /actions/runner-groups": () =>
@@ -655,12 +655,65 @@ describe("admin API — runner group approval gate (Task 8)", () => {
     const list = await handleAdmin(req("GET", "/admin/tenants"), B);
     const tenants = (await list.json()) as TenantRecord[];
     expect(tenants.find((t) => t.installationId === 523)).toBeDefined();
-    // The failed PUT must never have let the registry write happen.
+    // The registry write happens BEFORE the group sync now (Fix 2): a failed
+    // PUT leaves the group narrower than the registry, the tolerated
+    // fail-closed direction — never the group wider than the registry. So
+    // "acme/two" IS already persisted; prove it by deleting it (a mocked
+    // narrowing PUT lets the delete's own sync succeed) and expecting 200,
+    // not the 404 a never-persisted row would give.
+    const deleteFetch = mockFetch(
+      githubRoutes({
+        "PUT /actions/runner-groups/5252/repositories": () => new Response(null, { status: 204 }),
+      }),
+    );
     const projectsRes = await handleAdmin(
       req("DELETE", "/admin/projects", { installation_id: 523, repo_full_name: "acme/two" }),
       B,
+      deleteFetch,
     );
-    expect(projectsRes.status).toBe(404); // "acme/two" was never persisted
+    expect(projectsRes.status).toBe(200); // "acme/two" was persisted despite the sync 502
+  });
+
+  it("happy path: a successful add writes the row then syncs the group with the union", async () => {
+    const createFetch = mockFetch(
+      githubRoutes({
+        "POST /actions/runner-groups": () =>
+          new Response(JSON.stringify({ id: 5353 }), { status: 201 }),
+      }),
+    );
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 528 })), B);
+    await handleAdmin(
+      req("POST", "/admin/projects", {
+        installation_id: 528,
+        projects: [{ repo_full_name: "acme/one", repo_id: 61 }],
+      }),
+      B,
+    );
+    await handleAdmin(
+      req("POST", "/admin/tenants", tenantBody({ installation_id: 528, status: "approved" })),
+      B,
+      createFetch,
+    );
+
+    let capturedBody: { selected_repository_ids?: number[] } | undefined;
+    const syncFetch = mockFetch(
+      githubRoutes({
+        "PUT /actions/runner-groups/5353/repositories": async (r) => {
+          capturedBody = (await r.json()) as { selected_repository_ids?: number[] };
+          return new Response(null, { status: 204 });
+        },
+      }),
+    );
+    const add = await handleAdmin(
+      req("POST", "/admin/projects", {
+        installation_id: 528,
+        projects: [{ repo_full_name: "acme/two", repo_id: 62 }],
+      }),
+      B,
+      syncFetch,
+    );
+    expect(add.status).toBe(200);
+    expect(capturedBody?.selected_repository_ids).toEqual([61, 62]);
   });
 
   it("skips the runner-group route entirely for an allow_all_repos approval", async () => {
@@ -686,5 +739,134 @@ describe("admin API — runner group approval gate (Task 8)", () => {
     );
     expect(approve.status).toBe(201);
     expect(((await approve.json()) as TenantRecord).runnerGroupId).toBe(1);
+  });
+});
+
+// Fix 1: the runner-group requirement must hold on EVERY approved-scoped
+// write, not only the transition into `approved` — an already-approved
+// scoped tenant re-upserted with a null group (or flipped from
+// allow_all_repos) must never persist without a scoped group, or
+// provisioning falls back to the org's Default (all-repos) group.
+describe("admin API — runner group enforced on every approved-scoped write (Fix 1)", () => {
+  it("re-creates the runner group when an already-approved scoped tenant is re-upserted with runner_group_id nulled", async () => {
+    const createFetch = mockFetch(
+      githubRoutes({
+        "POST /actions/runner-groups": () =>
+          new Response(JSON.stringify({ id: 6262 }), { status: 201 }),
+      }),
+    );
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 525 })), B);
+    await handleAdmin(
+      req("POST", "/admin/projects", {
+        installation_id: 525,
+        projects: [{ repo_full_name: "acme/svc", repo_id: 51 }],
+      }),
+      B,
+    );
+    await handleAdmin(
+      req("POST", "/admin/tenants", tenantBody({ installation_id: 525, status: "approved" })),
+      B,
+      createFetch,
+    );
+
+    let hit = false;
+    const reGroupFetch = mockFetch(
+      githubRoutes({
+        "POST /actions/runner-groups": () => {
+          hit = true;
+          return new Response(JSON.stringify({ id: 6363 }), { status: 201 });
+        },
+      }),
+    );
+    const edit = await handleAdmin(
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({ installation_id: 525, status: "approved", runner_group_id: null }),
+      ),
+      B,
+      reGroupFetch,
+    );
+    expect(edit.status).toBe(201);
+    expect(hit).toBe(true);
+    const edited = (await edit.json()) as TenantRecord;
+    expect(edited.runnerGroupId).not.toBeNull();
+  });
+
+  it("creates a scoped runner group when an approved allow_all_repos tenant is flipped to scoped", async () => {
+    await handleAdmin(
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({ installation_id: 526, allow_all_repos: true, status: "approved" }),
+      ),
+      B,
+    );
+    await handleAdmin(
+      req("POST", "/admin/projects", {
+        installation_id: 526,
+        projects: [{ repo_full_name: "acme/svc", repo_id: 52 }],
+      }),
+      B,
+    );
+
+    let capturedBody: { selected_repository_ids?: number[] } | undefined;
+    const fetchImpl = mockFetch(
+      githubRoutes({
+        "POST /actions/runner-groups": async (r) => {
+          capturedBody = (await r.json()) as { selected_repository_ids?: number[] };
+          return new Response(JSON.stringify({ id: 7171 }), { status: 201 });
+        },
+      }),
+    );
+    const flip = await handleAdmin(
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({
+          installation_id: 526,
+          status: "approved",
+          allow_all_repos: false,
+          runner_group_id: null,
+        }),
+      ),
+      B,
+      fetchImpl,
+    );
+    expect(flip.status).toBe(201);
+    expect(((await flip.json()) as TenantRecord).runnerGroupId).toBe(7171);
+    expect(capturedBody?.selected_repository_ids).toEqual([52]);
+  });
+
+  it("still skips the runner-group route when an already-approved allow_all_repos tenant is merely edited", async () => {
+    await handleAdmin(
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({ installation_id: 527, allow_all_repos: true, status: "approved" }),
+      ),
+      B,
+    );
+
+    // No runner-group routes registered — any attempt to hit one 502s the
+    // request, so a 201 here proves the route was never called.
+    const fetchImpl = mockFetch(githubRoutes());
+    const edit = await handleAdmin(
+      req(
+        "POST",
+        "/admin/tenants",
+        tenantBody({
+          installation_id: 527,
+          allow_all_repos: true,
+          status: "approved",
+          minute_grant: 6_000,
+          runner_group_id: 1,
+        }),
+      ),
+      B,
+      fetchImpl,
+    );
+    expect(edit.status).toBe(201);
+    expect(((await edit.json()) as TenantRecord).runnerGroupId).toBe(1);
   });
 });

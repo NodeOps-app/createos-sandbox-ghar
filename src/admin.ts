@@ -148,10 +148,16 @@ export async function handleAdmin(
       const approvedBy = enteringApproved ? b.approved_by : (existing?.tenant.approvedBy ?? null);
 
       let runnerGroupId = b.runner_group_id;
-      if (enteringApproved && !b.allow_all_repos) {
-        // Gate 3 is GitHub-side: approval REQUIRES the scoped runner group.
-        // Fail closed — a tenant whose runners would land in the org Default
-        // group (visibility: all repos) must never reach `approved` (D12).
+      if (b.status === "approved" && !b.allow_all_repos) {
+        // Gate 3 is GitHub-side: EVERY approved-scoped write must carry a
+        // scoped runner group, not just the transition into `approved` — an
+        // already-approved tenant re-upserted with a null/absent group (or
+        // flipped from allow_all_repos) must not silently fall back to the
+        // org's Default group (visibility: all repos), which would let an
+        // unapproved repo schedule onto the tenant's runners (D12). This
+        // makes createRunnerGroup idempotent-adopt (409 → existing group id)
+        // on every such upsert — one extra GitHub call, cheap at admin
+        // frequency, and the price of the fail-closed guarantee.
         const projects = existing ? existing.projects : [];
         if (projects.length === 0) {
           return json({ error: "cannot approve: no approved projects; add projects first" }, 400);
@@ -222,9 +228,14 @@ export async function handleAdmin(
       if (!existing) {
         return json({ error: "tenant not found", installation_id: b.installation_id }, 404);
       }
-      // Sync-then-write, in that order, so a GitHub failure can never leave
-      // the group narrower than what the registry is about to record — only
-      // the reverse (group wider, registry stale-narrow) is tolerated.
+      // Write-then-sync, in that order, so a GitHub failure can never leave
+      // the group WIDER than the registry — only the reverse (group
+      // narrower, registry ahead) is tolerated: that repo simply can't get a
+      // runner until the sync retries and catches up.
+      await co.adminAddProjects(
+        b.installation_id,
+        b.projects.map((p) => ({ repoFullName: p.repo_full_name, repoId: p.repo_id })),
+      );
       if (
         existing.tenant.status === "approved" &&
         !existing.tenant.allowAllRepos &&
@@ -243,10 +254,6 @@ export async function handleAdmin(
           return json({ error: `runner group sync failed: ${String(err)}` }, 502);
         }
       }
-      await co.adminAddProjects(
-        b.installation_id,
-        b.projects.map((p) => ({ repoFullName: p.repo_full_name, repoId: p.repo_id })),
-      );
       return json({ ok: true, added: b.projects.length });
     }
 
