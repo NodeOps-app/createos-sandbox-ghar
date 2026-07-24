@@ -524,10 +524,13 @@ export class Coordinator extends DurableObject<Env> {
    * the job inherits the age it accrued waiting for a slot and is eligible for
    * reaping before its VM can finish booting — see ROW_AGE.
    *
-   * Eligibility is FIFO among rows that also have per-tenant headroom (gate 6),
-   * not just the global cap above — otherwise a tenant already at its
-   * concurrency_cap gets promoted past it the instant some OTHER tenant's slot
-   * frees. NULL tenant_id (single mode) has no per-tenant cap and stays
+   * Eligibility is FIFO among rows that also have per-tenant headroom (gate 6)
+   * AND whose tenant is still `approved`, not just the global cap above —
+   * otherwise a tenant already at its concurrency_cap gets promoted past it
+   * the instant some OTHER tenant's slot frees, and a tenant suspended or
+   * revoked (adminSetTenantStatus) while it has pending rows keeps draining
+   * its backlog straight into provisioning, bypassing admitTenantJob entirely.
+   * NULL tenant_id (single mode) has no per-tenant cap or status and stays
    * unconditionally eligible, so single mode is unchanged.
    */
   #dequeuePending(): PendingJob | null {
@@ -539,9 +542,12 @@ export class Coordinator extends DurableObject<Env> {
          WHERE j.state = 'pending'
            AND (
              j.tenant_id IS NULL
-             OR (SELECT COUNT(*) FROM jobs a
-                   WHERE a.state IN ${ACTIVE_STATES} AND a.tenant_id = j.tenant_id)
-                < (SELECT concurrency_cap FROM tenants t WHERE t.installation_id = j.tenant_id)
+             OR (
+               (SELECT status FROM tenants t WHERE t.installation_id = j.tenant_id) = 'approved'
+               AND (SELECT COUNT(*) FROM jobs a
+                     WHERE a.state IN ${ACTIVE_STATES} AND a.tenant_id = j.tenant_id)
+                  < (SELECT concurrency_cap FROM tenants t WHERE t.installation_id = j.tenant_id)
+             )
            )
          ORDER BY j.created_at ASC LIMIT 1`,
       )

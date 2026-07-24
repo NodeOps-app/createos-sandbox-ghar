@@ -139,6 +139,34 @@ describe("per-tenant cap at promotion", () => {
       expect(row.weight).toBeNull();
     });
   });
+
+  it("suspending a tenant freezes its pending backlog; re-approving thaws it", async () => {
+    const s = stub("promo-suspend-" + Math.random());
+    // Cap kept high so the CAP gate can't explain the outcome — only STATUS can.
+    await s.adminUpsertTenant(approved(1, { concurrencyCap: 5 }));
+
+    // Two tenant-less fillers saturate the global cap (2 in vitest.config.ts)
+    // so A1 queues purely on the global gate, not the (high) per-tenant one.
+    expect((await s.onQueued(job(90, 0), "d0")).action).toBe("provision"); // filler A, 1/2
+    expect((await s.onQueued(job(91, 0), "d1")).action).toBe("provision"); // filler B, 2/2 full
+    expect((await s.onQueued(job(11, 1), "d2", ctx(1, 5))).action).toBe("queued"); // A1, pending
+
+    await s.adminSetTenantStatus(1, "suspended");
+
+    const res = await s.onCompleted(90); // frees a global slot, triggers #dequeuePending
+    expect(res.nextPending).toBeNull(); // suspended tenant's row is NOT promoted
+
+    await runInDurableObject(s, (_i, state) => {
+      const row = state.storage.sql
+        .exec<{ state: string }>(`SELECT state FROM jobs WHERE job_id = 11`)
+        .one();
+      expect(row.state).toBe("pending"); // stays parked, fails closed
+    });
+
+    await s.adminSetTenantStatus(1, "approved");
+    const res2 = await s.onCompleted(91); // frees the remaining slot, re-triggers #dequeuePending
+    expect(res2.nextPending?.jobId).toBe(11); // re-approved tenant's backlog now promotes
+  });
 });
 
 describe("weight recomputed at promotion", () => {
