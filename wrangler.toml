@@ -17,11 +17,11 @@ crons = ["*/5 * * * *"]
 [vars]
 GITHUB_ORG = "NodeOps-app"
 CREATEOS_BASE_URL = "https://api.sb.createos.sh"
-# Multi-region failover: set CREATEOS_REGIONS (primary first) instead of
-# CREATEOS_BASE_URL. Provisioning fails over in order on 5xx/connection/timeout;
-# teardown dials the region that booted the VM. Keep names stable — job rows
-# persist them (see AGENTS.md gotchas).
-# CREATEOS_REGIONS = "us=https://api-us.sb.createos.sh,eu=https://api-eu.sb.createos.sh"
+# Multi-region failover (primary first): api.sb stays primary, EU absorbs
+# 5xx/connection/timeout waves. The primary is named "default" so rows written
+# before this var existed (legacy CREATEOS_BASE_URL fallback name) keep
+# resolving at teardown. Keep names stable — job rows persist them (AGENTS.md).
+CREATEOS_REGIONS = "default=https://api.sb.createos.sh,eu=https://api-eu.sb.createos.sh"
 RUNNER_LABEL = "createos"
 RUNNER_TEMPLATE = "ghar-runner"
 SANDBOX_NAME_PREFIX = "gha-ci"
