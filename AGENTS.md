@@ -22,6 +22,7 @@ same underlying sandbox lifecycle. This repo consumes `createos-sandbox-sdk`
 
 ```bash
 bun install
+pre-commit install                                  # runs those three on every commit
 bun run lint && bun run typecheck && bun run test   # must be green before you start
 ```
 
@@ -95,6 +96,7 @@ bun run build:template   # rebuild the ghar-runner rootfs (needs CREATEOS_* env)
 - **`RUNNER_DISK_MIB` must be ≤ your CreateOS plan's disk cap** or `createSandbox` returns 403. The code default (30720) exceeds the common 10240 cap.
 - **`GITHUB_INSTALLATION_ID` is the numeric installation id**, not the App client id (`Iv23…`). The wrong one makes token minting 404.
 - **The account is on Workers Paid (upgraded for multi-tenancy).** The Free-plan subrequest (50) and daily-request caps that shaped this design no longer bind — but the "keep the DO passive/hibernating" discipline still stands: the DO must stay `new_sqlite_classes`, hold state only, and do no blocking network I/O (createSandbox poll, GitHub API, destroy all stay in the Worker); the reaper remains a **cron trigger**, not a DO alarm. Don't let Paid relax the DO into an always-on actor — hibernation is still the cost model.
+- **`wrangler.toml` `[vars]` ARE the test bindings** — `vitest.config.ts` points the pool at the real config, so a vars-only edit with no `.ts` touched can break the suite. It has: adding the second `CREATEOS_REGIONS` entry gave the fixtures a two-region config, and the fixtures inject one `makeClient` for *every* region, so the region-looping sandbox sweep saw the same mocked orphan twice and destroyed it twice. Prod was fine (real regions return disjoint lists) — the fixture was not. `miniflare.bindings` therefore pins the vars whose prod value would change fixture behaviour (`TENANCY_MODE`, `CREATEOS_REGIONS`); pin any new one you add, and run the suite after editing `[vars]`.
 - `vitest.config.ts` `miniflare.bindings` holds a **throwaway test-only PKCS#8 key** — not a secret. Real secrets live in `.dev.vars` (gitignored) or `wrangler secret`.
 - The runner launch script is embedded in `template/Dockerfile` via `printf` (the template builder permits `RUN` only — no `COPY`/heredoc). That Dockerfile is its single source of truth.
 - **The microVM's `/dev` is a devtmpfs mounted at boot, so it shadows whatever the image put there.** It ships without `/dev/fd` and without `/dev/shm`, and both of those are load-bearing for CI: no `/dev/fd` means bash process substitution (`<(...)`, `diff <(a) <(b)`, `tee /dev/stderr`) fails outright — which is how asdf's golang plugin died mid-checksum (`sha256sum: /dev/fd/63: No such file or directory`), taking every asdf repo with it — and no `/dev/shm` means no POSIX shared memory (Python `multiprocessing`, headless Chromium). `start-runner.sh` symlinks the four `/dev/fd` entries and mounts a tmpfs on `/dev/shm` before the runner starts. **These fixups cannot move into a `RUN`**: devtmpfs would just cover them at boot. Anything you add to `/dev` belongs in the launch script.

@@ -1,0 +1,49 @@
+# Local gate for the checks ci.yml runs. Worth having even though CI runs the
+# same three: Cloudflare Workers Builds deploys `main` independently of GitHub
+# Actions, so a red commit still ships (AGENTS.md → Conventions). The hook is
+# the only thing that runs *before* the push that deploys.
+#
+#   pre-commit install     # once per clone
+#   pre-commit run -a      # everything, on demand
+#
+# Only checks here — no formatter that rewrites tracked files.
+minimum_pre_commit_version: "4.2.0"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+
+  - repo: local
+    hooks:
+      # bun, never npm/npx/node (AGENTS.md → Conventions). All three shell out
+      # to package.json scripts so the hook and ci.yml can never disagree about
+      # what "lint" means.
+      - id: oxlint
+        name: oxlint
+        entry: bun run lint
+        language: system
+        pass_filenames: false
+        files: \.ts$
+
+      - id: typecheck
+        name: tsc --noEmit
+        entry: bun run typecheck
+        language: system
+        pass_filenames: false
+        files: \.(ts|json)$
+
+      # `toml` is load-bearing, not decoration: vitest reads wrangler.toml for
+      # the test bindings, so a vars-only edit there can (and did — 5f944a3)
+      # break the suite with no .ts touched.
+      - id: vitest
+        name: vitest run
+        entry: bun run test
+        language: system
+        pass_filenames: false
+        files: \.(ts|toml|json)$

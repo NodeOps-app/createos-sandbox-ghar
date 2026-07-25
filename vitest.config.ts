@@ -13,6 +13,14 @@ export default defineWorkersConfig({
             // this, every pre-tenant webhook test hits multi-mode admission with no
             // installation.id and refuses. Multi-mode suites override this per-suite.
             TENANCY_MODE: "single",
+            // Pin the region topology for the same reason: prod's wrangler.toml
+            // now lists two regions, and the integration fixtures inject ONE
+            // `makeClient` for every region — so a two-region config makes every
+            // region-looping path (the orphaned-sandbox sweep) see the same
+            // fixture twice and act on it twice. Failover itself is covered in
+            // test/unit/{sandbox,createos,config}.test.ts, which build their own
+            // multi-region Config directly.
+            CREATEOS_REGIONS: "default=https://api.sb.createos.sh",
             MAX_CONCURRENT: "2",
             GITHUB_ORG: "nodeops-app",
             RUNNER_LABEL: "createos",

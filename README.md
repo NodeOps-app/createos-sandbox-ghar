@@ -345,6 +345,8 @@ bun run test        # vitest — unit + real-Durable-Object integration
 bun run typecheck   # tsc --noEmit
 bun run lint        # oxlint
 bun run dev         # wrangler dev (needs .dev.vars)
+
+pre-commit install  # once per clone — gates commits on the three checks above
 ```
 
 Architecture, file-by-file responsibilities, conventions, and the toolchain gotchas that will bite you live in **[AGENTS.md](AGENTS.md)**. Domain vocabulary is in [CONTEXT.md](CONTEXT.md).
