@@ -5,7 +5,7 @@ import { runReaper } from "../../src/reconcile";
 
 type Stub = ReturnType<typeof env.COORDINATOR.get>;
 async function boot(s: Stub, jobId: number, sandboxId: string) {
-  await s.recordSandboxCreated(jobId, sandboxId, runnerName(jobId));
+  await s.recordSandboxCreated(jobId, sandboxId, runnerName(jobId), "default");
   await s.markRunning(jobId);
 }
 const ids = (r: { toDestroy: { sandboxId: string }[] }) => r.toDestroy.map((t) => t.sandboxId);
@@ -104,11 +104,11 @@ describe("markProvisionFailed disposes of the VM it left behind", () => {
   it("parks a row that owns a VM in destroying, and frees its slot", async () => {
     const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("pf1-" + Math.random()));
     await queued(s, 940);
-    await s.recordSandboxCreated(940, "sb_940", runnerName(940));
+    await s.recordSandboxCreated(940, "sb_940", runnerName(940), "default");
 
     const { toDestroy } = await s.markProvisionFailed(940, "sb_940");
 
-    expect(toDestroy).toEqual({ jobId: 940, sandboxId: "sb_940", tenantId: null });
+    expect(toDestroy).toEqual({ jobId: 940, sandboxId: "sb_940", tenantId: null, region: "default" });
     expect(await s.activeCount()).toBe(0); // destroying does not hold a slot
     // The row survives, so an unconfirmed teardown is retried rather than lost.
     expect(ids(await s.sweep(Date.now(), 3_600_000))).toContain("sb_940");
@@ -120,7 +120,7 @@ describe("markProvisionFailed disposes of the VM it left behind", () => {
 
     const { toDestroy } = await s.markProvisionFailed(941, "sb_941");
 
-    expect(toDestroy).toEqual({ jobId: 941, sandboxId: "sb_941", tenantId: null });
+    expect(toDestroy).toEqual({ jobId: 941, sandboxId: "sb_941", tenantId: null, region: null });
     expect(ids(await s.sweep(Date.now(), 3_600_000))).toContain("sb_941");
   });
 
@@ -143,7 +143,7 @@ describe("markProvisionFailed disposes of the VM it left behind", () => {
     // The Worker still holds a live VM. Nothing to persist against, but it must
     // come back to be destroyed rather than be silently forgotten.
     const { toDestroy } = await s.markProvisionFailed(943, "sb_943");
-    expect(toDestroy).toEqual({ jobId: 943, sandboxId: "sb_943", tenantId: null });
+    expect(toDestroy).toEqual({ jobId: 943, sandboxId: "sb_943", tenantId: null, region: null });
   });
 });
 
@@ -190,7 +190,7 @@ describe("age is measured from provisioning, not from queueing", () => {
     const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("age1-" + Math.random()));
     await promoteAfterWaiting(s, 910, 300);
     // Mid-boot: the VM exists, its runner has not registered yet.
-    await s.recordSandboxCreated(910, "sb_910", runnerName(910));
+    await s.recordSandboxCreated(910, "sb_910", runnerName(910), "default");
 
     // Grace 200ms: the job queued 300ms ago but has been provisioning for ~0ms.
     const res = await s.reapUnregistered(Date.now(), [], 200);

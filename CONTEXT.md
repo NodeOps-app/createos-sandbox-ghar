@@ -44,6 +44,10 @@ Glossary for the GitHub Actions runner controller. Terms only, no implementation
 
 - **Concurrency cap** — max simultaneous Sandboxes the Controller will run (protects createos account quota + CF free tier + cost). Off by default (`MAX_CONCURRENT` unset/0 = unlimited, boot every Job); when set to N>0, Jobs beyond N wait in a pending queue in the DO until a slot frees.
 
+- **Region** — one CreateOS control plane deployment (e.g. `us` at `https://api-us.sb.createos.sh`, `eu` at `https://api-eu.sb.createos.sh`), each with its own dataplane capacity. Configured via `CREATEOS_REGIONS`, primary first; a bare legacy `CREATEOS_BASE_URL` becomes a single Region named `default`. The Region that booted a VM is persisted on the Job row, and teardown dials that Region's control plane — another Region has never heard of the sandbox id, and its 404 would read as "already destroyed".
+
+- **Region failover** — provisioning retry across Regions: `createSandbox` is attempted against each configured Region in order, failing over only on region-level faults (5xx — capacity exhaustion surfaces as a bare 503 — plus connection and timeout errors); a 4xx is a defect in the request and fails identically in every Region, so it never triggers failover. The JIT config is minted once and reused on every attempt (a GitHub credential, region-independent). Admission-time reads (the Shape catalog) always target the primary Region; the orphaned-sandbox sweep lists every Region.
+
 - **Tenant** — an approved GitHub org, keyed by App installation id. Owns the Grant, concurrency cap, shape ceiling, job TTL and runner group.
 
 - **Project** — an approved repo inside a Tenant; the admission unit — usage is attributed to it, never enforced at it.

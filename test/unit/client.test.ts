@@ -32,7 +32,7 @@ async function cfg(): Promise<Config> {
     githubAppPrivateKeyPkcs8: `-----BEGIN PRIVATE KEY-----\n${btoa(bin).replace(/(.{64})/g, "$1\n")}\n-----END PRIVATE KEY-----\n`,
     githubInstallationId: "2",
     githubWebhookSecret: "s",
-    createosBaseUrl: "https://c",
+    createosRegions: [{ name: "default", baseUrl: "https://c" }],
     createosApiKey: "k",
     runnerLabel: "createos",
     runnerGroupId: 1,

@@ -31,7 +31,7 @@ const job = (id: number) => ({
   tenant: null,
 });
 async function boot(s: Stub, jobId: number, sandboxId: string) {
-  await s.recordSandboxCreated(jobId, sandboxId, runnerName(jobId));
+  await s.recordSandboxCreated(jobId, sandboxId, runnerName(jobId), "default");
   await s.markRunning(jobId);
 }
 
@@ -50,7 +50,12 @@ describe("reapUnregistered (runner-identity liveness)", () => {
     await s.onQueued(job(8002), "d2");
     await boot(s, 8002, "sb8002");
     const res = await s.reapUnregistered(Date.now() + 1, [], 0);
-    expect(res.toDestroy).toContainEqual({ jobId: 8002, sandboxId: "sb8002", tenantId: null });
+    expect(res.toDestroy).toContainEqual({
+      jobId: 8002,
+      sandboxId: "sb8002",
+      tenantId: null,
+      region: "default",
+    });
     expect(await s.activeCount()).toBe(0); // flipped to destroying → off the cap
   });
 
@@ -81,7 +86,12 @@ describe("reapUnregistered (runner-identity liveness)", () => {
 
     // 8101's runner is gone; 8102 still online → only 8101 reaped, freeing one slot.
     const res = await s.reapUnregistered(Date.now() + 1, [runnerName(8102)], 0);
-    expect(res.toDestroy).toContainEqual({ jobId: 8101, sandboxId: "sb8101", tenantId: null });
+    expect(res.toDestroy).toContainEqual({
+      jobId: 8101,
+      sandboxId: "sb8101",
+      tenantId: null,
+      region: "default",
+    });
     expect(res.nextPending).toContainEqual(job(8103)); // pending pulled into the freed slot
     expect(await s.activeCount()).toBe(2); // 8102 running + 8103 now provisioning
   });
@@ -573,6 +583,66 @@ describe("runReconciler — orphaned sandbox sweep", () => {
     await runReconciler(env as any, depsWith([orphan]));
     expect(orphan.destroy).toHaveBeenCalledOnce();
     globalThis.fetch = realFetch;
+  });
+
+  it("spares a VM whose job row lands DURING the region list — the list-before-live invariant", async () => {
+    // Regression for the multi-region rewrite inverting the snapshot order:
+    // every region's listSandboxes must resolve BEFORE liveJobIds is read, or a
+    // row inserted between the snapshot and the list makes a booting VM look
+    // ownerless and the sweep destroys it. The race is simulated exactly —
+    // the row is inserted from inside listSandboxes itself.
+    const singleton = stub("singleton");
+    const booting = vm(vmName(9806));
+    patchGitHub();
+    const deps = {
+      makeClient: () => ({
+        createSandbox: vi.fn(),
+        listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockImplementation(async () => {
+          await singleton.onQueued(job(9806), "dlv-9806-mid-list");
+          return [booting];
+        }),
+      }),
+    };
+    await runReconciler(env as any, deps);
+    expect(booting.destroy).not.toHaveBeenCalled();
+    globalThis.fetch = realFetch;
+  });
+
+  it("rotates the starting region per cron bucket so a full shared budget can't starve later regions", async () => {
+    // us has MAX_SANDBOX_DESTROYS_PER_TICK orphans EVERY tick; eu has one. A
+    // fixed us-first order never reaches eu — the per-bucket rotation must.
+    vi.useFakeTimers();
+    try {
+      const regionalEnv = {
+        ...env,
+        CREATEOS_REGIONS: "us=https://api-us.local,eu=https://api-eu.local",
+      };
+      const euOrphan = vm(vmName(9807));
+      const usOrphans = [0, 1, 2, 3, 4].map((i) => vm(vmName(9820 + i)));
+      const deps = {
+        makeClient: (_c: unknown, region?: { name: string }) => ({
+          createSandbox: vi.fn(),
+          listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
+          getSandbox: vi.fn(),
+          listSandboxes: vi.fn().mockResolvedValue(region?.name === "eu" ? [euOrphan] : usOrphans),
+        }),
+      };
+      patchGitHub();
+      // Tick 1: the bucket starts at us — its 5 orphans eat the whole shared budget.
+      vi.setSystemTime(300_000 * 100);
+      await runReconciler(regionalEnv as any, deps);
+      expect(usOrphans[0]!.destroy).toHaveBeenCalled();
+      expect(euOrphan.destroy).not.toHaveBeenCalled();
+      // Tick 2: the next bucket rotates the start to eu — its orphan is first in line.
+      vi.setSystemTime(300_000 * 101);
+      await runReconciler(regionalEnv as any, deps);
+      expect(euOrphan.destroy).toHaveBeenCalledOnce();
+      globalThis.fetch = realFetch;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

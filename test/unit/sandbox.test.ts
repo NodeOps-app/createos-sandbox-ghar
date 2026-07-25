@@ -10,7 +10,11 @@ import {
   sandboxNamesAreSweepable,
   teardownSandbox,
 } from "../../src/sandbox";
-import { CreateosSandboxNotFoundError } from "@nodeops-createos/sandbox";
+import {
+  CreateosSandboxNotFoundError,
+  CreateosSandboxServerError,
+  CreateosSandboxValidationError,
+} from "@nodeops-createos/sandbox";
 import type { Config, PendingJob } from "../../src/types";
 
 describe("jobIdFromRunnerName", () => {
@@ -50,6 +54,7 @@ const config = {
   runnerTemplate: "ghar-runner",
   runnerDiskMib: 30720,
   sandboxNamePrefix: "gha-ci",
+  createosRegions: [{ name: "default", baseUrl: "https://c" }],
 } as Config;
 
 describe("jobIdFromSandboxName", () => {
@@ -284,7 +289,7 @@ describe("teardownSandbox", () => {
     const destroy = vi.fn().mockResolvedValue({ id: "sb_1", status: "destroying" });
     const getBandwidth = vi.fn().mockResolvedValue({ used_bytes: 0 });
     const getSandbox = vi.fn().mockResolvedValue({ destroy, getBandwidth });
-    const result = await teardownSandbox(config, "sb_1", {
+    const result = await teardownSandbox(config, "sb_1", null, {
       makeClient: () => ({
         getSandbox,
         createSandbox: vi.fn(),
@@ -304,6 +309,7 @@ describe("teardownSandbox", () => {
     const result = await teardownSandbox(
       config,
       "sb_2",
+      null,
       {
         makeClient: () => ({
           getSandbox,
@@ -326,6 +332,7 @@ describe("teardownSandbox", () => {
     const result = await teardownSandbox(
       config,
       "sb_3",
+      null,
       {
         makeClient: () => ({
           getSandbox,
@@ -352,7 +359,7 @@ describe("teardownSandbox", () => {
         new CreateosSandboxNotFoundError("gone", new Response(null, { status: 404 })),
       );
     await expect(
-      teardownSandbox(config, "sb_x", {
+      teardownSandbox(config, "sb_x", null, {
         makeClient: () => ({
           getSandbox,
           createSandbox: vi.fn(),
@@ -366,7 +373,7 @@ describe("teardownSandbox", () => {
   it("rethrows other errors", async () => {
     const getSandbox = vi.fn().mockRejectedValue(new Error("boom"));
     await expect(
-      teardownSandbox(config, "sb_x", {
+      teardownSandbox(config, "sb_x", null, {
         makeClient: () => ({
           getSandbox,
           createSandbox: vi.fn(),
@@ -375,5 +382,157 @@ describe("teardownSandbox", () => {
         }),
       }),
     ).rejects.toThrow(/boom/);
+  });
+
+  it("dials the region the row names", async () => {
+    const twoRegions = {
+      ...config,
+      createosRegions: [
+        { name: "us", baseUrl: "https://us" },
+        { name: "eu", baseUrl: "https://eu" },
+      ],
+    } as Config;
+    const destroy = vi.fn().mockResolvedValue({ id: "sb_1", status: "destroying" });
+    const getSandbox = vi.fn().mockResolvedValue({ destroy, getBandwidth: vi.fn() });
+    const makeClient = vi.fn(() => ({
+      getSandbox,
+      createSandbox: vi.fn(),
+      listShapes: vi.fn(),
+      listSandboxes: vi.fn().mockResolvedValue([]),
+    }));
+
+    await teardownSandbox(twoRegions, "sb_1", "eu", { makeClient });
+
+    expect(makeClient).toHaveBeenCalledWith(
+      twoRegions,
+      expect.objectContaining({ name: "eu", baseUrl: "https://eu" }),
+    );
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an unknown region BEFORE any API call — a wrong-region 404 reads as 'already destroyed' and leaks the VM", async () => {
+    const getSandbox = vi.fn();
+    await expect(
+      teardownSandbox(config, "sb_x", "ap", {
+        makeClient: () => ({
+          getSandbox,
+          createSandbox: vi.fn(),
+          listShapes: vi.fn(),
+          listSandboxes: vi.fn().mockResolvedValue([]),
+        }),
+      }),
+    ).rejects.toThrow(/unknown createos region "ap"/);
+    expect(getSandbox).not.toHaveBeenCalled();
+  });
+});
+
+/** deps.makeClient that serves each region its own stub client. */
+function regionRoutedClients(
+  byRegion: Record<string, { createSandbox: ReturnType<typeof vi.fn> }>,
+) {
+  return {
+    makeClient: (_cfg: unknown, region?: { name: string }) => ({
+      createSandbox: byRegion[region!.name]!.createSandbox,
+      getSandbox: vi.fn(),
+      listShapes: vi.fn(),
+      listSandboxes: vi.fn().mockResolvedValue([]),
+    }),
+    attemptId: () => "k3",
+  };
+}
+
+describe("createRunnerSandbox region failover", () => {
+  // Two control planes, primary first. The JIT blob is a GitHub credential —
+  // minted ONCE and reused on every region attempt.
+  const twoRegions = {
+    ...config,
+    createosRegions: [
+      { name: "us", baseUrl: "https://us" },
+      { name: "eu", baseUrl: "https://eu" },
+    ],
+  } as Config;
+
+  it("fails over to the next region on a 5xx, minting the JIT once", async () => {
+    const us = {
+      createSandbox: vi
+        .fn()
+        .mockRejectedValue(
+          new CreateosSandboxServerError(
+            "service unavailable",
+            new Response(null, { status: 503 }),
+          ),
+        ),
+    };
+    const eu = { createSandbox: vi.fn().mockResolvedValue({ id: "sb_eu", runCommand: vi.fn() }) };
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+
+    const res = await createRunnerSandbox(twoRegions, github, job, regionRoutedClients({ us, eu }));
+
+    expect(us.createSandbox).toHaveBeenCalledOnce();
+    expect(eu.createSandbox).toHaveBeenCalledOnce();
+    // Same request both attempts — shape, name, and the one shared JIT blob.
+    expect(eu.createSandbox.mock.calls[0]![0]).toEqual(us.createSandbox.mock.calls[0]![0]);
+    expect(github.generateJitConfig).toHaveBeenCalledOnce();
+    expect(res.region).toBe("eu");
+    expect(res.sandboxId).toBe("sb_eu");
+  });
+
+  it("does NOT fail over on a 4xx — a request defect fails identically in every region", async () => {
+    const us = {
+      createSandbox: vi
+        .fn()
+        .mockRejectedValue(
+          new CreateosSandboxValidationError("unknown shape", new Response(null, { status: 400 })),
+        ),
+    };
+    const eu = { createSandbox: vi.fn().mockResolvedValue({ id: "sb_eu", runCommand: vi.fn() }) };
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+
+    await expect(
+      createRunnerSandbox(twoRegions, github, job, regionRoutedClients({ us, eu })),
+    ).rejects.toThrow(/unknown shape/);
+    expect(eu.createSandbox).not.toHaveBeenCalled();
+  });
+
+  it("throws the last region's error when every region is down", async () => {
+    const us = {
+      createSandbox: vi
+        .fn()
+        .mockRejectedValue(
+          new CreateosSandboxServerError("us down", new Response(null, { status: 503 })),
+        ),
+    };
+    const eu = {
+      createSandbox: vi
+        .fn()
+        .mockRejectedValue(
+          new CreateosSandboxServerError("eu down", new Response(null, { status: 503 })),
+        ),
+    };
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+
+    await expect(
+      createRunnerSandbox(twoRegions, github, job, regionRoutedClients({ us, eu })),
+    ).rejects.toThrow(/eu down/);
+    expect(us.createSandbox).toHaveBeenCalledOnce();
+    expect(eu.createSandbox).toHaveBeenCalledOnce();
+  });
+
+  it("a single configured region is attempted exactly once (pre-region behavior)", async () => {
+    const createSandbox = vi.fn().mockResolvedValue({ id: "sb_1", runCommand: vi.fn() });
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+
+    const res = await createRunnerSandbox(config, github, job, {
+      makeClient: () => ({
+        createSandbox,
+        getSandbox: vi.fn(),
+        listShapes: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
+      attemptId: () => "k3",
+    });
+
+    expect(createSandbox).toHaveBeenCalledOnce();
+    expect(res.region).toBe("default");
   });
 });

@@ -1,5 +1,17 @@
 export type ProvisionPolicy = "org-wide" | "repo-allowlist" | "fork-gated";
 
+/**
+ * One CreateOS control plane. `regions[0]` is the primary — every admission-time
+ * read (shape catalog) and every pre-region row targets it. Provisioning fails
+ * over to the rest in order on region-level faults (see isFailoverEligible), and
+ * the region that actually booted the VM is persisted on the job row so teardown
+ * dials the control plane that owns it.
+ */
+export interface Region {
+  name: string; // "us" | "eu" | "default" (legacy CREATEOS_BASE_URL fallback)
+  baseUrl: string; // "https://api-us.sb.createos.sh"
+}
+
 /** Parsed, validated env — produced by loadConfig(), consumed everywhere. */
 export interface Config {
   githubOrg: string;
@@ -8,7 +20,7 @@ export interface Config {
   githubAppPrivateKeyPkcs8: string; // PEM "-----BEGIN PRIVATE KEY-----"
   githubInstallationId: string;
   githubWebhookSecret: string;
-  createosBaseUrl: string;
+  createosRegions: Region[]; // first = primary; >1 enables provision failover
   createosApiKey: string;
   runnerLabel: string; // "createos"
   // GitHub runner group the JIT runner registers into. Default 1 = the org-wide
@@ -177,6 +189,10 @@ export interface TeardownTask {
   /** Tenant owning this VM (multi mode); null for single-mode rows — the
    * bandwidth-read cost gate at teardown keys on this. */
   tenantId: number | null;
+  /** Region whose control plane owns this VM; null = pre-region row → primary.
+   * Teardown MUST dial this region: another region's control has never heard of
+   * the id, and its 404 would read as "already destroyed" — a silent leak. */
+  region: string | null;
 }
 
 /**

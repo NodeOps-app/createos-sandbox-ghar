@@ -12,6 +12,7 @@ import type {
   Config,
   ProvisionFailedResult,
   SpawnTimeline,
+  TeardownTask,
   WorkflowJob,
   TenantStatus,
 } from "./types";
@@ -48,17 +49,19 @@ export async function provisionAndRecord(
 
   let sandboxId: string;
   let runnerName: string;
+  let region: string;
   let sandbox: Awaited<ReturnType<typeof createRunnerSandbox>>["sandbox"];
   let timings: Awaited<ReturnType<typeof createRunnerSandbox>>["timings"];
   try {
-    ({ sandboxId, runnerName, sandbox, timings } = await createRunnerSandbox(
+    ({ sandboxId, runnerName, sandbox, region, timings } = await createRunnerSandbox(
       config,
       github,
       job,
       deps,
     ));
   } catch (err) {
-    // Nothing booted (JIT mint / createSandbox threw) → free the slot + advance.
+    // Nothing booted (JIT mint / every region's createSandbox threw) → free the
+    // slot + advance.
     await failProvision(env, config, job, deps, err);
     return;
   }
@@ -71,12 +74,14 @@ export async function provisionAndRecord(
   // teardown is persisted (or at minimum attempted) rather than dropped.
   try {
     // Record the VM before launching it: from here a `completed` tears it down
-    // via runner identity, so the runner launch below can never orphan it.
-    const decision = await co.recordSandboxCreated(job.jobId, sandboxId, runnerName);
+    // via runner identity, so the runner launch below can never orphan it. The
+    // region is recorded with it — every later teardown dials the control plane
+    // that booted this VM.
+    const decision = await co.recordSandboxCreated(job.jobId, sandboxId, runnerName, region);
     if (decision.action === "destroy") {
       // Job already completed/cancelled during creation — destroy the orphan.
       // A throw here is caught below, which persists the teardown for retry.
-      await teardownSandbox(config, sandboxId, deps);
+      await teardownSandbox(config, sandboxId, region, deps);
       return;
     }
     // D15: community VMs get a per-VM egress quota; allow-all tenants (NodeOps)
@@ -101,7 +106,7 @@ export async function provisionAndRecord(
     }
     await launchRunner(sandbox);
   } catch (err) {
-    await failProvision(env, config, job, deps, err, sandboxId);
+    await failProvision(env, config, job, deps, err, sandboxId, region);
     return;
   }
 
@@ -115,7 +120,7 @@ export async function provisionAndRecord(
   // above), so leaving it there is safe. Log and move on.
   try {
     await co.markRunning(job.jobId);
-    logProvisionBreakdown(job.jobId, timings, Date.now() - afterCreate);
+    logProvisionBreakdown(job.jobId, region, timings, Date.now() - afterCreate);
   } catch (err) {
     console.error(`markRunning failed, VM left running job=${job.jobId}: ${String(err)}`);
   }
@@ -131,11 +136,12 @@ export async function provisionAndRecord(
  */
 function logProvisionBreakdown(
   jobId: number,
+  region: string,
   timings: { mintMs: number; createMs: number },
   postMs: number,
 ): void {
   console.log(
-    `provision breakdown: job=${jobId} mint=${timings.mintMs}ms create=${timings.createMs}ms post=${postMs}ms`,
+    `provision breakdown: job=${jobId} region=${region} mint=${timings.mintMs}ms create=${timings.createMs}ms post=${postMs}ms`,
   );
 }
 
@@ -160,6 +166,7 @@ export async function failProvision(
   deps: SandboxDeps,
   err: unknown,
   sandboxId?: string,
+  region?: string,
 ): Promise<void> {
   console.error(`provision failed job=${job.jobId}: ${String(err)}`);
   await notify(
@@ -169,10 +176,10 @@ export async function failProvision(
 
   let result: ProvisionFailedResult;
   try {
-    result = await coordinator(env).markProvisionFailed(job.jobId, sandboxId);
+    result = await coordinator(env).markProvisionFailed(job.jobId, sandboxId, region);
   } catch (doErr) {
     console.error(`markProvisionFailed unreachable job=${job.jobId}: ${String(doErr)}`);
-    if (sandboxId) await destroyUnrecorded(config, job.jobId, sandboxId, deps);
+    if (sandboxId) await destroyUnrecorded(config, job.jobId, sandboxId, region, deps);
     return;
   }
 
@@ -190,10 +197,11 @@ async function destroyUnrecorded(
   config: Config,
   jobId: number,
   sandboxId: string,
+  region: string | undefined,
   deps: SandboxDeps,
 ): Promise<void> {
   try {
-    await teardownSandbox(config, sandboxId, deps);
+    await teardownSandbox(config, sandboxId, region, deps);
   } catch (err) {
     console.error(`unrecorded teardown failed sandbox=${sandboxId} job=${jobId}: ${String(err)}`);
     await notify(
@@ -528,11 +536,17 @@ function logSpawnTimeline(t: SpawnTimeline): void {
 export async function destroyAndConfirm(
   env: Bindings,
   config: Config,
-  task: { jobId: number; sandboxId: string; tenantId: number | null },
+  task: TeardownTask,
   deps: SandboxDeps,
 ): Promise<void> {
   try {
-    const egress = await teardownSandbox(config, task.sandboxId, deps, task.tenantId !== null);
+    const egress = await teardownSandbox(
+      config,
+      task.sandboxId,
+      task.region,
+      deps,
+      task.tenantId !== null,
+    );
     await coordinator(env).markDestroyed(task.jobId, egress ?? undefined);
   } catch (err) {
     console.error(`teardown failed sandbox=${task.sandboxId} job=${task.jobId}: ${String(err)}`);

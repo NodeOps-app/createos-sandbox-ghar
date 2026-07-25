@@ -46,6 +46,7 @@ type Row = {
   job_started_at: number | null;
   tenant_id: number | null;
   weight: number | null;
+  region: string | null;
 };
 
 /**
@@ -175,6 +176,10 @@ export class Coordinator extends DurableObject<Env> {
     }
     if (!has("tenant_id")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN tenant_id INTEGER`);
     if (!has("weight")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN weight REAL`);
+    // A NULL `region` is a row from before multi-region failover: its VM lives
+    // on the primary control plane, which is exactly what teardown resolves a
+    // NULL region to — old and new code agree.
+    if (!has("region")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN region TEXT`);
   }
 
   /**
@@ -314,17 +319,22 @@ export class Coordinator extends DurableObject<Env> {
    * returns the durable teardown effect; a VM-less row is deleted immediately.
    * Reapplying this to an existing Destroying row is idempotent.
    */
-  #retireRow(row: Row, sandboxId: string | null = row.sandbox_id): TeardownTask | null {
+  #retireRow(
+    row: Row,
+    sandboxId: string | null = row.sandbox_id,
+    region: string | null = row.region,
+  ): TeardownTask | null {
     if (!sandboxId) {
       this.#sql.exec(`DELETE FROM jobs WHERE job_id = ?`, row.job_id);
       return null;
     }
     this.#sql.exec(
-      `UPDATE jobs SET state = 'destroying', sandbox_id = ? WHERE job_id = ?`,
+      `UPDATE jobs SET state = 'destroying', sandbox_id = ?, region = ? WHERE job_id = ?`,
       sandboxId,
+      region,
       row.job_id,
     );
-    return { jobId: row.job_id, sandboxId, tenantId: row.tenant_id ?? null };
+    return { jobId: row.job_id, sandboxId, tenantId: row.tenant_id ?? null, region };
   }
 
   /** Deduplicates by webhook delivery id. Returns true if this delivery is new. */
@@ -394,15 +404,20 @@ export class Coordinator extends DurableObject<Env> {
     jobId: number,
     sandboxId: string,
     runnerName: string,
+    region: string,
   ): Promise<SandboxRecordDecision> {
     const row = this.#rowByJob(jobId);
     if (!row || row.state !== "provisioning") {
       return { action: "destroy" };
     }
+    // Region rides with the VM id from here on: every later teardown of this
+    // row (completed webhook, reaper, reconciler) dials the control plane that
+    // actually booted it.
     this.#sql.exec(
-      `UPDATE jobs SET sandbox_id = ?, runner_name = ? WHERE job_id = ?`,
+      `UPDATE jobs SET sandbox_id = ?, runner_name = ?, region = ? WHERE job_id = ?`,
       sandboxId,
       runnerName,
+      region,
       jobId,
     );
     return { action: "launch" };
@@ -472,20 +487,24 @@ export class Coordinator extends DurableObject<Env> {
    * once. Leaves an existing `destroying` row alone — a raced `completed`
    * already claimed that teardown.
    */
-  async markProvisionFailed(jobId: number, sandboxId?: string): Promise<ProvisionFailedResult> {
+  async markProvisionFailed(
+    jobId: number,
+    sandboxId?: string,
+    region?: string,
+  ): Promise<ProvisionFailedResult> {
     const row = this.#rowByJob(jobId);
     let toDestroy: TeardownTask | null = null;
     const vm = sandboxId ?? row?.sandbox_id ?? null;
 
     if (row && row.state !== "destroying") {
-      toDestroy = this.#retireRow(row, vm);
+      toDestroy = this.#retireRow(row, vm, region ?? row.region);
     } else if (!row && vm) {
       // A raced `completed` already dropped the row, but we hold a live VM. There
       // is nothing left to persist the teardown against, so hand it back to be
       // destroyed now and let the orphaned-sandbox sweep backstop a failure.
       // The row is gone, so its tenant is unknowable — null skips the egress
       // read rather than guessing at a cost attribution that no longer exists.
-      toDestroy = { jobId, sandboxId: vm, tenantId: null };
+      toDestroy = { jobId, sandboxId: vm, tenantId: null, region: region ?? null };
     }
     return { toDestroy, nextPending: this.#dequeuePending() };
   }

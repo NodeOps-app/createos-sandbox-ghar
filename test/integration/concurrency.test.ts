@@ -14,7 +14,7 @@ const job = (id: number) => ({
 });
 
 async function boot(s: ReturnType<typeof stub>, jobId: number, sandboxId: string) {
-  await s.recordSandboxCreated(jobId, sandboxId, runnerName(jobId));
+  await s.recordSandboxCreated(jobId, sandboxId, runnerName(jobId), "default");
   await s.markRunning(jobId);
 }
 
@@ -29,7 +29,7 @@ describe("concurrency cap (MAX_CONCURRENT=2)", () => {
     expect(await s.activeCount()).toBe(2);
 
     const res = await s.onCompleted(1, runnerName(1));
-    expect(res.toDestroy).toEqual({ jobId: 1, sandboxId: "sb1", tenantId: null });
+    expect(res.toDestroy).toEqual({ jobId: 1, sandboxId: "sb1", tenantId: null, region: "default" });
     expect(res.nextPending?.jobId).toBe(3); // slot freed → dequeue pending
   });
 

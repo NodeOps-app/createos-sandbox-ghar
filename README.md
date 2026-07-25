@@ -172,8 +172,9 @@ Set in `wrangler.toml [vars]` unless marked secret (`wrangler secret put`).
 | `GITHUB_INSTALLATION_ID` | ✅ | — | Org installation id — **numeric**, not the App client id. |
 | `GITHUB_APP_PRIVATE_KEY` | ✅ | — | **PKCS#8** PEM (convert from GitHub's PKCS#1). |
 | `GITHUB_WEBHOOK_SECRET` | ✅ | — | Webhook HMAC secret. |
-| `CREATEOS_BASE_URL` | | — | CreateOS control plane, e.g. `https://api.sb.createos.sh`. |
-| `CREATEOS_API_KEY` | ✅ | — | CreateOS API key. |
+| `CREATEOS_BASE_URL` | | — | CreateOS control plane, e.g. `https://api.sb.createos.sh`. Ignored when `CREATEOS_REGIONS` is set. |
+| `CREATEOS_REGIONS` | | — | Comma-separated `name=url` control planes, primary first: `us=https://api-us.sb.createos.sh,eu=https://api-eu.sb.createos.sh`. Provisioning fails over in order on region-level faults (5xx/connection/timeout); teardown always dials the region that booted the VM. Keep region **names** stable — rows persist them (see the gotchas in `AGENTS.md`). |
+| `CREATEOS_API_KEY` | ✅ | — | CreateOS API key. One key must work on every configured region. |
 | `RUNNER_LABEL` | | `createos` | The opt-in `runs-on` label. Also the prefix for shaped labels (`createos-8vcpu-16gb`) — see [Choosing a runner size](#choosing-a-runner-size). |
 | `RUNNER_TEMPLATE` | | `ghar-runner` | Rootfs template built in step 3. |
 | `SANDBOX_NAME_PREFIX` | | — | Cosmetic VM name prefix (`<prefix>-<jobId>`). |
