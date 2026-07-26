@@ -191,7 +191,7 @@ Set in `wrangler.toml [vars]` unless marked secret (`wrangler secret put`).
 | `ALERT_WEBHOOK_URL` | ✅ | — | Optional Slack-compatible webhook for provision/teardown failures. |
 | `ADMIN_TOKEN` | ✅ | — | Bearer token for the `/admin/*` tenant-registry API. Unset = the whole surface 404s (see [Tenant registry](#tenant-registry-admin-api)). |
 | `TENANCY_MODE` | | `multi` | `single` \| `multi`. Multi-tenancy master switch. This repo ships `multi` because NodeOps prod seeds its Tenant first. **A fresh self-host: leave/set `single` here, deploy, then seed+approve your first Tenant and switch to `multi`** — `multi` admission fails closed (refuses every job) until a Tenant is seeded+approved. See [Tenant registry](#tenant-registry-admin-api). |
-| `COMMUNITY_VM_BANDWIDTH_BYTES` | | `107374182400` (100 GB) | Per-VM egress quota for community tenants. Unused while `TENANCY_MODE=single`. |
+| `COMMUNITY_VM_BANDWIDTH_BYTES` | | `10737418240` (10 GiB) | Per-VM egress quota, applied to every tenant including `allow_all_repos`. Unused while `TENANCY_MODE=single`. |
 | `APPLY_FORM_URL` | | — | Link surfaced in refusal notices for orgs that want to apply for access. Unused while `TENANCY_MODE=single`. |
 
 ## Choosing a runner size

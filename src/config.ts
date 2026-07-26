@@ -111,7 +111,7 @@ export function loadConfig(env: Record<string, unknown>): Config {
     alertWebhookUrl: (env.ALERT_WEBHOOK_URL as string) || undefined,
     adminToken: (env.ADMIN_TOKEN as string) || undefined,
     tenancyMode: mode(env),
-    communityBandwidthBytes: num(env, "COMMUNITY_VM_BANDWIDTH_BYTES", 107_374_182_400),
+    communityBandwidthBytes: num(env, "COMMUNITY_VM_BANDWIDTH_BYTES", 10_737_418_240),
     applyFormUrl: (env.APPLY_FORM_URL as string) || "",
   };
 }

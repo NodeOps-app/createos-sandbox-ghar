@@ -217,12 +217,12 @@ describe("multi-mode webhook admission", () => {
     expect(createSandbox).toHaveBeenCalledOnce();
     const request = createSandbox.mock.calls[0]![0];
     expect(request.bandwidth_quota_bytes).toBeUndefined();
-    expect(rechargeBandwidth).toHaveBeenCalledWith(107_374_182_400 - 5_368_709_120);
+    expect(rechargeBandwidth).toHaveBeenCalledWith(10_737_418_240 - 5_368_709_120);
 
     globalThis.fetch = realFetch;
   });
 
-  it("allow_all_repos tenant: provisions with NO bandwidth quota", async () => {
+  it("allow_all_repos tenant: still gets the per-VM bandwidth quota", async () => {
     patchGitHub();
     const s = singleton();
     await s.adminUpsertTenant(approvedTenant(20300, { allowAllRepos: true }));
@@ -254,8 +254,8 @@ describe("multi-mode webhook admission", () => {
     expect(createSandbox).toHaveBeenCalledOnce();
     const request = createSandbox.mock.calls[0]![0];
     expect(request.bandwidth_quota_bytes).toBeUndefined();
-    // allow-all tenants are unmetered: no quota recharge
-    expect(rechargeBandwidth).not.toHaveBeenCalled();
+    // D15: every tenant gets the per-VM egress cap now, allow-all included.
+    expect(rechargeBandwidth).toHaveBeenCalledWith(10_737_418_240 - 5_368_709_120);
 
     globalThis.fetch = realFetch;
   });
