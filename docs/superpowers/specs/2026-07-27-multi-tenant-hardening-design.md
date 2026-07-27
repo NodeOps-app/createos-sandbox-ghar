@@ -1,8 +1,13 @@
 # Multi-tenant hardening: fork gating, webhook edge controls, job-id invariant
 
 Date: 2026-07-27
-Status: design, under review. Fork gating revised 2026-07-27 to drop the proposed
-Repository Administration:read grant — permission delta is now zero.
+Status: **deferred, not scheduled.** Design approved in shape (fork gating revised
+2026-07-27 to drop the Repository Administration:read grant — permission delta is
+zero). Implementation intentionally NOT started: NodeOps-app onboards its first
+community tenant first, runs it for a while, and this ships only if that
+onboarding surfaces the need. Revisit this file before writing an implementation
+plan — do not assume it is still current without re-checking against whatever the
+first tenant's onboarding actually taught us.
 Supersedes nothing. Extends `2026-07-22-multi-tenant-community-runners-design.md`.
 
 ## Why now
