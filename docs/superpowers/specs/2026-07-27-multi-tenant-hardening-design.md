@@ -1,7 +1,8 @@
 # Multi-tenant hardening: fork gating, webhook edge controls, job-id invariant
 
 Date: 2026-07-27
-Status: design, approved in outline (fork permission accepted, rate limit path settled)
+Status: design, under review. Fork gating revised 2026-07-27 to drop the proposed
+Repository Administration:read grant — permission delta is now zero.
 Supersedes nothing. Extends `2026-07-22-multi-tenant-community-runners-design.md`.
 
 ## Why now
@@ -36,134 +37,145 @@ paragraph stays in this internal spec and out of the public `AGENTS.md`.
 
 ---
 
-## Part A — Fork gating via maintainer-approval attestation
+## Part A — Fork gating, at zero permission cost
 
-### The mechanism
+### The constraint that shapes this
 
-GitHub already implements the gate we want. `GET`/`PUT
-/repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval` reads and
-writes `approval_policy`, one of:
-
-- `first_time_contributors_new_to_github`
-- `first_time_contributors`
-- `all_external_contributors`
-
-At `all_external_contributors`, GitHub parks a fork PR's run in `action_required`
-until a maintainer approves it, and **emits no `workflow_job` `queued` webhook**
-until then. Enforcement is therefore free at our runtime — the event never
-arrives.
-
-Verified against the OpenAPI description and the docs: `webhook-workflow-job-queued`
-carries no fork signal whatsoever (`check_run_url, completed_at, conclusion,
-created_at, head_sha, html_url, id, labels, name, node_id, run_attempt, run_id,
-run_url, runner_group_id, runner_group_name, runner_id, runner_name, started_at,
-status, head_branch, workflow_name, steps, url`). `repository.fork` describes the
-*base* repo, not the PR head. Any runtime fork detection therefore costs a
+Verified against the OpenAPI description: `webhook-workflow-job-queued` carries no
+fork signal whatsoever (`check_run_url, completed_at, conclusion, created_at,
+head_sha, html_url, id, labels, name, node_id, run_attempt, run_id, run_url,
+runner_group_id, runner_group_name, runner_id, runner_name, started_at, status,
+head_branch, workflow_name, steps, url`). `repository.fork` describes the *base*
+repo, not the PR head. Fork detection therefore always costs a
 `GET /repos/{owner}/{repo}/actions/runs/{run_id}` subrequest — which is exactly
-what `GitHubClient.isForkJob` already does (`src/github/client.ts:97`).
+what `GitHubClient.isForkJob` already does (`src/github/client.ts:97`), at
+Repository **Actions: read**.
 
-### GitHub App permission change
+### Why we do NOT read the fork-approval policy
 
-| Endpoint | Permission | Status |
-| --- | --- | --- |
-| `GET /repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval` | Repository **Administration: read** | **to add** |
-| `GET /repos/{owner}/{repo}/actions/runs/{run_id}` | Repository **Actions: read** | verify present |
-| `GET /orgs/{org}/actions/permissions/fork-pr-contributor-approval` | Organization **Administration: read** | **not requested** |
+The obvious design reads
+`GET /repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval` and
+verifies the tenant has set `all_external_contributors` — at which point GitHub
+parks unapproved fork runs in `action_required` and never emits a `queued`
+webhook, making enforcement free at our runtime.
 
-We take repo-level Administration:read only. The org-level endpoint answers the
-same question but costs a far broader grant (org settings, members, org-wide
-runner config) for a unit — the org — that is not our unit of approval. Repo
-Administration:read is read-only settings metadata: no code, no secrets, no
-writes. It is nonetheless the largest permission the App holds, so it is
-disclosed in the tenant-facing README.
+**Rejected.** That endpoint requires Repository **Administration: read**, which is
+not a narrow grant. It carries 42 endpoints, including:
 
-Adding a permission forces **every existing installation to re-accept**. That is
-accepted (pratik, 2026-07-27). Until an installation re-accepts, its token lacks
-the permission and the policy read 403/404s — which is precisely the degraded
-state the fallback below handles, so the rollout is not gated on all tenants
-re-accepting at once.
+```
+GET /repos/{o}/{r}/traffic/views | /clones | /popular/paths | /popular/referrers
+GET /repos/{o}/{r}/branches/{branch}/protection*            (9 endpoints)
+GET /repos/{o}/{r}/keys                                     (deploy keys)
+GET /repos/{o}/{r}/vulnerability-alerts
+GET /repos/{o}/{r}/code-scanning/default-setup
+GET /repos/{o}/{r}/code-security-configuration
+GET /repos/{o}/{r}/invitations | /teams | /interaction-limits
+GET /repos/{o}/{r}/rulesets/rule-suites
+```
 
-### Layered design
+Asking a third-party org for private repo traffic analytics, full branch
+protection configuration, deploy-key inventory, and security posture — in order to
+read one boolean — is not something any careful org should grant, and this App is
+public. The org-level variant is worse (Organization Administration: read).
 
-**Healthy path — zero extra network.** A project whose cached `fork_policy` is
-`all_external_contributors` and whose check is fresher than
-`FORK_POLICY_MAX_AGE_MS` is admitted with no additional call. GitHub already
-withheld unapproved fork runs upstream.
+**Permission delta for Part A is therefore zero.** Confirm Repository
+**Actions: read** is present; add nothing.
 
-**Degraded path — one subrequest per queued job.** A project whose policy is
-missing, stale, or weaker than `all_external_contributors` falls back to a
-per-job `isForkJob` call: fork-origin runs are refused with an actionable
-check-run, non-fork runs are admitted.
+### Design
 
-This degradation shape is deliberate. Refusing the *whole project* on a stale
-attestation would turn one GitHub 500 into a total pipeline outage for a
-compliant tenant. Falling back to per-job detection keeps their push CI running
-and blocks only what we actually distrust.
+Multi mode, on every `queued` job:
 
-`isForkJob` already fails closed (returns `true` on error, on a missing
-`head_repository`, and on a missing `owner.login`), so a failure in the fallback
-refuses rather than admits.
+1. Tenant has `allow_forks = 1` → admit, no fork check, no extra call.
+2. Tenant has `allow_forks = 0` (the default) → call `isForkJob`. Fork-origin runs
+   are refused with an actionable check-run; non-fork runs proceed.
+
+`isForkJob` already fails closed — it returns `true` on any error, on a missing
+`head_repository`, and on a missing `owner.login` — so a GitHub failure refuses
+rather than admits.
+
+`allow_forks = 1` is set by an operator through `/admin/tenants`, **only after
+manually confirming** the org has *Require approval for all external
+contributors* set. Onboarding is already a manual gate (approval status, scoped
+runner group, minute grant, shape ceiling); this is one more item on that
+checklist, not a new workflow.
+
+**What this trades away, stated plainly:** the tenant's setting is verified once,
+by a human, at onboarding — not continuously by API. A tenant can relax it
+afterward and we will not notice. The exposure is bounded by the tenant's
+concurrency cap, weighted-minute grant, and 10 GiB per-VM egress cap, and the
+tenant is revocable. That is a better trade than holding repo traffic analytics
+and branch-protection config on every tenant repo, forever, to close a gap whose
+worst case is bounded spend.
+
+### Hot-path cost
+
+One GitHub subrequest per `queued` job for every tenant with `allow_forks = 0`
+(installation token is already cached). Mitigated by a module-level cache keyed on
+`run_id` in `src/handler.ts`: a matrix fan-out shares one `run_id`, so a 20-job
+matrix costs one call. Bounded size with an explicit eviction warn — no silent
+caps.
+
+Measured context: the provision phase already dominates end-to-end spawn latency
+by 80–90%, so a ~200 ms admission call is not the thing a user notices.
+
+DO call count on the hot path is **unchanged** — still exactly 2 in multi mode,
+per the Plan 2 budget. `allow_forks` rides on the existing `admitTenantJob`
+return value.
 
 ### Schema (additive)
 
 ```sql
-ALTER TABLE projects ADD COLUMN fork_policy TEXT;             -- NULL = never checked
-ALTER TABLE projects ADD COLUMN fork_policy_checked_at INTEGER; -- epoch ms, NULL = never
+ALTER TABLE tenants ADD COLUMN allow_forks INTEGER NOT NULL DEFAULT 0;
 ```
 
-Both nullable, both ignored by old code — forward-compatible per the rollback
-rule in `AGENTS.md` (a DO migration does not auto-revert with a Worker rollback).
+Nullable-equivalent via its default and ignored by old code — forward-compatible
+per the rollback rule in `AGENTS.md` (a DO migration does not auto-revert with a
+Worker rollback). Defaulting to `0` means an existing tenant is fork-gated the
+moment this ships, which is the fail-closed direction.
 
 ### Where each piece lives
 
 | Change | File |
 | --- | --- |
-| `getForkPrApprovalPolicy(repoFullName)` | `src/github/client.ts` |
-| `setProjectForkPolicy` / policy fields on `ProjectRecord` | `src/registry.ts`, `src/types.ts` |
-| `adminSetProjectForkPolicy` RPC; policy returned by `admitTenantJob` | `src/coordinator.ts` |
-| Policy read on project add/approve | `src/admin.ts` |
-| Gate 2.5 + degraded `isForkJob` fallback | `src/handler.ts` (`admitAndDrive`) |
-| Cron step E: rolling policy refresh | `src/reconcile.ts` |
-| `forkPolicyMode`, `forkPolicyMaxAgeMs`, `forkPolicyRefreshBudget` | `src/config.ts` |
-
-`admitTenantJob` already returns the tenant + grant state in one DO call; the
-project's `fork_policy` and `fork_policy_checked_at` ride along on that same
-return value. **Hot-path DO call count is unchanged** — still exactly 2 in multi
-mode, per the Plan 2 budget.
-
-### Cron step E — rolling refresh
-
-Runs after existing steps A–D in `runReconciler`. Iterates approved projects from
-a persisted cursor, spending at most `FORK_POLICY_REFRESH_BUDGET` GitHub
-subrequests per tick and warning when the budget binds (the `#getPaged` /
-recovery-scan pattern; no silent bounds). With a handful of tenants every project
-refreshes on every 5-minute tick, so the practical staleness window is 5 minutes,
-not the 1-hour ceiling.
-
-Step E must **not** be able to take down steps A–D, and a GitHub outage during
-step E must leave existing attestations in place (stale, not erased) so the
-degraded path — not a mass refusal — is what engages.
+| `allowForks` on `TenantRecord`; persisted + returned | `src/types.ts`, `src/registry.ts` |
+| `allow_forks` column, migration, carried on `admitTenantJob` | `src/coordinator.ts` |
+| `allow_forks` accepted on tenant upsert | `src/admin.ts` |
+| Fork gate + `run_id` cache, replacing the hard-coded `false` at `src/handler.ts:387` | `src/handler.ts` |
+| `forkGateMode` | `src/config.ts` |
 
 ### Refusal copy
 
 Reuses the existing `notifyRefusal` check-run path with its per-repo-per-UTC-day
-dedup. Copy names the exact setting:
+dedup:
 
-> **Fork PR approval is not enforced on this repository**
-> CreateOS runners require maintainer approval before a fork PR can consume a
-> runner. Set **Settings → Actions → General → Fork pull request workflows from
-> outside collaborators → Require approval for all external contributors**.
+> **Fork pull requests cannot use CreateOS runners on this repository**
+> Runs originating from a fork are not provisioned. If this repository requires
+> maintainer approval for all external contributors and you want fork PRs to use
+> CreateOS runners, contact us to enable it for your org.
 
 ### Env
 
 | Var | Default | Meaning |
 | --- | --- | --- |
-| `FORK_POLICY_MODE` | `observe` | `off` \| `observe` \| `enforce`. `observe` logs what it *would* refuse and admits. |
-| `FORK_POLICY_MAX_AGE_MS` | `3600000` | Attestation freshness ceiling before the degraded path engages. |
-| `FORK_POLICY_REFRESH_BUDGET` | `50` | Max GitHub subrequests step E spends per tick. |
+| `FORK_GATE_MODE` | `observe` | `off` \| `observe` \| `enforce`. `observe` makes the call, logs what it *would* refuse, and admits. |
 
 Single mode (`TENANCY_MODE=single`) is untouched: `shouldProvision`'s
 `fork-gated` policy stays exactly as-is and none of the above runs.
+
+### Possible upgrade, no permission change
+
+Two candidate signals could turn `allow_forks = 1` from *trust* into *verify*,
+both at Repository **Actions: read**:
+
+- `GET /repos/{owner}/{repo}/actions/runs/{run_id}/approvals` — documented as
+  "anyone with read access", but its schema is `environment-approvals`, which may
+  only cover deployment-environment gates rather than fork-PR approval.
+- `actor` vs `triggering_actor` on the run object — plausibly the approver on an
+  approved fork run.
+
+**Both are unverified behavioral claims.** Settle them empirically with a real
+fork PR against `atlasnetwork-xyz/test-ghar` before relying on either. Follow-up,
+not a blocker.
 
 ---
 
@@ -317,14 +329,14 @@ its own id space.
 
 | Layer | Tests |
 | --- | --- |
-| Pure (`test/unit`) | B.0 shape gate; CIDR matching incl. IPv6 and the fail-open cases; config parsing of all six new vars incl. invalid-mode rejection |
-| GitHub client | `getForkPrApprovalPolicy` happy path, 403 (permission not yet re-accepted), 404, 5xx — all at the `fetch` boundary, never the network |
-| DO integration | job-id conflict guard across all three branches; `fork_policy` round-trip through `admitTenantJob`; migration onto a DO created before the columns existed |
-| Flow integration | healthy path makes **no** `isForkJob` call; degraded path makes exactly one and refuses a fork; `observe` mode admits while logging; rate limiter never consulted for `completed` |
-| Cron | step E budget bind warns; step E failure leaves attestations intact and does not take down steps A–D |
+| Pure (`test/unit`) | B.0 shape gate; CIDR matching incl. IPv6 and the fail-open cases; config parsing of all four new vars incl. invalid-mode rejection |
+| GitHub client | `isForkJob` fail-closed paths already covered — extend for the `run_id` cache: hit, miss, eviction warn |
+| DO integration | job-id conflict guard across all three branches; `allow_forks` round-trip through `admitTenantJob`; migration onto a DO created before the column existed defaults to `0` |
+| Flow integration | `allow_forks = 1` makes **no** `isForkJob` call; `allow_forks = 0` makes exactly one and refuses a fork; matrix fan-out on one `run_id` makes exactly one; `observe` mode admits while logging; rate limiter never consulted for `completed` |
 
 Mutation check on the highest-value assertion: reintroduce
-`isForkJob: () => false` in the degraded path and confirm the flow test fails.
+`isForkJob: () => Promise.resolve(false)` at `src/handler.ts:387` and confirm the
+flow test fails.
 
 Full gate per `AGENTS.md`: `bun run lint && bun run typecheck && bun run test`,
 then the `ghar-test` end-to-end smoke on **both** `atlasnetwork-xyz/test-ghar`
@@ -332,11 +344,13 @@ and the `NodeOps-app` org.
 
 ## Rollout order
 
-1. **C** — no dependencies, no schema change, no permission change.
+No step depends on a GitHub App permission change — that idea was rejected above.
+
+1. **C** — no dependencies, no schema change.
 2. **B.0 + B.3** — `wrangler.toml` binding plus handler wiring, both modes `observe`.
 3. **B.1** — IP allowlist, `observe`.
-4. **A** — after the App permission is added and NodeOps-app has re-accepted.
-   `FORK_POLICY_MODE=observe` until tenant repos are confirmed compliant.
+4. **A** — `FORK_GATE_MODE=observe` first, to measure how many real fork jobs the
+   gate would refuse before it starts refusing them.
 
 Each step is a separate atomic commit and a separate deploy. Capture the live
 version id before each push (`bunx wrangler@latest deployments list`); a push to
@@ -347,16 +361,22 @@ version id before each push (`bunx wrangler@latest deployments list`); a push to
 - **C** — code-only, clean rollback.
 - **B** — code-only. Removing the `[[ratelimits]]` block removes the binding; code
   already skips a missing binding, so ordering is not a hazard.
-- **A** — the two `projects` columns persist across a Worker rollback. They are
-  additive and nullable, so pre-A code ignores them. Set `FORK_POLICY_MODE=off`
+- **A** — the `tenants.allow_forks` column persists across a Worker rollback. It is
+  additive with a default, so pre-A code ignores it. Set `FORK_GATE_MODE=off`
   before rolling back rather than relying on the code revert alone.
 
 ## Open items
 
-- Confirm Repository **Actions: read** is already granted to the App before
-  relying on the degraded `isForkJob` path (App settings → Permissions).
+- Confirm Repository **Actions: read** is granted to the App — the fork gate is
+  built on it (App settings → Permissions). This is a *verification*, not a change:
+  if it is already present, Part A ships with no permission delta at all.
 - Pick the `namespace_id` for `[[ratelimits]]`; it must be unique per Cloudflare
   account. `1001` assumed here, verify nothing else claims it.
-- Tenant-facing README section: required Actions setting, the new App permission
-  and what it does and does not grant, and what happens if the setting is relaxed
-  after approval.
+- Tenant-facing README section: fork PRs are not provisioned by default, what to
+  do about it, and the *Require approval for all external contributors* setting we
+  check by hand before enabling `allow_forks`.
+- Follow-up experiment (not a blocker): settle whether
+  `/actions/runs/{run_id}/approvals` or `triggering_actor` reliably identifies a
+  maintainer-approved fork run, using a real fork PR on
+  `atlasnetwork-xyz/test-ghar`. A positive result upgrades `allow_forks` from
+  trust to verification with no permission change.
