@@ -282,17 +282,26 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   /**
-   * Jobs GitHub has not yet marked `in_progress` (job_started_at still NULL)
-   * that have sat that way past thresholdMs — pending behind the cap,
-   * mid-provision, or booted but not yet accepting work. The reconciler's
-   * capacity alert; a `destroying` row is excluded since it is no longer
-   * waiting to start anything.
+   * Rows genuinely STUCK getting a VM for longer than thresholdMs: `pending`
+   * (queued behind the concurrency cap) or `provisioning` (committed to boot,
+   * but createSandbox/launch has not finished). Those are the two states where
+   * nothing is running and a job is actually waiting on us.
+   *
+   * `running` is deliberately EXCLUDED even with `job_started_at` NULL. That
+   * combination is the normal steady state, not a fault: the VM is up and its
+   * runner is registered, it simply has not been handed work yet — and under a
+   * shared runner label GitHub gives our VM to whichever job is queued when it
+   * registers, so the VM minted for the last job of a burst idles until the
+   * next job arrives (measured 2026-08-07: 175s, while every job in the window
+   * started within 8s). Alerting on it pages about a healthy warm VM every
+   * cron tick until the reaper retires it. Idle-VM waste is a real cost signal
+   * but it is a capacity/efficiency question, not a stuck job.
    */
   async staleJobs(nowMs: number, thresholdMs: number): Promise<StaleJob[]> {
     const cutoff = nowMs - thresholdMs;
     return this.#sql
       .exec<Row>(
-        `SELECT * FROM jobs WHERE job_started_at IS NULL AND state != 'destroying' AND created_at < ?`,
+        `SELECT * FROM jobs WHERE job_started_at IS NULL AND state IN ('pending','provisioning') AND created_at < ?`,
         cutoff,
       )
       .toArray()
@@ -487,7 +496,6 @@ export class Coordinator extends DurableObject<Env> {
     this.#sql.exec(`UPDATE jobs SET job_started_at = ? WHERE job_id = ?`, now, row.job_id);
     return {
       jobId: row.job_id,
-      repoFullName: row.repo,
       runnerName: row.runner_name,
       createdAt: row.created_at,
       provisionStartedAt: row.provision_started_at,

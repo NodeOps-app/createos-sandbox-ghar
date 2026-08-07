@@ -498,22 +498,22 @@ export async function handleWebhook(
     // extra GitHub/CreateOS call). runner_name is the VM that actually ran it,
     // so timing is attributed to the runner even under backlog reassignment.
     const timeline = await co.markJobStarted(job.jobId, job.runnerName, owner);
-    if (timeline) {
-      logSpawnTimeline(timeline);
-      const totalMs = timeline.jobStartedAt - timeline.createdAt;
-      if (totalMs > config.slowJobThresholdMs) {
-        // Under backlog a shared-label runner may accept a DIFFERENT queued job
-        // than the one that provisioned it — markJobStarted resolves by runner
-        // identity, so `timeline` describes whichever job actually owns that
-        // runner's row, which can differ from this webhook's own `job`. Alert
-        // on the timeline's identity, never the webhook's, or the wrong job
-        // gets blamed for the delay.
+    if (timeline) logSpawnTimeline(timeline);
+    // Alert off GITHUB's clock for this job, never the row's. The row is keyed
+    // to the VM we minted, and under a shared label GitHub gives that VM to
+    // whichever job is queued when it registers — so row-age measures how long
+    // OUR VM sat idle, which is unbounded on a quiet queue and has nothing to
+    // do with what any user waited. Measured 2026-08-07: a 175s row-age alert
+    // fired while every one of the 48 jobs in that window started within 8s.
+    if (job.queuedAt !== undefined && job.startedAt !== undefined) {
+      const waitMs = job.startedAt - job.queuedAt;
+      if (waitMs > config.slowJobThresholdMs) {
         ctx.waitUntil(
           notify(
             config,
-            `ghar: job ${timeline.jobId} (${timeline.repoFullName}) took ${Math.round(totalMs / 1000)}s ` +
-              `to reach in_progress (threshold ${Math.round(config.slowJobThresholdMs / 1000)}s) — ` +
-              `runner=${timeline.runnerName ?? "?"}`,
+            `ghar: job ${job.jobId} (${job.repoFullName}) waited ${Math.round(waitMs / 1000)}s ` +
+              `to start (threshold ${Math.round(config.slowJobThresholdMs / 1000)}s) — ` +
+              `runner=${job.runnerName ?? "?"}`,
           ),
         );
       }

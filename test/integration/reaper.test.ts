@@ -108,7 +108,12 @@ describe("markProvisionFailed disposes of the VM it left behind", () => {
 
     const { toDestroy } = await s.markProvisionFailed(940, "sb_940");
 
-    expect(toDestroy).toEqual({ jobId: 940, sandboxId: "sb_940", tenantId: null, region: "default" });
+    expect(toDestroy).toEqual({
+      jobId: 940,
+      sandboxId: "sb_940",
+      tenantId: null,
+      region: "default",
+    });
     expect(await s.activeCount()).toBe(0); // destroying does not hold a slot
     // The row survives, so an unconfirmed teardown is retried rather than lost.
     expect(ids(await s.sweep(Date.now(), 3_600_000))).toContain("sb_940");
@@ -214,5 +219,56 @@ describe("age is measured from provisioning, not from queueing", () => {
     // The clock reset must not make a promoted row immortal, only younger.
     const res = await s.sweep(Date.now() + 1, 0);
     expect(ids(res)).toContain("sb_930");
+  });
+});
+
+/**
+ * staleJobs backs the cron capacity alert, so what it must NOT report matters
+ * as much as what it must: a booted, registered VM that has simply not been
+ * handed work is the shared-label steady state, not an incident.
+ */
+describe("staleJobs (cron capacity alert)", () => {
+  const queue = (s: Stub, jobId: number, delivery: string) =>
+    s.onQueued(
+      { jobId, runId: jobId, repoFullName: "nodeops-app/api", label: "createos", tenant: null },
+      delivery,
+    );
+
+  it("reports a row still waiting to provision past the threshold", async () => {
+    const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("stale1-" + Math.random()));
+    await queue(s, 940, "s1");
+
+    const stale = await s.staleJobs(Date.now() + 1000, 0);
+    expect(stale.map((j) => j.jobId)).toContain(940);
+  });
+
+  it("does NOT report a running VM that has not been given a job yet", async () => {
+    const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("stale2-" + Math.random()));
+    await queue(s, 941, "s2");
+    await boot(s, 941, "sb_941"); // VM up + runner registered, never assigned work
+
+    // Threshold 0 → every row is "old"; only the state filter can spare this one.
+    // Regression guard: this used to page every cron tick for a healthy warm VM
+    // (2026-08-07 — a 175s idle VM alerted while all 48 jobs started within 8s).
+    const stale = await s.staleJobs(Date.now() + 1000, 0);
+    expect(stale.map((j) => j.jobId)).not.toContain(941);
+  });
+
+  it("does not report a row once its job has started", async () => {
+    const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("stale3-" + Math.random()));
+    await queue(s, 942, "s3");
+    await boot(s, 942, "sb_942");
+    await s.markJobStarted(942, runnerName(942));
+
+    const stale = await s.staleJobs(Date.now() + 1000, 0);
+    expect(stale.map((j) => j.jobId)).not.toContain(942);
+  });
+
+  it("spares a row younger than the threshold", async () => {
+    const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("stale4-" + Math.random()));
+    await queue(s, 943, "s4");
+
+    const stale = await s.staleJobs(Date.now(), 3_600_000);
+    expect(stale.map((j) => j.jobId)).not.toContain(943);
   });
 });

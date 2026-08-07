@@ -86,6 +86,14 @@ export function parseWorkflowJob(body: string): WorkflowJob | null {
   const installation =
     isObject(p.installation) && isPosInt(p.installation.id) ? p.installation.id : undefined;
   const headSha = isNonEmptyString(wj.head_sha) ? wj.head_sha : undefined;
+  // GitHub's own view of how long THIS job waited. Carried because our row's
+  // clock answers a different question: a row is keyed to the VM we minted for
+  // it, and under a shared label GitHub hands that VM to whichever job is
+  // queued when it registers — so row-age measures VM idle time, not the wait
+  // the user actually experienced. These two fields are the only queue-latency
+  // source that survives that reassignment.
+  const queuedAt = isNonEmptyString(wj.created_at) ? Date.parse(wj.created_at) : Number.NaN;
+  const startedAt = isNonEmptyString(wj.started_at) ? Date.parse(wj.started_at) : Number.NaN;
 
   return {
     action,
@@ -96,5 +104,7 @@ export function parseWorkflowJob(body: string): WorkflowJob | null {
     runnerName,
     installationId: installation,
     headSha,
+    queuedAt: Number.isFinite(queuedAt) ? queuedAt : undefined,
+    startedAt: Number.isFinite(startedAt) ? startedAt : undefined,
   };
 }

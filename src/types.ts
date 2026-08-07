@@ -125,6 +125,11 @@ export interface WorkflowJob {
   runnerName?: string; // workflow_job.runner_name — the runner assigned the job (set once a runner picks it up: in_progress and completed)
   installationId?: number; // installation.id — the Tenant key in multi mode
   headSha?: string; // workflow_job.head_sha — anchor for refusal check runs
+  /** GitHub's own queue clock for THIS job (epoch ms), absent on a payload that
+   * omits/malforms them. The only wait measurement immune to runner
+   * reassignment — see parseWorkflowJob. */
+  queuedAt?: number; // workflow_job.created_at
+  startedAt?: number; // workflow_job.started_at
   /** Set by handleWebhook from X-GitHub-Delivery before calling admitAndDrive
    * (multi mode); left unset for a reconciler-recovered job, which mints its
    * own UUID — matching today's reconciler dedup behavior. */
@@ -227,7 +232,6 @@ export interface CompletedResult {
  */
 export interface SpawnTimeline {
   jobId: number;
-  repoFullName: string;
   runnerName: string | null;
   createdAt: number;
   provisionStartedAt: number | null;
