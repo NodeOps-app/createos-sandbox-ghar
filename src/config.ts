@@ -109,6 +109,7 @@ export function loadConfig(env: Record<string, unknown>): Config {
     reconcileGraceMs: num(env, "RECONCILE_GRACE_MS", 180_000),
     recoverySubrequestBudget: num(env, "RECOVERY_SUBREQUEST_BUDGET", 30),
     alertWebhookUrl: (env.ALERT_WEBHOOK_URL as string) || undefined,
+    slowJobThresholdMs: num(env, "SLOW_JOB_THRESHOLD_MS", 60_000),
     adminToken: (env.ADMIN_TOKEN as string) || undefined,
     tenancyMode: mode(env),
     communityBandwidthBytes: num(env, "COMMUNITY_VM_BANDWIDTH_BYTES", 10_737_418_240),

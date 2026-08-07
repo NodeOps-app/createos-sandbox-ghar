@@ -13,6 +13,7 @@ import type {
   TenantStatus,
   TenantAdmission,
   TenantCtx,
+  StaleJob,
 } from "./types";
 import {
   addProjects,
@@ -280,6 +281,29 @@ export class Coordinator extends DurableObject<Env> {
       .map((r) => r.job_id);
   }
 
+  /**
+   * Jobs GitHub has not yet marked `in_progress` (job_started_at still NULL)
+   * that have sat that way past thresholdMs — pending behind the cap,
+   * mid-provision, or booted but not yet accepting work. The reconciler's
+   * capacity alert; a `destroying` row is excluded since it is no longer
+   * waiting to start anything.
+   */
+  async staleJobs(nowMs: number, thresholdMs: number): Promise<StaleJob[]> {
+    const cutoff = nowMs - thresholdMs;
+    return this.#sql
+      .exec<Row>(
+        `SELECT * FROM jobs WHERE job_started_at IS NULL AND state != 'destroying' AND created_at < ?`,
+        cutoff,
+      )
+      .toArray()
+      .map((r) => ({
+        jobId: r.job_id,
+        repoFullName: r.repo,
+        state: r.state,
+        ageMs: nowMs - r.created_at,
+      }));
+  }
+
   #rowByJob(jobId: number): Row | undefined {
     return this.#sql.exec<Row>(`SELECT * FROM jobs WHERE job_id = ?`, jobId).toArray()[0];
   }
@@ -463,6 +487,7 @@ export class Coordinator extends DurableObject<Env> {
     this.#sql.exec(`UPDATE jobs SET job_started_at = ? WHERE job_id = ?`, now, row.job_id);
     return {
       jobId: row.job_id,
+      repoFullName: row.repo,
       runnerName: row.runner_name,
       createdAt: row.created_at,
       provisionStartedAt: row.provision_started_at,

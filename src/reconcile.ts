@@ -18,6 +18,7 @@ import {
   type SandboxDeps,
 } from "./sandbox";
 import { makeSandboxClient, type ListedSandbox } from "./createos";
+import { notify } from "./notify";
 import {
   coordinator,
   provisionAndRecord,
@@ -212,6 +213,36 @@ async function sweepOrphanedRunners(
     `runner sweep: deleted ${batch.length - failed.length}/${batch.length} orphaned runner registration(s)`,
   );
   return batch.length;
+}
+
+/**
+ * Alerts when a job has sat without GitHub ever reporting it `in_progress`
+ * past `slowJobThresholdMs` — stuck behind the concurrency cap, a CreateOS
+ * capacity problem that never surfaced as a hard failure elsewhere, or a lost
+ * admission. Runs at the end of every cron tick regardless of tenancy mode;
+ * the five-minute cron cadence is itself the alert's throttle, so a job still
+ * stuck next tick re-alerts rather than going silent.
+ */
+async function alertStaleJobs(env: Bindings, config: Config): Promise<void> {
+  let stale;
+  try {
+    stale = await coordinator(env).staleJobs(Date.now(), config.slowJobThresholdMs);
+  } catch (err) {
+    console.error(`reconcile: stale-job check failed: ${String(err)}`);
+    return;
+  }
+  if (stale.length === 0) return;
+  const detail = stale
+    .map((s) => `${s.repoFullName}#${s.jobId} (${s.state}, ${Math.round(s.ageMs / 1000)}s)`)
+    .join("; ");
+  console.warn(
+    `reconcile: ${stale.length} job(s) stuck past ${config.slowJobThresholdMs}ms: ${detail}`,
+  );
+  await notify(
+    config,
+    `ghar: ${stale.length} job(s) still not in_progress after ` +
+      `${Math.round(config.slowJobThresholdMs / 1000)}s — ${detail}`,
+  );
 }
 
 export async function runReaper(env: Bindings, deps: SandboxDeps = {}): Promise<void> {
@@ -475,6 +506,7 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
   const config = loadConfig(env as Record<string, unknown>);
   if (config.tenancyMode === "multi") {
     await runMultiTenantReconciler(env, config, deps);
+    await alertStaleJobs(env, config);
     return;
   }
   const github = new GitHubClient(config);
@@ -604,4 +636,6 @@ export async function runReconciler(env: Bindings, deps: SandboxDeps = {}): Prom
   } catch (err) {
     console.error(`reconcile: orphaned-sandbox sweep failed: ${String(err)}`);
   }
+
+  await alertStaleJobs(env, config);
 }

@@ -498,7 +498,26 @@ export async function handleWebhook(
     // extra GitHub/CreateOS call). runner_name is the VM that actually ran it,
     // so timing is attributed to the runner even under backlog reassignment.
     const timeline = await co.markJobStarted(job.jobId, job.runnerName, owner);
-    if (timeline) logSpawnTimeline(timeline);
+    if (timeline) {
+      logSpawnTimeline(timeline);
+      const totalMs = timeline.jobStartedAt - timeline.createdAt;
+      if (totalMs > config.slowJobThresholdMs) {
+        // Under backlog a shared-label runner may accept a DIFFERENT queued job
+        // than the one that provisioned it — markJobStarted resolves by runner
+        // identity, so `timeline` describes whichever job actually owns that
+        // runner's row, which can differ from this webhook's own `job`. Alert
+        // on the timeline's identity, never the webhook's, or the wrong job
+        // gets blamed for the delay.
+        ctx.waitUntil(
+          notify(
+            config,
+            `ghar: job ${timeline.jobId} (${timeline.repoFullName}) took ${Math.round(totalMs / 1000)}s ` +
+              `to reach in_progress (threshold ${Math.round(config.slowJobThresholdMs / 1000)}s) — ` +
+              `runner=${timeline.runnerName ?? "?"}`,
+          ),
+        );
+      }
+    }
     return new Response("in_progress", { status: 202 });
   }
 

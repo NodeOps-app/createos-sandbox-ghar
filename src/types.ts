@@ -45,6 +45,7 @@ export interface Config {
   recoverySubrequestBudget: number; // e.g. 30
 
   alertWebhookUrl?: string; // optional Slack-style webhook for failure alerts
+  slowJobThresholdMs: number; // alert when a job isn't in_progress within this long, e.g. 60_000
   adminToken?: string; // bearer token for /admin/*; unset = admin surface disabled (404)
 
   // Multi-tenancy master switch. "single" = the pre-tenant behavior, verbatim.
@@ -226,6 +227,7 @@ export interface CompletedResult {
  */
 export interface SpawnTimeline {
   jobId: number;
+  repoFullName: string;
   runnerName: string | null;
   createdAt: number;
   provisionStartedAt: number | null;
@@ -241,4 +243,12 @@ export interface SpawnTimeline {
 export interface ReapResult {
   toDestroy: TeardownTask[];
   nextPending: PendingJob[];
+}
+
+/** A job GitHub has not yet marked `in_progress` for longer than the alert threshold. */
+export interface StaleJob {
+  jobId: number;
+  repoFullName: string;
+  state: string;
+  ageMs: number;
 }

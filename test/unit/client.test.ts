@@ -47,6 +47,7 @@ async function cfg(): Promise<Config> {
     reaperMaxAgeMs: 3_600_000,
     reconcileGraceMs: 180_000,
     recoverySubrequestBudget: 30,
+    slowJobThresholdMs: 60_000,
     tenancyMode: "single",
     communityBandwidthBytes: 107_374_182_400,
     applyFormUrl: "",
