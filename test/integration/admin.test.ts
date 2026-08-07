@@ -894,11 +894,7 @@ describe("GET /admin/installations", () => {
   });
 
   it("lists every installation of the App", async () => {
-    const res = await handleAdmin(
-      req("GET", "/admin/installations"),
-      B,
-      mockFetch(routes()),
-    );
+    const res = await handleAdmin(req("GET", "/admin/installations"), B, mockFetch(routes()));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([
       {

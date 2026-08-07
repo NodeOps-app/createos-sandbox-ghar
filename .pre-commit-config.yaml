@@ -1,12 +1,13 @@
 # Local gate for the checks ci.yml runs. Worth having even though CI runs the
-# same three: Cloudflare Workers Builds deploys `main` independently of GitHub
+# same four: Cloudflare Workers Builds deploys `main` independently of GitHub
 # Actions, so a red commit still ships (AGENTS.md → Conventions). The hook is
 # the only thing that runs *before* the push that deploys.
 #
 #   pre-commit install     # once per clone
 #   pre-commit run -a      # everything, on demand
 #
-# Only checks here — no formatter that rewrites tracked files.
+# Only checks here — nothing rewrites tracked files. oxfmt runs as `--check`
+# for that reason; `bun run format` is the explicit, human-invoked fix.
 minimum_pre_commit_version: "4.2.0"
 
 repos:
@@ -27,6 +28,23 @@ repos:
       - id: oxlint
         name: oxlint
         entry: bun run lint
+        language: system
+        pass_filenames: false
+        files: \.ts$
+
+      # --check, never a rewrite: the hook reports, you fix with `bun run
+      # format`. A hook that reformats under you changes what you are about to
+      # commit after you have already read the diff.
+      #
+      # oxfmt is a PINNED devDependency and this shells out to the package.json
+      # script, so the binary is node_modules/.bin/oxfmt — never `bunx
+      # oxfmt@latest`. createos-studio took that shortcut and got a formatter
+      # newer than its own pin, which failed files that were correctly
+      # formatted for the pinned version. Bump the version in package.json and
+      # every surface follows.
+      - id: oxfmt
+        name: oxfmt --check
+        entry: bun run format:check
         language: system
         pass_filenames: false
         files: \.ts$

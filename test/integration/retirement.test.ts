@@ -37,7 +37,12 @@ describe("canonical Coordinator row retirement", () => {
 
     const result = await stub.onCompleted(960, runnerName(960));
 
-    expect(result.toDestroy).toEqual({ jobId: 960, sandboxId: "sb-960", tenantId: null, region: "default" });
+    expect(result.toDestroy).toEqual({
+      jobId: 960,
+      sandboxId: "sb-960",
+      tenantId: null,
+      region: "default",
+    });
     await expectDestroyingRetry(stub, 960, "sb-960");
   });
 
@@ -46,7 +51,12 @@ describe("canonical Coordinator row retirement", () => {
 
     const result = await stub.markProvisionFailed(961);
 
-    expect(result.toDestroy).toEqual({ jobId: 961, sandboxId: "sb-961", tenantId: null, region: "default" });
+    expect(result.toDestroy).toEqual({
+      jobId: 961,
+      sandboxId: "sb-961",
+      tenantId: null,
+      region: "default",
+    });
     await expectDestroyingRetry(stub, 961, "sb-961");
   });
 
@@ -56,7 +66,12 @@ describe("canonical Coordinator row retirement", () => {
 
     const result = await stub.reapUnregistered(Date.now() + 1, [], 0);
 
-    expect(result.toDestroy).toContainEqual({ jobId: 962, sandboxId: "sb-962", tenantId: null, region: "default" });
+    expect(result.toDestroy).toContainEqual({
+      jobId: 962,
+      sandboxId: "sb-962",
+      tenantId: null,
+      region: "default",
+    });
     await expectDestroyingRetry(stub, 962, "sb-962");
   });
 
@@ -66,7 +81,12 @@ describe("canonical Coordinator row retirement", () => {
 
     const result = await stub.sweep(Date.now() + 1, 0);
 
-    expect(result.toDestroy).toContainEqual({ jobId: 963, sandboxId: "sb-963", tenantId: null, region: "default" });
+    expect(result.toDestroy).toContainEqual({
+      jobId: 963,
+      sandboxId: "sb-963",
+      tenantId: null,
+      region: "default",
+    });
     await expectDestroyingRetry(stub, 963, "sb-963");
   });
 

@@ -36,9 +36,7 @@ export async function appJwt(
   nowSec: number = Math.floor(Date.now() / 1000),
 ): Promise<string> {
   const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const payload = b64url(
-    JSON.stringify({ iat: nowSec - 60, exp: nowSec + 600, iss: appId }),
-  );
+  const payload = b64url(JSON.stringify({ iat: nowSec - 60, exp: nowSec + 600, iss: appId }));
   const signingInput = `${header}.${payload}`;
 
   const key = await crypto.subtle.importKey(
