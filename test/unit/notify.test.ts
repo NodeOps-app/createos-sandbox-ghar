@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { notify } from "../../src/notify";
+import { notify, jobRef } from "../../src/notify";
 import type { Config } from "../../src/types";
 
 const base = { alertWebhookUrl: undefined } as unknown as Config;
@@ -57,5 +57,28 @@ describe("notify", () => {
     expect(errSpy.mock.calls[0]![0]).toMatch(/request failed.*alert not delivered/);
     fetchSpy.mockRestore();
     errSpy.mockRestore();
+  });
+});
+
+describe("jobRef", () => {
+  const ref = jobRef("NodeOps-app/createos-studio", 31174368241, 92852985334);
+
+  it("links the exact URL GitHub itself reports as the job's html_url", () => {
+    // Verified against `gh api .../actions/jobs/92852985334` on 2026-08-07: the
+    // API's own html_url is byte-identical to this. If GitHub ever changes the
+    // permalink shape, this is the test that catches a channel full of 404s.
+    expect(ref).toContain(
+      "<https://github.com/NodeOps-app/createos-studio/actions/runs/31174368241/job/92852985334|",
+    );
+  });
+
+  it("spells the ids out so they survive a sink that does not render mrkdwn", () => {
+    expect(ref).toContain("org=NodeOps-app repo=createos-studio run=31174368241 job=92852985334");
+  });
+
+  it("does not break on a repo name without a slash", () => {
+    // repoFullName is webhook-supplied; a malformed one must still produce a
+    // readable alert rather than "org=undefined".
+    expect(jobRef("weird", 1, 2)).toContain("org=weird repo= run=1 job=2");
   });
 });

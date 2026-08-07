@@ -252,6 +252,7 @@ export interface ReapResult {
 /** A job GitHub has not yet marked `in_progress` for longer than the alert threshold. */
 export interface StaleJob {
   jobId: number;
+  runId: number; // carried so the alert can link straight to the Actions job page
   repoFullName: string;
   state: string;
   ageMs: number;

@@ -307,6 +307,7 @@ export class Coordinator extends DurableObject<Env> {
       .toArray()
       .map((r) => ({
         jobId: r.job_id,
+        runId: r.run_id,
         repoFullName: r.repo,
         state: r.state,
         ageMs: nowMs - r.created_at,

@@ -5,7 +5,7 @@ import { createJobAdmission, identifyJob, type AdmissionDecision } from "./admis
 import { fetchCatalog, shapeForLabel, shapeWithinCeiling } from "./shapes";
 import { GitHubClient } from "./github/client";
 import { createRunnerSandbox, launchRunner, teardownSandbox, type SandboxDeps } from "./sandbox";
-import { notify } from "./notify";
+import { notify, jobRef } from "./notify";
 import { monthKey, dayKey, weightForLabel } from "./quota";
 import type {
   PendingJob,
@@ -169,7 +169,7 @@ export async function failProvision(
   console.error(`provision failed job=${job.jobId}: ${String(err)}`);
   await notify(
     config,
-    `ghar provision failed — job ${job.jobId} (${job.repoFullName}): ${String(err)}`,
+    `ghar provision failed: ${String(err)}\n` + jobRef(job.repoFullName, job.runId, job.jobId),
   );
 
   let result: ProvisionFailedResult;
@@ -368,7 +368,12 @@ export async function admitAndDrive(
       }),
     );
     ctx.waitUntil(
-      notify(config, `ghar quota exhausted — ${admission.tenant.orgLogin} (${job.repoFullName})`),
+      notify(
+        config,
+        `ghar quota exhausted — ${admission.tenant.orgLogin} used ` +
+          `${Math.round(admission.usedMinutes)}/${admission.minuteGrant} weighted minutes\n` +
+          jobRef(job.repoFullName, job.runId, job.jobId),
+      ),
     );
     return "quota-exhausted";
   }
@@ -511,9 +516,9 @@ export async function handleWebhook(
         ctx.waitUntil(
           notify(
             config,
-            `ghar: job ${job.jobId} (${job.repoFullName}) waited ${Math.round(waitMs / 1000)}s ` +
-              `to start (threshold ${Math.round(config.slowJobThresholdMs / 1000)}s) — ` +
-              `runner=${job.runnerName ?? "?"}`,
+            `ghar: job waited ${Math.round(waitMs / 1000)}s to start ` +
+              `(threshold ${Math.round(config.slowJobThresholdMs / 1000)}s), runner=${job.runnerName ?? "?"}\n` +
+              jobRef(job.repoFullName, job.runId, job.jobId),
           ),
         );
       }

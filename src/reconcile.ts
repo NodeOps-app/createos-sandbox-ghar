@@ -18,7 +18,7 @@ import {
   type SandboxDeps,
 } from "./sandbox";
 import { makeSandboxClient, type ListedSandbox } from "./createos";
-import { notify } from "./notify";
+import { notify, jobRef } from "./notify";
 import {
   coordinator,
   provisionAndRecord,
@@ -41,6 +41,14 @@ const MAX_RUNNER_DELETES_PER_TICK = 10;
 
 /** Destroys at most this many orphaned VMs per cron tick. Same budget logic as above. */
 const MAX_SANDBOX_DESTROYS_PER_TICK = 5;
+
+/**
+ * Stuck jobs listed individually in one stale-job alert. A real backlog can be
+ * dozens of rows; past this the message is a wall of links nobody reads (and
+ * long enough for Slack to truncate it). The header count is always the true
+ * total and the overflow is logged, so the bound is never silent.
+ */
+const MAX_ALERTED_STALE_JOBS = 10;
 
 /**
  * Destroys the microVMs no Coordinator row owns — the last line of defence
@@ -232,16 +240,35 @@ async function alertStaleJobs(env: Bindings, config: Config): Promise<void> {
     return;
   }
   if (stale.length === 0) return;
-  const detail = stale
-    .map((s) => `${s.repoFullName}#${s.jobId} (${s.state}, ${Math.round(s.ageMs / 1000)}s)`)
-    .join("; ");
   console.warn(
-    `reconcile: ${stale.length} job(s) stuck past ${config.slowJobThresholdMs}ms: ${detail}`,
+    `reconcile: ${stale.length} job(s) stuck past ${config.slowJobThresholdMs}ms: ` +
+      stale
+        .map((s) => `${s.repoFullName}#${s.jobId} (${s.state}, ${Math.round(s.ageMs / 1000)}s)`)
+        .join("; "),
   );
+  // One linked block per stuck job. Bounded by MAX_ALERTED_STALE_JOBS so a
+  // backlog cannot post a wall of text into the channel (and Slack cannot
+  // truncate the message out from under us); the count in the header always
+  // reports the true total, so the bound is never silent.
+  const shown = stale.slice(0, MAX_ALERTED_STALE_JOBS);
+  if (shown.length < stale.length) {
+    console.warn(
+      `reconcile: stale-job alert lists ${shown.length} of ${stale.length} ` +
+        `(MAX_ALERTED_STALE_JOBS=${MAX_ALERTED_STALE_JOBS}); the rest are in the log line above`,
+    );
+  }
   await notify(
     config,
-    `ghar: ${stale.length} job(s) still not in_progress after ` +
-      `${Math.round(config.slowJobThresholdMs / 1000)}s — ${detail}`,
+    `ghar: ${stale.length} job(s) still not started after ` +
+      `${Math.round(config.slowJobThresholdMs / 1000)}s\n` +
+      shown
+        .map(
+          (s) =>
+            `• ${s.state}, waiting ${Math.round(s.ageMs / 1000)}s\n` +
+            jobRef(s.repoFullName, s.runId, s.jobId),
+        )
+        .join("\n") +
+      (shown.length < stale.length ? `\n…and ${stale.length - shown.length} more (see logs)` : ""),
   );
 }
 
