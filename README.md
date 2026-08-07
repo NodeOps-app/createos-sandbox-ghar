@@ -336,8 +336,14 @@ installs get one neutral check run pointing at `APPLY_FORM_URL`.
 6. Tell them: swap `runs-on: ubuntu-latest` → `runs-on: createos` (or a shaped
    label within their ceiling).
 
-NodeOps is Tenant #1 with `allow_all_repos: true` — the only Tenant with that
-flag; it skips runner-group creation and uses the org-wide Default group.
+`allow_all_repos: true` skips runner-group creation and uses the Tenant's own org
+Default group (group `1` — *theirs*, not ours; the JIT mint targets the Tenant's
+org, so this is never a cross-tenant exposure). Whether a Tenant gets it is a
+per-Tenant call agreed with the org owner, not a fixed rule: enumerating Projects
+is the default and buys a **scoped** runner group, at the cost of curating the
+repo list. Grant `allow_all_repos` when the owner wants every repo covered and
+accepts that one repo then cannot be revoked without migrating them to a scoped
+group. NodeOps is Tenant #1 with the flag; `maximem-ai` also has it.
 
 ## Security notes
 

@@ -109,7 +109,7 @@ and no sensible default, that is a gap in the form.
 | `max_shape` | approver, sized from Section 3 | Community default `4vcpu-8gb`. |
 | `job_ttl_minutes` | approver, from the >30 min answer | Default 30. |
 | `runner_group_id` | created at approval | The per-org runner group, scoped to approved Projects. |
-| `allow_all_repos` | approver | NodeOps only. Every community Tenant enumerates its Projects. |
+| `allow_all_repos` | approver, agreed with the org owner | Per-Tenant call, not a fixed rule. Enumerating Projects is the default and gives them a **scoped** runner group; `true` skips that and uses their org's Default group. Grant it when the org owner wants every repo covered and accepts that a single repo cannot then be revoked without migrating them to a scoped group. It is *not* a cross-tenant risk: `runner_group_id` 1 is their **own** org's Default group, since the JIT mint targets the Tenant's org. |
 | `projects[]` | form, curated by approver | The approved repo allowlist. |
 | `notes` | approver | Free text — why approved, what to watch, who owns the relationship. |
 

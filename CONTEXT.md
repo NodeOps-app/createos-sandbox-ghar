@@ -16,7 +16,7 @@ Glossary for the GitHub Actions runner controller. Terms only, no implementation
 
 - **JIT config** — single-use encoded runner config from `POST /orgs/{org}/actions/runners/generate-jitconfig`. Passed to `run.sh --jitconfig`. Ephemeral by construction; token never persisted to disk.
 
-- **Org** — a Tenant's GitHub org (no longer one fixed org). Runners register at org scope, not per-repo. `NodeOps-app` is Tenant #1 (`allow_all_repos`); every other Tenant is its own org.
+- **Org** — a Tenant's GitHub org (no longer one fixed org). Runners register at org scope, not per-repo. `NodeOps-app` is Tenant #1. `allow_all_repos` is a per-Tenant call agreed with the org owner, not an internal-only flag: enumerating Projects is the default (and is what creates a scoped Runner group), while `allow_all_repos` falls back to that Tenant's **own** org Default group.
 
 - **Self-destruct** (a.k.a. **self-delete**) — a Sandbox tearing down its own VM from inside the guest, triggered when its Runner exits. Shipped in fc (NodeOps-app/fc#520, commit `a56978b`): the guest agent exposes a loopback-only endpoint `POST 127.0.0.1:1029/self/delete` and the host destroys the VM by its UDS identity. In this controller it is the **fast teardown path** — it reclaims the host VM in seconds but does **not** free the DO concurrency slot, so the `completed` webhook + Job→Sandbox map are still needed to free the slot and as a backstop. Sibling endpoint `/self/pause` exists but is unused (runners are one-shot ephemeral).
 
