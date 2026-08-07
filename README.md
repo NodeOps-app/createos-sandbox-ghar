@@ -263,9 +263,17 @@ both return **404** — indistinguishable from a route that doesn't exist — so
 or misconfigured deployment exposes no probeable surface. This is intentional, not a bug to
 fix into a `401`.
 
-Six routes, all under `/admin`:
+Seven routes, all under `/admin`:
 
 ```bash
+# Which orgs have installed the App, and under which installation id. This is
+# the ONLY way to resolve a community tenant's installation id: `gh api
+# orgs/<org>/installations` needs admin on THEIR org, and the App-JWT route
+# needs the App private key, which lives only as a Worker secret. Add
+# ?org=<login> for a single org (case-insensitive; 404 if it never installed).
+curl https://<worker>.workers.dev/admin/installations \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+
 # List all tenants
 curl https://<worker>.workers.dev/admin/tenants \
   -H "Authorization: Bearer $ADMIN_TOKEN"
@@ -315,9 +323,10 @@ installs get one neutral check run pointing at `APPLY_FORM_URL`.
    [`docs/community/onboarding-form.md`](docs/community/onboarding-form.md)).
 2. **Review** and size the Tenant: `minute_grant`, `concurrency_cap`,
    `max_shape`, `job_ttl_ms`.
-3. They **install the public App** on their org, selecting the repos. Their
-   installation id is the trailing number in the install's settings URL, or via
-   `GET /orgs/<org>/installation` (`.id`).
+3. They **install the public App** on their org, selecting the repos. Read their
+   installation id from `GET /admin/installations?org=<login>` — we cannot list
+   an org's installations with an operator token, and the App-JWT route needs a
+   key only the Worker has.
 4. **Create the Tenant** `status: "pending"` (`POST /admin/tenants`, their
    installation id) **+ approve their repos** (`POST /admin/projects`; repo ids
    from `GET /repos/<owner>/<repo>` → `.id`).

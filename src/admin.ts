@@ -3,6 +3,7 @@ import type { Bindings } from "./index";
 import { loadConfig } from "./config";
 import { timingSafeEqual } from "./webhook";
 import { GitHubClient } from "./github/client";
+import { listAppInstallations, type AppInstallation } from "./github/auth";
 import type { TenantRecord } from "./types";
 
 /**
@@ -119,6 +120,31 @@ export async function handleAdmin(
   const route = `${req.method} ${url.pathname}`;
 
   try {
+    if (route === "GET /admin/installations") {
+      // The onboarding lookup: which orgs have installed our App, and under
+      // which installation id. Read-only, and the ONLY way an operator can
+      // resolve a community tenant's installation id — see listAppInstallations
+      // for why neither `gh` nor a local key can do it. `?org=<login>` filters
+      // (case-insensitively, since GitHub logins are).
+      const org = url.searchParams.get("org");
+      let installations: AppInstallation[];
+      try {
+        installations = await listAppInstallations(config, fetchImpl);
+      } catch (err) {
+        console.error(`list app installations failed: ${String(err)}`);
+        return json({ error: `list app installations failed: ${String(err)}` }, 502);
+      }
+      if (org !== null) {
+        const wanted = org.toLowerCase();
+        const hit = installations.find((i) => i.accountLogin.toLowerCase() === wanted);
+        // 404 rather than an empty list, matching GET /admin/tenants?id=: a
+        // mistyped org must read as "not found", never as "installed nothing".
+        if (!hit) return json({ error: "no installation for org", org }, 404);
+        return json(hit);
+      }
+      return json(installations);
+    }
+
     if (route === "GET /admin/tenants") {
       // ?id=<installation_id> reads a single tenant (+ its projects) via
       // adminGetTenant — the read the onboarding script and operators actually

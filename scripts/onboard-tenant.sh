@@ -78,8 +78,19 @@ api() { # method path [json]
 echo "== org: $ORG =="
 
 # ---- Step 1: installation id for the App on this org ----
-INSTALL_ID=$(gh api "orgs/$ORG/installations" --jq ".installations[] | select(.app_id==$APP_ID) | .id" 2>/dev/null || true)
-[ -n "$INSTALL_ID" ] || die "no createos-runners App (app_id $APP_ID) installation found on org '$ORG'. Applicant must install the public App first (Part A of docs/community/onboard-tenant.md)."
+# Resolved through the Worker, not `gh`: `gh api orgs/<org>/installations` needs
+# org-admin on the TENANT's org, which we never have for a community tenant, and
+# the App-JWT route needs the App private key, which is a Worker secret with no
+# operator-side copy. GET /admin/installations?org= is the App speaking for
+# itself. INSTALLATION_ID=<id> still overrides, for the offline case.
+if [ -n "${INSTALLATION_ID:-}" ]; then
+  INSTALL_ID="$INSTALLATION_ID"
+else
+  INSTALL_ID=$(api GET "/admin/installations?org=$ORG" 2>/dev/null | jq -r '.installationId // empty' || true)
+fi
+case "$INSTALL_ID" in
+  ''|*[!0-9]*) die "could not resolve an installation id for org '$ORG' (got: '${INSTALL_ID:-<empty>}'). Check the org has installed the public App (app_id $APP_ID) — Part A of docs/community/onboard-tenant.md — with: curl -H \"Authorization: Bearer \$ADMIN_TOKEN\" '$WORKER/admin/installations'. Pass INSTALLATION_ID=<id> to skip this lookup.";;
+esac
 echo "installation_id: $INSTALL_ID"
 
 # ---- Step 2: current state (idempotency read) ----

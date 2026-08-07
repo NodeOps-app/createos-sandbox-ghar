@@ -870,3 +870,96 @@ describe("admin API — runner group enforced on every approved-scoped write (Fi
     expect(((await edit.json()) as TenantRecord).runnerGroupId).toBe(1);
   });
 });
+
+describe("GET /admin/installations", () => {
+  // The whole point of the route: `gh api orgs/<org>/installations` needs admin
+  // on the TENANT's org, and the App-JWT route needs a private key that only
+  // the Worker holds. This is the sole path from an org login to its
+  // installation id, so it has to work for an org we have no rights on.
+  const installations = [
+    {
+      id: 144593770,
+      account: { login: "NodeOps-app", type: "Organization" },
+      repository_selection: "all",
+    },
+    {
+      id: 999111222,
+      account: { login: "Maximem-AI", type: "Organization" },
+      repository_selection: "all",
+    },
+  ];
+  const routes = (over = {}) => ({
+    "GET /app/installations": () => new Response(JSON.stringify(installations), { status: 200 }),
+    ...over,
+  });
+
+  it("lists every installation of the App", async () => {
+    const res = await handleAdmin(
+      req("GET", "/admin/installations"),
+      B,
+      mockFetch(routes()),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([
+      {
+        installationId: 144593770,
+        accountLogin: "NodeOps-app",
+        accountType: "Organization",
+        repositorySelection: "all",
+      },
+      {
+        installationId: 999111222,
+        accountLogin: "Maximem-AI",
+        accountType: "Organization",
+        repositorySelection: "all",
+      },
+    ]);
+  });
+
+  // GitHub logins are case-insensitive, and an operator retyping an org from an
+  // email will not match its casing. A miss here reads as "never installed the
+  // App" and sends the operator back to the applicant for nothing.
+  it("resolves ?org= case-insensitively", async () => {
+    const res = await handleAdmin(
+      req("GET", "/admin/installations?org=maximem-ai"),
+      B,
+      mockFetch(routes()),
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { installationId: number }).toMatchObject({
+      installationId: 999111222,
+      accountLogin: "Maximem-AI",
+    });
+  });
+
+  // 404, not an empty body: same contract as GET /admin/tenants?id= — a
+  // mistyped org must be distinguishable from an org that installed nothing.
+  it("404s an org with no installation", async () => {
+    const res = await handleAdmin(
+      req("GET", "/admin/installations?org=never-installed"),
+      B,
+      mockFetch(routes()),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  // A GitHub outage must not read as "this org never installed the App" — that
+  // is the one failure that would send an operator to reject a valid applicant.
+  it("502s a GitHub failure rather than reporting an empty list", async () => {
+    const res = await handleAdmin(
+      req("GET", "/admin/installations"),
+      B,
+      mockFetch(routes({ "GET /app/installations": () => new Response("boom", { status: 500 }) })),
+    );
+    expect(res.status).toBe(502);
+  });
+
+  it("404s without a valid admin token, like every other admin route", async () => {
+    const res = await handleAdmin(
+      req("GET", "/admin/installations", undefined, "wrong"),
+      B,
+      mockFetch(routes()),
+    );
+    expect(res.status).toBe(404);
+  });
+});

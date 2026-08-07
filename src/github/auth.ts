@@ -68,6 +68,69 @@ export class TokenCache {
   }
 }
 
+/** One installation of our App, as the operator needs to see it. */
+export interface AppInstallation {
+  installationId: number;
+  accountLogin: string;
+  accountType: string;
+  repositorySelection: string;
+}
+
+/**
+ * Every installation of our GitHub App, newest ids last.
+ *
+ * App-JWT authed, not installation-token authed, which is the whole reason this
+ * lives here and not on GitHubClient: `GET /app/installations` speaks for the
+ * App itself, so it works for an org we have no admin rights on. That matters
+ * because the operator-side alternative — `GET /orgs/<org>/installations` — needs
+ * admin on the TENANT's org, which we never have for a community tenant. The App
+ * private key is a Worker secret with no copy on an operator machine, so the
+ * Worker is the only place this call can be made from.
+ *
+ * Uncached on purpose: admin-frequency only, never on the webhook hot path, and
+ * a stale list is worse than a slow one when it is what an onboarding decision
+ * keys on.
+ */
+export async function listAppInstallations(
+  config: Config,
+  fetchImpl: FetchLike = fetch.bind(globalThis),
+): Promise<AppInstallation[]> {
+  const perPage = 100;
+  const jwt = await appJwt(config.githubAppId, config.githubAppPrivateKeyPkcs8);
+  const res = await fetchImpl(`${config.githubApiUrl}/app/installations?per_page=${perPage}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": UA,
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`list app installations failed: ${res.status} ${await res.text()}`);
+  }
+  const body = (await res.json()) as {
+    id?: number;
+    account?: { login?: string; type?: string };
+    repository_selection?: string;
+  }[];
+  // Single page by design — we are nowhere near 100 installs. Warned rather
+  // than silently truncated: a full page means the list is incomplete, and an
+  // operator reading "org not found" off a truncated list would conclude the
+  // applicant never installed the App (repo convention: no silent bounds).
+  if (body.length === perPage) {
+    console.warn(
+      `listAppInstallations: hit the ${perPage}-install page limit; the list is truncated and may omit installations. Add pagination.`,
+    );
+  }
+  return body.map((i) => ({
+    installationId: i.id ?? 0,
+    accountLogin: i.account?.login ?? "",
+    accountType: i.account?.type ?? "",
+    repositorySelection: i.repository_selection ?? "",
+  }));
+}
+
 /**
  * Warm-isolate registry: one TokenCache per credential identity, reused across
  * invocations for as long as the isolate lives (opportunistic — Workers evicts

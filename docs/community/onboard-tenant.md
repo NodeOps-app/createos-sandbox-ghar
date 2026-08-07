@@ -47,15 +47,31 @@ export ORG='<applicant-org-login>'          # e.g. acme-inc
 
 ### Step 1 — get their installation id
 
-They just installed the App on their org. Read the install id for the
-`createos-runners` App (`app_id` 4222926):
+They just installed the App on their org. Ask the Worker, which is the only
+party that can answer:
 
 ```bash
-gh api orgs/$ORG/installations \
-  --jq '.installations[] | select(.app_id==4222926) | .id'
+curl -s "$WORKER/admin/installations?org=$ORG" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.installationId'
 # → e.g. 555000111   (call this $INSTALL_ID)
 export INSTALL_ID=<number above>
+
+# Drop the ?org= filter to see every org that has installed the App — including
+# ones that installed but were never onboarded:
+curl -s "$WORKER/admin/installations" -H "Authorization: Bearer $ADMIN_TOKEN" | jq
 ```
+
+**Do not reach for `gh api orgs/$ORG/installations`.** That endpoint needs
+org-admin on the *applicant's* org, which we never have for a community tenant —
+it returns a 404 that reads exactly like "they never installed the App". The
+only other route, `GET /orgs/<org>/installation`, is authenticated with a
+**GitHub App JWT**, and the App private key exists solely as a Worker secret
+with no operator-side copy. Hence `/admin/installations`: the Worker holds the
+key, so it can ask GitHub as the App itself, and the App can always see its own
+installations regardless of who owns the org. A `404` from this route means they
+have genuinely not installed the App yet (send them back to Part A); a `502`
+means GitHub failed and the answer is unknown — retry, do not read it as "not
+installed".
 
 ### Step 2 — collect the repo ids they selected
 
