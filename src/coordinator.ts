@@ -312,6 +312,32 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   /**
+   * Every row's job id paired with the VM id it owns, or null if it does not own
+   * one yet — the orphaned-SANDBOX sweep's oracle, one step sharper than
+   * liveJobIds.
+   *
+   * The VM name carries only a job id (`gha-ci-<jobId>`, stable across attempts
+   * so it stays inside the 22-char createos cap), so several VMs can share one
+   * name: a provision that 5xx'd AFTER the control plane created the VM leaks it,
+   * and the job's retry creates another under the same name. Keyed on job id
+   * alone, both read as "this job is live" and the leaked one is shielded from
+   * reclamation for the whole life of the job — burning capacity precisely during
+   * the burst that produced it. Pairing the id with the row lets the sweep see
+   * that the live row owns a DIFFERENT VM, and reclaim the superseded one.
+   *
+   * A null `sandbox_id` must be read as "spare it": that is a row between
+   * createSandbox returning and recordSandboxCreated persisting the id, whose VM
+   * is very much alive. Only a row that names some OTHER VM proves this one is
+   * garbage.
+   */
+  async liveVmOwnership(): Promise<{ jobId: number; sandboxId: string | null }[]> {
+    return this.#sql
+      .exec<{ job_id: number; sandbox_id: string | null }>(`SELECT job_id, sandbox_id FROM jobs`)
+      .toArray()
+      .map((r) => ({ jobId: r.job_id, sandboxId: r.sandbox_id }));
+  }
+
+  /**
    * Rows genuinely STUCK getting a VM for longer than thresholdMs: `pending`
    * (queued behind the concurrency cap) or `provisioning` (committed to boot,
    * but createSandbox/launch has not finished). Those are the two states where

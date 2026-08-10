@@ -551,6 +551,41 @@ describe("runReconciler — orphaned sandbox sweep", () => {
     globalThis.fetch = realFetch;
   });
 
+  it("reclaims a leaked VM while a retry of the SAME job runs under the same name", async () => {
+    // VM names carry only a job id (`gha-ci-<jobId>`, stable across attempts to
+    // stay inside the 22-char createos cap), so a provision that 5xx'd AFTER the
+    // control plane created the VM leaves a leaked twin of the retry's VM. Keyed
+    // on job id alone both read as "live" and the leak was shielded for the whole
+    // life of the job — burning capacity during exactly the burst that made it.
+    const singleton = stub("singleton");
+    await singleton.onQueued(job(9808), "sb-sweep-superseded");
+    await singleton.recordSandboxCreated(9808, "sb_retry_9808", runnerName(9808), "default");
+    patchGitHub();
+    const leaked = { ...vm(vmName(9808)), id: "sb_leaked_9808", destroy: vi.fn() };
+    const retry = { ...vm(vmName(9808)), id: "sb_retry_9808", destroy: vi.fn() };
+
+    await runReconciler(env as any, depsWith([leaked, retry]));
+
+    expect(leaked.destroy).toHaveBeenCalledOnce(); // the row names the other VM
+    expect(retry.destroy).not.toHaveBeenCalled(); // the one the row owns
+    globalThis.fetch = realFetch;
+  });
+
+  it("spares a VM whose row has not recorded an id yet — the create-to-record window", async () => {
+    // A row between createSandbox returning and recordSandboxCreated persisting
+    // the id owns a very much alive VM it cannot name. Reading that null as
+    // "owns a different VM" would destroy every provision mid-flight.
+    const singleton = stub("singleton");
+    await singleton.onQueued(job(9809), "sb-sweep-unrecorded");
+    patchGitHub();
+    const midCreate = { ...vm(vmName(9809)), id: "sb_unrecorded_9809", destroy: vi.fn() };
+
+    await runReconciler(env as any, depsWith([midCreate]));
+
+    expect(midCreate.destroy).not.toHaveBeenCalled();
+    globalThis.fetch = realFetch;
+  });
+
   it("never destroys a VM it did not create", async () => {
     // The createos account also holds hand-made boxes and other projects' VMs.
     // The name is the only thing standing between them and a destroy call.

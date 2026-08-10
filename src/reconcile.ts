@@ -127,7 +127,14 @@ async function sweepOrphanedSandboxes(
   // same ownership oracle. Ownership is name-derived and region-independent — a
   // leaked VM is reclaimed from the region its name is found in, regardless of
   // which region the (missing) row would have named.
-  const live = new Set(await coordinator(env).liveJobIds());
+  //
+  // job id → the VM that job's row owns (null = a row that has not recorded one
+  // yet, i.e. mid-create). Per-VM rather than merely per-job, which is what lets
+  // a leaked VM be reclaimed while a RETRY of the same job runs under the same
+  // name — see Coordinator.liveVmOwnership.
+  const owned = new Map(
+    (await coordinator(env).liveVmOwnership()).map((o) => [o.jobId, o.sandboxId]),
+  );
 
   // Phase 2 — evaluate + destroy. The per-tick budget is SHARED across regions
   // (N regions must not multiply the per-tick subrequest spend the budget
@@ -152,7 +159,13 @@ async function sweepOrphanedSandboxes(
       if (s.status === "destroyed" || s.status === "failed") return false;
       if (!s.name) return false;
       const jobId = jobIdFromSandboxName(s.name, config);
-      return jobId !== null && !live.has(jobId);
+      if (jobId === null) return false; // not a name we mint — someone else's box
+      if (!owned.has(jobId)) return true; // no row at all: nothing is coming for it
+      const ownedId = owned.get(jobId)!;
+      // A row that has not recorded a VM yet is mid-create and its VM is alive.
+      // Only a row naming some OTHER VM proves THIS one was superseded — the
+      // leaked predecessor of a retried provision, which shares its name.
+      return ownedId !== null && ownedId !== s.id;
     });
     if (orphans.length === 0) continue;
 
