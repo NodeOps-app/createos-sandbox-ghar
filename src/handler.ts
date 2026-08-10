@@ -5,6 +5,7 @@ import { createJobAdmission, identifyJob, type AdmissionDecision } from "./admis
 import { fetchCatalog, shapeForLabel, shapeWithinCeiling } from "./shapes";
 import { GitHubClient } from "./github/client";
 import { createRunnerSandbox, launchRunner, teardownSandbox, type SandboxDeps } from "./sandbox";
+import { isPermanentProvisionFailure } from "./createos";
 import { notify, jobRef } from "./notify";
 import { monthKey, dayKey, weightForLabel } from "./quota";
 import type {
@@ -174,7 +175,12 @@ export async function failProvision(
 
   let result: ProvisionFailedResult;
   try {
-    result = await coordinator(env).markProvisionFailed(job.jobId, sandboxId, region);
+    result = await coordinator(env).markProvisionFailed(
+      job.jobId,
+      sandboxId,
+      region,
+      !isPermanentProvisionFailure(err),
+    );
   } catch (doErr) {
     console.error(`markProvisionFailed unreachable job=${job.jobId}: ${String(doErr)}`);
     if (sandboxId) await destroyUnrecorded(config, job.jobId, sandboxId, region, deps);

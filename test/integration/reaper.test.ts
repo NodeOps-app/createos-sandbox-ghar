@@ -129,15 +129,17 @@ describe("markProvisionFailed disposes of the VM it left behind", () => {
     expect(ids(await s.sweep(Date.now(), 3_600_000))).toContain("sb_941");
   });
 
-  it("still drops a row that never got a VM", async () => {
+  it("re-queues a row that never got a VM instead of dropping it", async () => {
     const s = env.COORDINATOR.get(env.COORDINATOR.idFromName("pf3-" + Math.random()));
     await queued(s, 942);
 
     const { toDestroy } = await s.markProvisionFailed(942);
 
+    // Nothing to destroy and the slot is freed, but the job is still `queued` at
+    // GitHub — so the row stays, parked as pending for the next tick's retry.
     expect(toDestroy).toBeNull();
     expect(await s.activeCount()).toBe(0);
-    expect(await s.liveJobIds()).not.toContain(942);
+    expect(await s.liveJobIds()).toContain(942);
   });
 
   it("hands back a VM whose row a raced completed already dropped", async () => {

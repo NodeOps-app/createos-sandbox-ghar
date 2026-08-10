@@ -90,7 +90,7 @@ describe("canonical Coordinator row retirement", () => {
     await expectDestroyingRetry(stub, 963, "sb-963");
   });
 
-  it("deletes a VM-less row without inventing teardown", async () => {
+  it("re-queues a VM-less row for retry without inventing teardown", async () => {
     const stub = env.COORDINATOR.get(
       env.COORDINATOR.idFromName(`retirement-empty-${Math.random()}`),
     );
@@ -98,7 +98,35 @@ describe("canonical Coordinator row retirement", () => {
 
     const result = await stub.markProvisionFailed(964);
 
+    // Nothing to destroy (no VM was created), the slot is freed, and the row
+    // SURVIVES as pending so the next tick's drain retries it — dropping it left
+    // the budget-bound recovery scan as the only way back.
     expect(result.toDestroy).toBeNull();
-    expect(await stub.liveJobIds()).not.toContain(964);
+    expect(result.nextPending).toBeNull(); // never re-promotes itself in the same call
+    expect(await stub.activeCount()).toBe(0);
+    expect(await stub.liveJobIds()).toContain(964);
+
+    // The retry: a cron tick's drain pulls the parked row back into provisioning.
+    const tick = await stub.sweep(Date.now(), 3_600_000);
+    expect(tick.nextPending.map((j) => j.jobId)).toContain(964);
+  });
+
+  it("drops a VM-less row once its retry budget is spent", async () => {
+    const stub = env.COORDINATOR.get(
+      env.COORDINATOR.idFromName(`retirement-budget-${Math.random()}`),
+    );
+    await stub.onQueued(job(965), "delivery-965");
+
+    // MAX_PROVISION_ATTEMPTS = 3: two failures re-queue, the third gives up. Each
+    // retry is re-promoted by the drain the way a real cron tick would.
+    await stub.markProvisionFailed(965);
+    expect(await stub.liveJobIds()).toContain(965);
+    await stub.sweep(Date.now(), 3_600_000);
+    await stub.markProvisionFailed(965);
+    expect(await stub.liveJobIds()).toContain(965);
+    await stub.sweep(Date.now(), 3_600_000);
+    await stub.markProvisionFailed(965);
+
+    expect(await stub.liveJobIds()).not.toContain(965);
   });
 });
