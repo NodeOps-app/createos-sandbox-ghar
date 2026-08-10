@@ -50,7 +50,7 @@ Verified against the OpenAPI description: `webhook-workflow-job-queued` carries 
 fork signal whatsoever (`check_run_url, completed_at, conclusion, created_at,
 head_sha, html_url, id, labels, name, node_id, run_attempt, run_id, run_url,
 runner_group_id, runner_group_name, runner_id, runner_name, started_at, status,
-head_branch, workflow_name, steps, url`). `repository.fork` describes the *base*
+head_branch, workflow_name, steps, url`). `repository.fork` describes the _base_
 repo, not the PR head. Fork detection therefore always costs a
 `GET /repos/{owner}/{repo}/actions/runs/{run_id}` subrequest — which is exactly
 what `GitHubClient.isForkJob` already does (`src/github/client.ts:97`), at
@@ -99,8 +99,8 @@ Multi mode, on every `queued` job:
 rather than admits.
 
 `allow_forks = 1` is set by an operator through `/admin/tenants`, **only after
-manually confirming** the org has *Require approval for all external
-contributors* set. Onboarding is already a manual gate (approval status, scoped
+manually confirming** the org has _Require approval for all external
+contributors_ set. Onboarding is already a manual gate (approval status, scoped
 runner group, minute grant, shape ceiling); this is one more item on that
 checklist, not a new workflow.
 
@@ -140,13 +140,13 @@ moment this ships, which is the fail-closed direction.
 
 ### Where each piece lives
 
-| Change | File |
-| --- | --- |
-| `allowForks` on `TenantRecord`; persisted + returned | `src/types.ts`, `src/registry.ts` |
-| `allow_forks` column, migration, carried on `admitTenantJob` | `src/coordinator.ts` |
-| `allow_forks` accepted on tenant upsert | `src/admin.ts` |
-| Fork gate + `run_id` cache, replacing the hard-coded `false` at `src/handler.ts:387` | `src/handler.ts` |
-| `forkGateMode` | `src/config.ts` |
+| Change                                                                               | File                              |
+| ------------------------------------------------------------------------------------ | --------------------------------- |
+| `allowForks` on `TenantRecord`; persisted + returned                                 | `src/types.ts`, `src/registry.ts` |
+| `allow_forks` column, migration, carried on `admitTenantJob`                         | `src/coordinator.ts`              |
+| `allow_forks` accepted on tenant upsert                                              | `src/admin.ts`                    |
+| Fork gate + `run_id` cache, replacing the hard-coded `false` at `src/handler.ts:387` | `src/handler.ts`                  |
+| `forkGateMode`                                                                       | `src/config.ts`                   |
 
 ### Refusal copy
 
@@ -160,16 +160,16 @@ dedup:
 
 ### Env
 
-| Var | Default | Meaning |
-| --- | --- | --- |
-| `FORK_GATE_MODE` | `observe` | `off` \| `observe` \| `enforce`. `observe` makes the call, logs what it *would* refuse, and admits. |
+| Var              | Default   | Meaning                                                                                             |
+| ---------------- | --------- | --------------------------------------------------------------------------------------------------- |
+| `FORK_GATE_MODE` | `observe` | `off` \| `observe` \| `enforce`. `observe` makes the call, logs what it _would_ refuse, and admits. |
 
 Single mode (`TENANCY_MODE=single`) is untouched: `shouldProvision`'s
 `fork-gated` policy stays exactly as-is and none of the above runs.
 
 ### Possible upgrade, no permission change
 
-Two candidate signals could turn `allow_forks = 1` from *trust* into *verify*,
+Two candidate signals could turn `allow_forks = 1` from _trust_ into _verify_,
 both at Repository **Actions: read**:
 
 - `GET /repos/{owner}/{repo}/actions/runs/{run_id}/approvals` — documented as
@@ -200,7 +200,7 @@ Sheds malformed traffic before any work. Zero cost.
 
 **No field in the request body can prove GitHub origin** — the body is exactly
 what an attacker controls, and the HMAC over that body is already the stronger
-form of the same proof. What an IP check adds is a *network*-origin filter that
+form of the same proof. What an IP check adds is a _network_-origin filter that
 rejects before we spend crypto.
 
 `GET https://api.github.com/meta` → `hooks`, currently 6 CIDRs:
@@ -273,10 +273,10 @@ and the test suite need no extra setup).
 
 ### Env
 
-| Var | Default | Meaning |
-| --- | --- | --- |
-| `WEBHOOK_MAX_BODY_BYTES` | `262144` | B.0 body-size ceiling. |
-| `WEBHOOK_IP_MODE` | `observe` | `off` \| `observe` \| `enforce`. |
+| Var                       | Default   | Meaning                          |
+| ------------------------- | --------- | -------------------------------- |
+| `WEBHOOK_MAX_BODY_BYTES`  | `262144`  | B.0 body-size ceiling.           |
+| `WEBHOOK_IP_MODE`         | `observe` | `off` \| `observe` \| `enforce`. |
 | `WEBHOOK_RATE_LIMIT_MODE` | `observe` | `off` \| `observe` \| `enforce`. |
 
 ---
@@ -292,7 +292,7 @@ Rejected on a hard constraint, not preference. The runner name carries the job i
 blob is measured at ~4085 of GitHub's 4096-byte `encoded_jit_config` ceiling —
 **runner-name length is the entire safety margin** (`AGENTS.md`). A UUIDv7 adds 22
 characters base64url-encoded, 36 as canonical text. Either overflows, and an
-overflow fails *every* provision rather than degrading. A UUID also does not
+overflow fails _every_ provision rather than degrading. A UUID also does not
 derive from the job id, so mapping one to the other needs a
 `(installation_id, job_id)` lookup — which is a composite key with extra steps.
 
@@ -332,12 +332,12 @@ its own id space.
 
 ## Testing
 
-| Layer | Tests |
-| --- | --- |
-| Pure (`test/unit`) | B.0 shape gate; CIDR matching incl. IPv6 and the fail-open cases; config parsing of all four new vars incl. invalid-mode rejection |
-| GitHub client | `isForkJob` fail-closed paths already covered — extend for the `run_id` cache: hit, miss, eviction warn |
-| DO integration | job-id conflict guard across all three branches; `allow_forks` round-trip through `admitTenantJob`; migration onto a DO created before the column existed defaults to `0` |
-| Flow integration | `allow_forks = 1` makes **no** `isForkJob` call; `allow_forks = 0` makes exactly one and refuses a fork; matrix fan-out on one `run_id` makes exactly one; `observe` mode admits while logging; rate limiter never consulted for `completed` |
+| Layer              | Tests                                                                                                                                                                                                                                        |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pure (`test/unit`) | B.0 shape gate; CIDR matching incl. IPv6 and the fail-open cases; config parsing of all four new vars incl. invalid-mode rejection                                                                                                           |
+| GitHub client      | `isForkJob` fail-closed paths already covered — extend for the `run_id` cache: hit, miss, eviction warn                                                                                                                                      |
+| DO integration     | job-id conflict guard across all three branches; `allow_forks` round-trip through `admitTenantJob`; migration onto a DO created before the column existed defaults to `0`                                                                    |
+| Flow integration   | `allow_forks = 1` makes **no** `isForkJob` call; `allow_forks = 0` makes exactly one and refuses a fork; matrix fan-out on one `run_id` makes exactly one; `observe` mode admits while logging; rate limiter never consulted for `completed` |
 
 Mutation check on the highest-value assertion: reintroduce
 `isForkJob: () => Promise.resolve(false)` at `src/handler.ts:387` and confirm the
@@ -373,12 +373,12 @@ version id before each push (`bunx wrangler@latest deployments list`); a push to
 ## Open items
 
 - Confirm Repository **Actions: read** is granted to the App — the fork gate is
-  built on it (App settings → Permissions). This is a *verification*, not a change:
+  built on it (App settings → Permissions). This is a _verification_, not a change:
   if it is already present, Part A ships with no permission delta at all.
 - Pick the `namespace_id` for `[[ratelimits]]`; it must be unique per Cloudflare
   account. `1001` assumed here, verify nothing else claims it.
 - Tenant-facing README section: fork PRs are not provisioned by default, what to
-  do about it, and the *Require approval for all external contributors* setting we
+  do about it, and the _Require approval for all external contributors_ setting we
   check by hand before enabling `allow_forks`.
 - Follow-up experiment (not a blocker): settle whether
   `/actions/runs/{run_id}/approvals` or `triggering_actor` reliably identifies a
