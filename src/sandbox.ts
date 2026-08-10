@@ -1,14 +1,27 @@
 import { CreateosSandboxNotFoundError } from "@nodeops-createos/sandbox";
-import type { Config, PendingJob } from "./types";
+import type { Config, PendingJob, Region } from "./types";
 import type { GitHubClient } from "./github/client";
 import {
   isFailoverEligible,
   makeSandboxClient,
+  primaryRegion,
   regionByName,
   type SandboxDeps,
   type SandboxHandle,
 } from "./createos";
 import { shapeForLabel } from "./shapes";
+
+/**
+ * How long createRunnerSandbox waits before its one post-failover retry, when
+ * every configured region refused with a region-level fault.
+ *
+ * Long enough that a 5xx wave has a chance to clear (the measured waves resolve
+ * in seconds), short enough to stay far inside the provisioning path's latency
+ * budget — the alternative is the Coordinator's retry, minutes later.
+ */
+const RETRY_ALL_REGIONS_MS = 1_500;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 // Re-exported so existing consumers (handler.ts, index.ts, tests) keep importing
 // SandboxDeps/SandboxHandle from here.
@@ -181,6 +194,31 @@ export async function createRunnerSandbox(
   // our own VMs.
   const sandboxName = sandboxNameFor(job.jobId, runnerName, config);
 
+  const attempt = async (region: Region) => {
+    const c = makeSandboxClient(config, deps, region);
+    const createStart = Date.now();
+    const sandbox = await c.createSandbox({
+      shape: shapeForLabel(job.label, config),
+      rootfs: config.runnerTemplate,
+      disk_mib: config.runnerDiskMib,
+      name: sandboxName,
+      // CI jobs pull from arbitrary hosts (npm/pip/apt/git/ghcr/…); the createos
+      // default egress allowlist blocks them. `["*"]` = allow all egress.
+      egress: ["*"],
+      // Do NOT set auto_pause_after_seconds: a paused runner goes offline to
+      // GitHub (missed dispatch, 1-day deregistration). Omitting it disables
+      // idle auto-pause; these VMs self-delete per job anyway.
+      envs: { JIT_CONFIG: jitConfig },
+    });
+    return {
+      sandboxId: sandbox.id,
+      runnerName,
+      sandbox,
+      region: region.name,
+      timings: { mintMs, createMs: Date.now() - createStart },
+    };
+  };
+
   // Region failover: the JIT config is minted ONCE and reused on every attempt
   // — it is a GitHub credential, indifferent to which control plane boots the
   // VM. Retry only on region-level faults (isFailoverEligible: 5xx/connection/
@@ -190,36 +228,37 @@ export async function createRunnerSandbox(
   // server-side (response lost), that VM leaks under a stable per-job name the
   // orphaned-sandbox sweep reclaims — same as the pre-failover leak path.
   for (const [i, region] of config.createosRegions.entries()) {
-    const c = makeSandboxClient(config, deps, region);
-    const createStart = Date.now();
     try {
-      const sandbox = await c.createSandbox({
-        shape: shapeForLabel(job.label, config),
-        rootfs: config.runnerTemplate,
-        disk_mib: config.runnerDiskMib,
-        name: sandboxName,
-        // CI jobs pull from arbitrary hosts (npm/pip/apt/git/ghcr/…); the createos
-        // default egress allowlist blocks them. `["*"]` = allow all egress.
-        egress: ["*"],
-        // Do NOT set auto_pause_after_seconds: a paused runner goes offline to
-        // GitHub (missed dispatch, 1-day deregistration). Omitting it disables
-        // idle auto-pause; these VMs self-delete per job anyway.
-        envs: { JIT_CONFIG: jitConfig },
-      });
-      const createMs = Date.now() - createStart;
-      return {
-        sandboxId: sandbox.id,
-        runnerName,
-        sandbox,
-        region: region.name,
-        timings: { mintMs, createMs },
-      };
+      return await attempt(region);
     } catch (err) {
-      if (i === config.createosRegions.length - 1 || !isFailoverEligible(err)) throw err;
+      if (!isFailoverEligible(err)) throw err;
+      if (i < config.createosRegions.length - 1) {
+        console.warn(
+          `createSandbox failed in region ${region.name} job=${job.jobId}: ${String(err)} — ` +
+            `failing over to ${config.createosRegions[i + 1]!.name}`,
+        );
+        continue;
+      }
+      // Every region refused, and every refusal was region-level. Before giving
+      // the job back to the Coordinator — which can only retry it on the next
+      // cron tick, minutes away — spend one more attempt on the primary after a
+      // short pause. A 5xx wave that hits every region at once (measured
+      // 2026-08-10 on a 45-job matrix burst) clears in seconds, so this is the
+      // difference between a job starting late and a job starting after a full
+      // retry cycle.
+      //
+      // Deliberately ONE attempt, at ONE region, after a delay: retrying the
+      // whole ladder immediately would double the create load on a control plane
+      // that is already shedding it, and the failure mode we are recovering from
+      // IS overload. The spaced-out retries belong to the Coordinator
+      // (#requeueForRetry, ~5 min apart), which is the right backoff for a wave.
       console.warn(
-        `createSandbox failed in region ${region.name} job=${job.jobId}: ${String(err)} — ` +
-          `failing over to ${config.createosRegions[i + 1]!.name}`,
+        `createSandbox failed in every region (${config.createosRegions.length}) ` +
+          `job=${job.jobId}: ${String(err)} — one retry at ` +
+          `${primaryRegion(config).name} in ${RETRY_ALL_REGIONS_MS}ms`,
       );
+      await (deps.sleep ?? sleep)(RETRY_ALL_REGIONS_MS);
+      return await attempt(primaryRegion(config));
     }
   }
   // Unreachable: the last iteration either returns or throws. TS needs the exit.

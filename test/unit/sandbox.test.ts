@@ -438,6 +438,9 @@ function regionRoutedClients(
       listSandboxes: vi.fn().mockResolvedValue([]),
     }),
     attemptId: () => "k3",
+    // The post-failover retry's delay, spent instantly — these cases assert the
+    // retry HAPPENS, not how long it waits.
+    sleep: async () => {},
   };
 }
 
@@ -494,12 +497,49 @@ describe("createRunnerSandbox region failover", () => {
     expect(eu.createSandbox).not.toHaveBeenCalled();
   });
 
-  it("throws the last region's error when every region is down", async () => {
+  // Every region refusing with a region-level fault is the case that stranded
+  // three jobs for 19m43s on 2026-08-10: the Coordinator can only retry on the
+  // next cron tick. One more attempt at the primary, after a pause, is what turns
+  // a seconds-long 5xx wave back into a job that just starts a little late.
+  it("retries the primary once when every region refused, and boots if the wave cleared", async () => {
     const us = {
       createSandbox: vi
         .fn()
-        .mockRejectedValue(
+        .mockRejectedValueOnce(
           new CreateosSandboxServerError("us down", new Response(null, { status: 503 })),
+        )
+        .mockResolvedValueOnce({ id: "sb_us_retry", runCommand: vi.fn() }),
+    };
+    const eu = {
+      createSandbox: vi
+        .fn()
+        .mockRejectedValue(
+          new CreateosSandboxServerError("eu down", new Response(null, { status: 503 })),
+        ),
+    };
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+
+    const res = await createRunnerSandbox(twoRegions, github, job, regionRoutedClients({ us, eu }));
+
+    expect(res.sandboxId).toBe("sb_us_retry");
+    expect(res.region).toBe("us");
+    // The retry is ONE attempt at ONE region: re-running the whole ladder would
+    // double the create load on a control plane that is shedding it already.
+    expect(us.createSandbox).toHaveBeenCalledTimes(2);
+    expect(eu.createSandbox).toHaveBeenCalledOnce();
+    // Still one JIT blob — a GitHub credential, indifferent to the control plane.
+    expect(github.generateJitConfig).toHaveBeenCalledOnce();
+  });
+
+  it("throws the retry's error when the wave has not cleared", async () => {
+    const us = {
+      createSandbox: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new CreateosSandboxServerError("us down", new Response(null, { status: 503 })),
+        )
+        .mockRejectedValueOnce(
+          new CreateosSandboxServerError("us still down", new Response(null, { status: 503 })),
         ),
     };
     const eu = {
@@ -513,8 +553,8 @@ describe("createRunnerSandbox region failover", () => {
 
     await expect(
       createRunnerSandbox(twoRegions, github, job, regionRoutedClients({ us, eu })),
-    ).rejects.toThrow(/eu down/);
-    expect(us.createSandbox).toHaveBeenCalledOnce();
+    ).rejects.toThrow(/us still down/);
+    expect(us.createSandbox).toHaveBeenCalledTimes(2);
     expect(eu.createSandbox).toHaveBeenCalledOnce();
   });
 

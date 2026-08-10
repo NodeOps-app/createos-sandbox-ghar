@@ -69,6 +69,9 @@ export interface SandboxDeps {
   makeClient?: (config: Config, region?: Region) => CreateosClient;
   /** Injection seam for tests. 2-char token discriminating provision attempts. */
   attemptId?: () => string;
+  /** Injection seam for tests. Defaults to a real timer — lets a test assert the
+   * post-failover retry without spending its delay in wall-clock. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
