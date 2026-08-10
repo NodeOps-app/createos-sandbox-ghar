@@ -39,8 +39,20 @@ import type { PendingJob, Config, QueuedJob, Region, Runner } from "./types";
  */
 const MAX_RUNNER_DELETES_PER_TICK = 10;
 
-/** Destroys at most this many orphaned VMs per cron tick. Same budget logic as above. */
-const MAX_SANDBOX_DESTROYS_PER_TICK = 5;
+/**
+ * Destroys at most this many orphaned VMs per cron tick, shared across regions.
+ *
+ * NOT the same budget logic as the runner deletes above: these calls go to
+ * CreateOS, not GitHub, so they are outside the installation rate limit that
+ * bounds the reconciler's reads — and unlike a stale registration, every leaked
+ * VM burns real capacity for as long as it lives, so reclaiming slowly has a
+ * direct cost. 5 was a Free-plan-era number (the 50-subrequest invocation cap)
+ * and it bound on 2026-08-10 with 6 leaked VMs across two regions, deferring one
+ * to the following tick. Raised to cover the realistic worst case: a job whose
+ * provision fails can leak one VM per region attempted, so a matrix burst can
+ * leak them in double digits at once.
+ */
+export const MAX_SANDBOX_DESTROYS_PER_TICK = 25;
 
 /**
  * Stuck jobs listed individually in one stale-job alert. A real backlog can be

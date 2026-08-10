@@ -5,7 +5,7 @@ import {
   runInDurableObject,
 } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { runReconciler, runReaper } from "../../src/reconcile";
+import { runReconciler, runReaper, MAX_SANDBOX_DESTROYS_PER_TICK } from "../../src/reconcile";
 import { resetShapeCacheForTests } from "../../src/shapes";
 import { resetCredentialSessionsForTests } from "../../src/github/auth";
 import { shapeCatalog, runnerName } from "../helpers/mocks";
@@ -620,7 +620,12 @@ describe("runReconciler — orphaned sandbox sweep", () => {
         CREATEOS_REGIONS: "us=https://api-us.local,eu=https://api-eu.local",
       };
       const euOrphan = vm(vmName(9807));
-      const usOrphans = [0, 1, 2, 3, 4].map((i) => vm(vmName(9820 + i)));
+      // Exactly the shared cap, read from the source rather than hardcoded: the
+      // starvation this asserts only exists when the first region alone can
+      // exhaust the budget, so the count must follow the constant when it moves.
+      const usOrphans = Array.from({ length: MAX_SANDBOX_DESTROYS_PER_TICK }, (_, i) =>
+        vm(vmName(9820 + i)),
+      );
       const deps = {
         makeClient: (_c: unknown, region?: { name: string }) => ({
           createSandbox: vi.fn(),
