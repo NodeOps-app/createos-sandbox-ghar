@@ -830,25 +830,33 @@ describe("runReconciler — multi-tenant mode", () => {
     const s = stub("singleton");
     await s.adminUpsertTenant(approvedTenant(40201));
     await s.adminUpsertTenant(approvedTenant(40202));
+    // Tenant A needs MORE repos than one scan batch (8) for the budget to be able
+    // to bind part-way through it — the whole point of this case.
+    const aRepos = Array.from(
+      { length: 9 },
+      (_, i) => `mt-org-40201/r${String(i).padStart(2, "0")}`,
+    );
     patchMultiGitHub({
-      40201: { org: "mt-org-40201", repos: ["mt-org-40201/r1", "mt-org-40201/r2"] },
+      40201: { org: "mt-org-40201", repos: aRepos },
       40202: { org: "mt-org-40202", repos: ["mt-org-40202/r1"] },
     });
 
     // Cost per repo here is 2 subrequests (activeRunIds' two status reads; no
-    // jobsByRepo means queuedJobs is never reached) plus 1 for the tenant's
-    // own installationRepos() call. Budget=3 covers tenant A's r1 (spent: 1 +
-    // 2 = 3) and hits the boundary check (3 >= 3) before r2 — budget-bound at
-    // tenant A, tenant B never reached this tick.
+    // jobsByRepo means queuedJobs is never reached) plus 1 for the tenant's own
+    // installationRepos() call. Repos are scanned in batches of 8 with the budget
+    // checked at batch boundaries: budget=3 commits to the first batch (spent 1 <
+    // 3), which covers r00-r07 for 16, then binds at the next boundary (17 >= 3).
+    // Tenant A is left mid-list and tenant B is never reached this tick.
     await runReconciler(multiEnv({ RECOVERY_SUBREQUEST_BUDGET: "3" }), {});
     expect(await s.recoveryCursor()).toBe(
-      JSON.stringify({ installationId: 40201, repo: "mt-org-40201/r1" }),
+      JSON.stringify({ installationId: 40201, repo: "mt-org-40201/r07" }),
     );
 
     // Tick 2: rotation resumes AT tenant A (per its stored repo cursor, so it
-    // picks up r2), a generous budget lets it finish A's remaining repo AND
-    // roll into tenant B, which the persisted cursor now reflects.
-    await runReconciler(multiEnv({ RECOVERY_SUBREQUEST_BUDGET: "20" }), {});
+    // picks up where it stopped), a generous budget lets it finish A's remaining
+    // repos AND roll into tenant B, which the persisted cursor now reflects.
+    // A costs 1 + 9*2 = 19, so the budget must clear that with room for B.
+    await runReconciler(multiEnv({ RECOVERY_SUBREQUEST_BUDGET: "40" }), {});
     expect(await s.recoveryCursor()).toBe(
       JSON.stringify({ installationId: 40202, repo: "mt-org-40202/r1" }),
     );

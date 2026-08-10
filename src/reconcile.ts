@@ -283,6 +283,30 @@ export async function runReaper(env: Bindings, deps: SandboxDeps = {}): Promise<
 }
 
 /**
+ * Reports what each tenant's installation has left of its hourly GitHub request
+ * allowance, once per tick.
+ *
+ * The recovery scan's true ceiling is this allowance, not the subrequest budget:
+ * an installation gets 5,000 requests/hour (large installations get more, by a
+ * rule GitHub does not expose), and one pass over a 300-repo installation costs
+ * ~600 reads — so scanning a whole installation every 5-minute tick would want
+ * ~7,200/hour. Before raising RECOVERY_SUBREQUEST_BUDGET, read this line: it is
+ * the only way to learn which tier the installation is actually on. Warns rather
+ * than logs once under 20% so the headroom shrinking is not silent.
+ */
+function logRateLimits(scopes: { tenant: { orgLogin: string }; gh: GitHubClient }[]): void {
+  for (const s of scopes) {
+    const rl = s.gh.rateLimit;
+    if (!rl) continue;
+    const line =
+      `reconcile: github rate limit ${s.tenant.orgLogin} — ` +
+      `${rl.remaining}/${rl.limit} remaining this hour`;
+    if (rl.remaining < rl.limit * 0.2) console.warn(`${line} (under 20% headroom)`);
+    else console.log(line);
+  }
+}
+
+/**
  * Multi-mode recovery cursor: `{installationId, repo}` — which tenant the last
  * tick left off at, and (within it) which repo. Malformed/foreign JSON (a
  * stale cursor from before multi mode, or hand-edited storage) restarts
@@ -390,6 +414,17 @@ async function runMultiTenantReconciler(
   const parsed = parseTenantCursor(rawCursor);
   const order = rotateFrom(scopes, parsed?.installationId);
   let budget = config.recoverySubrequestBudget;
+  // The budget stays first-come-takes-all, and the loop still breaks when a
+  // tenant exhausts it. That does mean a large installation (300+ repos against
+  // a 200-read budget) can spend several consecutive ticks entirely on itself
+  // while the tenants behind it wait — observed 2026-08-10. It is deliberately
+  // NOT split per tenant: only ONE repo cursor is persisted, so scanning every
+  // tenant every tick would leave all but the cursor's tenant restarting at the
+  // head of its repo list forever, never reaching its tail. Fixing that properly
+  // means a cursor per tenant, and the thing it would buy — faster recovery of a
+  // LOST WEBHOOK for a small tenant — is now the scan's only remaining job:
+  // provision failures re-queue in the Coordinator (#requeueForRetry) instead of
+  // waiting to be rediscovered here. Revisit if a second large tenant appears.
   let nextCursor: string | null = rawCursor;
   // Provisions started during recovery must complete within THIS invocation —
   // the synthetic ctx below has no real ExecutionContext behind it, so unlike
@@ -466,6 +501,7 @@ async function runMultiTenantReconciler(
   }
   if (nextCursor !== rawCursor) await co.setRecoveryCursor(nextCursor);
   await Promise.allSettled(recoveryProvisions);
+  logRateLimits(scopes);
 
   // C. Orphaned registrations: per tenant, REUSING step A's runner lists (no
   //    re-fetch — cost). Same ownership proof as single mode: name parses as
