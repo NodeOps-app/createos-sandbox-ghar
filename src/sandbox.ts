@@ -297,10 +297,15 @@ export async function createRunnerSandbox(
  * baked-in /opt/start-runner.sh consumes $JIT_CONFIG and halts the VM on exit.
  */
 export async function launchRunner(sandbox: SandboxHandle): Promise<void> {
-  // Detached launch: setsid + background so the outer exec returns at once.
+  // Detached launch in a SUBSHELL: `( … & )` orphans the runner to init so the
+  // parent shell the guest agent reads keeps no fd/job-control tie to it. A bare
+  // `… &` intermittently left the exec's stdout without a clean EOF, so the guest
+  // agent's read blocked to its 60s timeout on ~30% of launches — a fresh VM that
+  // never registered, leaving the job stuck "waiting for a runner". The subshell
+  // severs that tie so the read EOFs on every launch.
   await sandbox.runCommand("bash", [
     "-c",
-    "setsid bash /opt/start-runner.sh >/var/log/runner.log 2>&1 </dev/null & echo started",
+    "( setsid bash /opt/start-runner.sh >/var/log/runner.log 2>&1 </dev/null & ) ; echo started",
   ]);
 }
 
