@@ -57,19 +57,19 @@ runner:
 
 Against today's catalog of 11 shapes, that admits 7:
 
-| Shape              | Admitted | Why not                                      |
-| ------------------ | -------- | -------------------------------------------- |
-| `s-0.25vcpu-512mb` | no       | `cpu_quota_pct: 25`, and under the mem floor |
-| `s-0.5vcpu-1gb`    | no       | `cpu_quota_pct: 50`, and under the mem floor |
-| `s-1vcpu-256mb`    | no       | under the mem floor                          |
-| `s-1vcpu-1gb`      | no       | under the mem floor                          |
-| `s-1vcpu-2gb`      | yes      |                                              |
-| `s-2vcpu-2gb`      | yes      |                                              |
-| `s-2vcpu-4gb`      | yes      |                                              |
-| `s-4vcpu-4gb`      | yes      | default                                      |
-| `s-4vcpu-8gb`      | yes      |                                              |
-| `s-8vcpu-8gb`      | yes      |                                              |
-| `s-8vcpu-16gb`     | yes      |                                              |
+| Shape | Admitted | Why not |
+| --- | --- | --- |
+| `s-0.25vcpu-512mb` | no | `cpu_quota_pct: 25`, and under the mem floor |
+| `s-0.5vcpu-1gb` | no | `cpu_quota_pct: 50`, and under the mem floor |
+| `s-1vcpu-256mb` | no | under the mem floor |
+| `s-1vcpu-1gb` | no | under the mem floor |
+| `s-1vcpu-2gb` | yes | |
+| `s-2vcpu-2gb` | yes | |
+| `s-2vcpu-4gb` | yes | |
+| `s-4vcpu-4gb` | yes | default |
+| `s-4vcpu-8gb` | yes | |
+| `s-8vcpu-8gb` | yes | |
+| `s-8vcpu-16gb` | yes | |
 
 A shape added to the API tomorrow is offered as a label on the next cache miss,
 with no deploy. A tiny shape added tomorrow is discovered and excluded. The
@@ -87,7 +87,7 @@ admission decision computed under the old floor.
 A single module-level in-flight slot (keyed the same way, on
 `minRunnerMemMib`) coalesces concurrent cold-cache callers onto the one
 `listShapes()` request already in progress. The interesting property isn't
-that a single cold call is cheap — it's that N _concurrent_ cold callers (a
+that a single cold call is cheap — it's that N *concurrent* cold callers (a
 GitHub Actions matrix burst landing on a freshly-woken isolate) also pay for
 exactly one `listShapes()` call, not N. A rejected in-flight fetch clears the
 slot immediately, so the next caller re-attempts rather than inheriting the
@@ -108,7 +108,7 @@ indistinguishable from "this job was never ours", which is exactly the silent
 bound CLAUDE.md forbids.
 
 The logging is split across the two layers that each hold half the story.
-`usableShapes` knows _why_ the catalog is gone but not which job asked, so it
+`usableShapes` knows *why* the catalog is gone but not which job asked, so it
 warns the underlying error, inside its own coalesced fetch attempt, before the
 rejection propagates out — otherwise a DNS failure, a 500, and an auth error
 are indistinguishable after the fact. The caller knows the job but not the
@@ -147,20 +147,20 @@ was never available to name in a warning. `resolveRequestedLabel` /
 - `shapeForLabel(label, config): string` — pure. Bare label → `config.runnerShape`;
   otherwise `s-` + the label's suffix.
 - `type RequestedLabel = { kind: "none" } | { kind: "ambiguous"; labels:
-string[] } | { kind: "one"; label: string }` — which createos label, if any,
+  string[] } | { kind: "one"; label: string }` — which createos label, if any,
   a job's `runs-on` requests.
 - `resolveRequestedLabel(labels, config): RequestedLabel` — pure **and
   silent**, built on `createosLabels`. It never `console.warn`s: it doesn't
   have the job id, and the caller does, so the caller is the one who logs.
 - `isShapedLabel(label, config): boolean` — pure. `label !==
-config.runnerLabel`. A small named predicate so call sites read as "if this
+  config.runnerLabel`. A small named predicate so call sites read as "if this
   needs the catalog" rather than repeating the bare-label comparison inline.
 - `type Catalog = { ok: true; usable: Set<string> } | { ok: false }` — the
   shape catalog, or the fact it couldn't be fetched. `{ok: false}` is distinct
   from an empty `Set` on purpose: an outage and an authoritative empty catalog
   mean different things and must not be conflated.
 - `type ShapeCheck = { ok: true } | { ok: false; reason: "unknown-shape" |
-"catalog-unavailable" }` — the outcome of checking a _shaped_ label against
+  "catalog-unavailable" }` — the outcome of checking a *shaped* label against
   the catalog. Two reasons, not one boolean, because "the shape doesn't exist"
   and "the shapes API is down" are not the same 202 and a caller building a
   log line or a response body needs to say which happened. There is no
@@ -174,7 +174,7 @@ config.runnerLabel`. A small named predicate so call sites read as "if this
   load-bearing invariant of this whole feature. An earlier version enforced
   "shaped label only" as a doc-comment precondition and relied on both call
   sites gating it behind `isShapedLabel` to uphold it; that gate decides
-  whether to _fetch_ the catalog (still needed — no point fetching one for a
+  whether to *fetch* the catalog (still needed — no point fetching one for a
   bare label) but is no longer what keeps the function correct. A caller that
   forgets the gate now gets `{ok: true}` instead of a silently wrong
   `catalog-unavailable`.
@@ -182,12 +182,12 @@ config.runnerLabel`. A small named predicate so call sites read as "if this
   actually calls `usableShapes()` (the network fetch), converting a throw into
   `{ok: false}` instead of propagating it. This is the only impure half of
   label selection, and the only one worth calling lazily: a caller checks
-  whether any candidate job could possibly need a catalog _before_ calling
+  whether any candidate job could possibly need a catalog *before* calling
   this, so a tick with no shaped jobs, or a caller that only ever sees bare
   labels, never pays for (or is blocked by) a fetch nothing needs.
 
 An earlier version of this split had one function, `selectLabel(labels,
-config, catalog): LabelSelection`, that took the raw labels _and_ a
+config, catalog): LabelSelection`, that took the raw labels *and* a
 precomputed `Catalog` and did both the none/ambiguous/bare check and the
 shape lookup in one call. That forced every caller to precompute
 `createosLabels` up front (to decide whether a catalog was even worth
@@ -228,14 +228,14 @@ instead of `policy-skip`: a lie about the reason, and one that never reached
 the policy check that would have permanently rejected the job anyway.
 
 The fix reorders both call sites to: resolve the requested label (pure,
-disposes of `none`/`ambiguous`) → check policy → _only if_ policy admits the
+disposes of `none`/`ambiguous`) → check policy → *only if* policy admits the
 job **and** its label is shaped, fetch the catalog and `validateShape`. A job
 the policy would reject never costs a catalog fetch, and always reports
 `policy-skip`, catalog outage or not.
 
 This does not change how many times `shouldProvision` is called — under
 `fork-gated` it makes one GitHub API call per candidate either way; moving it
-earlier only changes _when_ that call happens relative to the catalog fetch,
+earlier only changes *when* that call happens relative to the catalog fetch,
 not how many times it happens. In the reconciler specifically, this means
 `needsCatalog` (whether to fetch a `Catalog` at all this tick) is computed
 over the **policy-eligible** candidates, not every candidate that merely
@@ -250,7 +250,7 @@ would mean a shapes outage, or a policy that has since changed, leaks every
 shaped VM until the reaper. On `queued`, `handleWebhook` calls `fetchCatalog`
 only after `shouldProvision` admits the job, and only when the job's label
 isn't bare. The cron reconciler fetches one `Catalog` for the whole tick, and
-only when at least one _policy-eligible_ candidate names a shaped (non-bare)
+only when at least one *policy-eligible* candidate names a shaped (non-bare)
 label — `GitHubClient.listQueuedJobs()` is dumb transport (no arguments, no
 `pickLabel`, returns every queued job's raw labels), so the reconciler can
 run both the label and policy checks before deciding whether to fetch
@@ -280,14 +280,14 @@ So:
 
 ## Call sites
 
-| Site                                          | Change                                                                                                                                                                                                                                                                                                                    |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `handler.ts` (`handleWebhook`, all actions)   | `matchesLabel` → `resolveRequestedLabel(job.labels, config)`; the resolved label is carried into `PendingJob`                                                                                                                                                                                                             |
-| `handler.ts` (`handleWebhook`, `queued` only) | `shouldProvision` runs first; only if it admits the job and `isShapedLabel(label, config)` does `fetchCatalog` (lazy) feed `validateShape(label, config, catalog)`, which decides shape admission                                                                                                                         |
-| `handler.ts` (`runReconciler`)                | `resolveRequestedLabel` computed once per candidate job; `shouldProvision` filters to policy-eligible candidates; `fetchCatalog` fetched at most once per tick, and only if some _eligible_ candidate names a shaped label; `validateShape` decides each eligible shaped candidate's admission against that one `Catalog` |
-| `github/client.ts` (`generateJitConfig`)      | takes `(runnerName, label)` — registers the label the job actually requested, not `config.runnerLabel`                                                                                                                                                                                                                    |
-| `github/client.ts` (`listQueuedJobs`)         | takes no arguments and applies no shape policy — dumb transport that returns every queued job's raw `labels`; admission is entirely the caller's job                                                                                                                                                                      |
-| `sandbox.ts` (`createRunnerSandbox`)          | `createSandbox({ shape })` takes `shapeForLabel(job.label, config)`, not `config.runnerShape`                                                                                                                                                                                                                             |
+| Site | Change |
+| --- | --- |
+| `handler.ts` (`handleWebhook`, all actions) | `matchesLabel` → `resolveRequestedLabel(job.labels, config)`; the resolved label is carried into `PendingJob` |
+| `handler.ts` (`handleWebhook`, `queued` only) | `shouldProvision` runs first; only if it admits the job and `isShapedLabel(label, config)` does `fetchCatalog` (lazy) feed `validateShape(label, config, catalog)`, which decides shape admission |
+| `handler.ts` (`runReconciler`) | `resolveRequestedLabel` computed once per candidate job; `shouldProvision` filters to policy-eligible candidates; `fetchCatalog` fetched at most once per tick, and only if some *eligible* candidate names a shaped label; `validateShape` decides each eligible shaped candidate's admission against that one `Catalog` |
+| `github/client.ts` (`generateJitConfig`) | takes `(runnerName, label)` — registers the label the job actually requested, not `config.runnerLabel` |
+| `github/client.ts` (`listQueuedJobs`) | takes no arguments and applies no shape policy — dumb transport that returns every queued job's raw `labels`; admission is entirely the caller's job |
+| `sandbox.ts` (`createRunnerSandbox`) | `createSandbox({ shape })` takes `shapeForLabel(job.label, config)`, not `config.runnerShape` |
 
 `RUNNER_DISK_MIB` stays global at `10240` (the plan's disk cap) across every
 shape.
@@ -324,7 +324,7 @@ Plain `vitest` (`test/unit/shapes.test.ts`):
 - a coalesced failing fetch warns exactly once, not once per coalesced
   caller — `listShapes` rejects on a timer so 10 concurrent `usableShapes`
   calls genuinely overlap onto the one in-flight promise; asserts exactly one
-  `listShapes()` call _and_ exactly one warning containing the cause
+  `listShapes()` call *and* exactly one warning containing the cause
 - `resolveRequestedLabel` — `none` for a job naming no createos label,
   `ambiguous` for two createos labels, `one` for the bare label and for a
   shaped label, ignoring incidental labels (`self-hosted`, `linux`); never
@@ -365,7 +365,7 @@ Plain `vitest` (`test/unit/shapes.test.ts`):
   `repo-allowlist`, fetches the catalog exactly once and boots only the
   eligible job's sandbox (`test/integration/reconcile.test.ts`) — the mixed
   case the two single-outcome ticks above don't cover together
-- a job that is both policy-blocked _and_ names an unknown shape returns
+- a job that is both policy-blocked *and* names an unknown shape returns
   `policy-skip`, not `unknown-shape`, and never calls `listShapes` — the
   permanent rejection wins and the shape is never even checked
 

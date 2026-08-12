@@ -1,8 +1,6 @@
 import {
-  CreateosSandboxApiError,
   CreateosSandboxClient,
   CreateosSandboxConnectionError,
-  CreateosSandboxRateLimitError,
   CreateosSandboxServerError,
   CreateosSandboxTimeoutError,
 } from "@nodeops-createos/sandbox";
@@ -69,9 +67,6 @@ export interface SandboxDeps {
   makeClient?: (config: Config, region?: Region) => CreateosClient;
   /** Injection seam for tests. 2-char token discriminating provision attempts. */
   attemptId?: () => string;
-  /** Injection seam for tests. Defaults to a real timer — lets a test assert the
-   * post-failover retry without spending its delay in wall-clock. */
-  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -87,34 +82,6 @@ export function isFailoverEligible(err: unknown): boolean {
     err instanceof CreateosSandboxServerError ||
     err instanceof CreateosSandboxConnectionError ||
     err instanceof CreateosSandboxTimeoutError
-  );
-}
-
-/**
- * Whether a provision failure is guaranteed to fail the same way if the job is
- * simply tried again later — which is what decides whether the Coordinator
- * re-queues the row (#requeueForRetry) or drops it.
- *
- * The same reasoning as isFailoverEligible, extended along the time axis instead
- * of the region axis: a CreateOS 4xx is a defect in the request or in account
- * state that no amount of waiting fixes — an unknown shape (400/409/422), a
- * rejected key (401), a quota or ACL refusal (403), a resource that does not
- * exist (404), an account out of credit (402, which the SDK documents as
- * returning the same error until topped up). Re-queueing those buys nothing and
- * costs a provision-failure alert per attempt.
- *
- * 429 is the one 4xx that IS worth another go — it says "later", literally — and
- * everything that is not a CreateOS API error at all (a GitHub 5xx while minting
- * the JIT config, an unreachable DO, a `shapeForLabel` throw) is treated as
- * retryable: the transient members of that set are exactly the failures a retry
- * exists for, and the deterministic ones are bounded by MAX_PROVISION_ATTEMPTS.
- */
-export function isPermanentProvisionFailure(err: unknown): boolean {
-  return (
-    err instanceof CreateosSandboxApiError &&
-    err.statusCode >= 400 &&
-    err.statusCode < 500 &&
-    !(err instanceof CreateosSandboxRateLimitError)
   );
 }
 

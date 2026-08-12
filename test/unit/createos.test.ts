@@ -1,16 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
-  CreateosSandboxAuthError,
   CreateosSandboxConnectionError,
   CreateosSandboxNotFoundError,
-  CreateosSandboxPaymentRequiredError,
-  CreateosSandboxPermissionError,
-  CreateosSandboxRateLimitError,
   CreateosSandboxServerError,
   CreateosSandboxTimeoutError,
   CreateosSandboxValidationError,
 } from "@nodeops-createos/sandbox";
-import { isFailoverEligible, isPermanentProvisionFailure, regionByName } from "../../src/createos";
+import { isFailoverEligible, regionByName } from "../../src/createos";
 import type { Config } from "../../src/types";
 
 const config = {
@@ -53,54 +49,6 @@ describe("isFailoverEligible", () => {
     ["a thrown non-error", "boom"],
   ])("not eligible: %s", (_label, err) => {
     expect(isFailoverEligible(err)).toBe(false);
-  });
-});
-
-describe("isPermanentProvisionFailure", () => {
-  // Decides whether a VM-less provision failure is re-queued for another attempt
-  // or dropped. Inverting this is quiet in both directions: too permissive and a
-  // doomed job alerts once per attempt, too strict and a transient 5xx costs the
-  // job a full recovery-scan rotation.
-  it.each([
-    [
-      "unknown shape (422 — same request, same rejection)",
-      new CreateosSandboxValidationError("unknown shape", new Response(null, { status: 422 })),
-    ],
-    [
-      "rejected key (401)",
-      new CreateosSandboxAuthError("invalid api key", new Response(null, { status: 401 })),
-    ],
-    [
-      "quota/ACL refusal (403)",
-      new CreateosSandboxPermissionError("forbidden", new Response(null, { status: 403 })),
-    ],
-    [
-      "out of credit (402 — same error until topped up)",
-      new CreateosSandboxPaymentRequiredError("no credit", new Response(null, { status: 402 })),
-    ],
-    [
-      "missing resource (404)",
-      new CreateosSandboxNotFoundError("gone", new Response(null, { status: 404 })),
-    ],
-  ])("permanent: %s", (_label, err) => {
-    expect(isPermanentProvisionFailure(err)).toBe(true);
-  });
-
-  it.each([
-    [
-      "server error (5xx — the wave that strands jobs)",
-      new CreateosSandboxServerError("internal error", new Response(null, { status: 500 })),
-    ],
-    [
-      "rate limited (429 — the one 4xx that means 'later')",
-      new CreateosSandboxRateLimitError("slow down", new Response(null, { status: 429 })),
-    ],
-    ["connection error", new CreateosSandboxConnectionError("connect ECONNREFUSED")],
-    ["timeout", new CreateosSandboxTimeoutError("deadline")],
-    ["a non-SDK error (GitHub mint failure, DO blip)", new Error("boom")],
-    ["a thrown non-error", "boom"],
-  ])("retryable: %s", (_label, err) => {
-    expect(isPermanentProvisionFailure(err)).toBe(false);
   });
 });
 

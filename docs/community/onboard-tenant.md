@@ -62,7 +62,7 @@ curl -s "$WORKER/admin/installations" -H "Authorization: Bearer $ADMIN_TOKEN" | 
 ```
 
 **Do not reach for `gh api orgs/$ORG/installations`.** That endpoint needs
-org-admin on the _applicant's_ org, which we never have for a community tenant —
+org-admin on the *applicant's* org, which we never have for a community tenant —
 it returns a 404 that reads exactly like "they never installed the App". The
 only other route, `GET /orgs/<org>/installation`, is authenticated with a
 **GitHub App JWT**, and the App private key exists solely as a Worker secret
@@ -178,15 +178,15 @@ Then tell the applicant to switch `runs-on:` (Part A, last step).
 
 ## Operator quick reference
 
-| Action                | Endpoint                             | Notes                                                    |
-| --------------------- | ------------------------------------ | -------------------------------------------------------- |
-| List tenants          | `GET /admin/tenants`                 |                                                          |
-| Get one tenant        | `GET /admin/tenants?id=<install_id>` |                                                          |
-| Create/replace tenant | `POST /admin/tenants`                | full-record upsert; auto-creates runner group on approve |
-| Change status only    | `POST /admin/tenants/status`         | `pending`/`suspended`/`revoked` (NOT `approved`)         |
-| Add repos             | `POST /admin/projects`               | syncs runner group wider                                 |
-| Remove repo           | `DELETE /admin/projects`             | syncs runner group narrower                              |
-| Claim pre-tenant rows | `POST /admin/backfill`               | one-time at cutover                                      |
+| Action | Endpoint | Notes |
+|---|---|---|
+| List tenants | `GET /admin/tenants` | |
+| Get one tenant | `GET /admin/tenants?id=<install_id>` | |
+| Create/replace tenant | `POST /admin/tenants` | full-record upsert; auto-creates runner group on approve |
+| Change status only | `POST /admin/tenants/status` | `pending`/`suspended`/`revoked` (NOT `approved`) |
+| Add repos | `POST /admin/projects` | syncs runner group wider |
+| Remove repo | `DELETE /admin/projects` | syncs runner group narrower |
+| Claim pre-tenant rows | `POST /admin/backfill` | one-time at cutover |
 
 Suspend a tenant (stop new admissions, keep history):
 

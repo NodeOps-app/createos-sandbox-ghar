@@ -31,9 +31,7 @@ describe("shouldProvision", () => {
   it("repo-allowlist: only listed repos", async () => {
     const c = cfg({ provisionPolicy: "repo-allowlist", repoAllowlist: ["nodeops-app/api"] });
     expect(await shouldProvision(c, job, vi.fn())).toBe(true);
-    expect(await shouldProvision(c, { ...job, repoFullName: "nodeops-app/other" }, vi.fn())).toBe(
-      false,
-    );
+    expect(await shouldProvision(c, { ...job, repoFullName: "nodeops-app/other" }, vi.fn())).toBe(false);
   });
   it("fork-gated: rejects forks, allows internal", async () => {
     const c = cfg({ provisionPolicy: "fork-gated" });

@@ -48,13 +48,11 @@ type Row = {
   tenant_id: number | null;
   weight: number | null;
   region: string | null;
-  attempts: number;
 };
 
 /**
  * Row lifecycle (`state`):
- *   pending      — at cap, waiting for a slot, OR a provision failure that left
- *                  no VM, parked here for retry (#requeueForRetry). No VM.
+ *   pending      — at cap, waiting for a slot. No VM.
  *   provisioning — committed to boot; VM being created + runner launched.
  *   running      — VM up, runner launched.
  *   destroying   — job done (or reaped); VM teardown pending confirmation.
@@ -88,26 +86,6 @@ const ACTIVE_STATES = "('provisioning','running')";
  */
 const ROW_AGE = "COALESCE(provision_started_at, created_at)";
 
-/**
- * Total createSandbox attempts one job gets before its row is dropped — the
- * bound on #requeueForRetry.
- *
- * A provision failure that left no VM used to DELETE the row, which made the
- * reconciler's O(installed-repos) recovery scan the only way back: on a large
- * installation that scan covers a fraction of the org per tick, so a job
- * stranded by one transient CreateOS 5xx waited ~20 minutes (measured
- * 2026-08-10: three jobs stranded 19m43s). Re-queueing the row instead retries
- * it on the next tick at zero GitHub cost.
- *
- * 3 because the failures worth retrying are transient (a 5xx wave, a region
- * blip) and clear inside a tick or two; a failure that is NOT transient — a
- * label whose shape the catalog rejects, a region renamed out of the config —
- * fails identically every time, and retrying it forever would alert on every
- * tick for as long as the pending-expiry window allows. Past this the row is
- * dropped exactly as before and the slow recovery scan is the last resort.
- */
-export const MAX_PROVISION_ATTEMPTS = 3;
-
 export class Coordinator extends DurableObject<Env> {
   #sql: SqlStorage;
 
@@ -126,8 +104,7 @@ export class Coordinator extends DurableObject<Env> {
         created_at           INTEGER NOT NULL,
         provision_started_at INTEGER,
         booted_at            INTEGER,
-        job_started_at       INTEGER,
-        attempts             INTEGER NOT NULL DEFAULT 0
+        job_started_at       INTEGER
       );
       CREATE TABLE IF NOT EXISTS deliveries (
         delivery_id TEXT PRIMARY KEY,
@@ -204,13 +181,6 @@ export class Coordinator extends DurableObject<Env> {
     // on the primary control plane, which is exactly what teardown resolves a
     // NULL region to — old and new code agree.
     if (!has("region")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN region TEXT`);
-    // A row from before provision retries has made 0 recorded attempts, which is
-    // what the DEFAULT backfills it to — so old code (which never reads the
-    // column) and new code (which reads 0 and allows the full retry budget)
-    // agree, and a rollback leaves nothing stranded.
-    if (!has("attempts")) {
-      this.#sql.exec(`ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`);
-    }
   }
 
   /**
@@ -312,32 +282,6 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   /**
-   * Every row's job id paired with the VM id it owns, or null if it does not own
-   * one yet — the orphaned-SANDBOX sweep's oracle, one step sharper than
-   * liveJobIds.
-   *
-   * The VM name carries only a job id (`gha-ci-<jobId>`, stable across attempts
-   * so it stays inside the 22-char createos cap), so several VMs can share one
-   * name: a provision that 5xx'd AFTER the control plane created the VM leaks it,
-   * and the job's retry creates another under the same name. Keyed on job id
-   * alone, both read as "this job is live" and the leaked one is shielded from
-   * reclamation for the whole life of the job — burning capacity precisely during
-   * the burst that produced it. Pairing the id with the row lets the sweep see
-   * that the live row owns a DIFFERENT VM, and reclaim the superseded one.
-   *
-   * A null `sandbox_id` must be read as "spare it": that is a row between
-   * createSandbox returning and recordSandboxCreated persisting the id, whose VM
-   * is very much alive. Only a row that names some OTHER VM proves this one is
-   * garbage.
-   */
-  async liveVmOwnership(): Promise<{ jobId: number; sandboxId: string | null }[]> {
-    return this.#sql
-      .exec<{ job_id: number; sandbox_id: string | null }>(`SELECT job_id, sandbox_id FROM jobs`)
-      .toArray()
-      .map((r) => ({ jobId: r.job_id, sandboxId: r.sandbox_id }));
-  }
-
-  /**
    * Rows genuinely STUCK getting a VM for longer than thresholdMs: `pending`
    * (queued behind the concurrency cap) or `provisioning` (committed to boot,
    * but createSandbox/launch has not finished). Those are the two states where
@@ -367,9 +311,6 @@ export class Coordinator extends DurableObject<Env> {
         repoFullName: r.repo,
         state: r.state,
         ageMs: nowMs - r.created_at,
-        region: r.region,
-        attempts: r.attempts,
-        label: r.label,
       }));
   }
 
@@ -579,36 +520,18 @@ export class Coordinator extends DurableObject<Env> {
    * confirms, and does not count against the cap, so the slot still frees at
    * once. Leaves an existing `destroying` row alone — a raced `completed`
    * already claimed that teardown.
-   *
-   * If NO VM was created, `retryable` decides between re-queueing the row for
-   * another attempt (#requeueForRetry) and dropping it. It defaults to true so a
-   * rolled-back Worker calling this with three arguments keeps the retry — the
-   * safe direction, since a dropped row can only be recovered by the slow
-   * recovery scan. The Worker passes `!isPermanentProvisionFailure(err)`.
    */
   async markProvisionFailed(
     jobId: number,
     sandboxId?: string,
     region?: string,
-    retryable = true,
   ): Promise<ProvisionFailedResult> {
     const row = this.#rowByJob(jobId);
     let toDestroy: TeardownTask | null = null;
     const vm = sandboxId ?? row?.sandbox_id ?? null;
-    let retry: Row | null = null;
 
     if (row && row.state !== "destroying") {
-      // No VM means nothing to tear down and nothing lost — the job is still
-      // `queued` at GitHub, so it can simply be re-queued (see #requeueForRetry)
-      // instead of dropped. A VM-bearing failure still parks in `destroying`:
-      // that row is the only record the VM exists.
-      if (vm) toDestroy = this.#retireRow(row, vm, region ?? row.region);
-      else if (retryable) retry = row;
-      // A failure that will repeat verbatim (isPermanentProvisionFailure: a
-      // CreateOS 4xx — unknown shape, rejected key, no credit) is dropped exactly
-      // as every VM-less failure used to be: re-queueing it buys nothing and
-      // costs an alert per attempt.
-      else this.#retireRow(row, null, null);
+      toDestroy = this.#retireRow(row, vm, region ?? row.region);
     } else if (!row && vm) {
       // A raced `completed` already dropped the row, but we hold a live VM. There
       // is nothing left to persist the teardown against, so hand it back to be
@@ -617,56 +540,7 @@ export class Coordinator extends DurableObject<Env> {
       // read rather than guessing at a cost attribution that no longer exists.
       toDestroy = { jobId, sandboxId: vm, tenantId: null, region: region ?? null };
     }
-    // Park the row FIRST — it is what frees the slot (a `provisioning` row still
-    // counts against the cap) — then promote someone else into that slot while
-    // EXCLUDING the row just parked. Without the exclusion the failed job, being
-    // the oldest `pending` row by created_at, immediately re-promotes itself and
-    // retries the same createSandbox inside this invocation, milliseconds after
-    // the control plane refused it and ahead of jobs that never got a turn.
-    if (retry) this.#requeueForRetry(retry);
-    return { toDestroy, nextPending: this.#dequeuePending(retry?.job_id) };
-  }
-
-  /**
-   * Parks a provision failure that left NO VM back on the pending queue, so the
-   * next cron tick re-provisions it: `sweep` ends in #drainPending on EVERY tick,
-   * so a pending row is picked up within one cron period at zero GitHub cost.
-   *
-   * Dropping the row instead (what this used to do) left the reconciler's
-   * O(installed-repos) recovery scan as the only way back — and that scan is
-   * budget-bound to a fraction of a large installation per tick, so one transient
-   * CreateOS 5xx cost a job ~20 minutes of sitting `queued` while GitHub, the
-   * runner group and the tenant's own quota all looked healthy.
-   *
-   * `provision_started_at` is reset to NULL because ROW_AGE must measure from the
-   * moment a retry commits to boot, not from the attempt that failed: leave the
-   * failed attempt's clock in place and the re-promoted row is already past the
-   * reconciler's grace, which reaps it mid-boot (see ROW_AGE).
-   *
-   * Bounded by MAX_PROVISION_ATTEMPTS — see there for why a failure that is not
-   * transient must stop re-queueing rather than retry until pending-expiry.
-   */
-  #requeueForRetry(row: Row): void {
-    const attempts = row.attempts + 1;
-    if (attempts >= MAX_PROVISION_ATTEMPTS) {
-      console.warn(
-        `provision retry budget exhausted job=${row.job_id} repo=${row.repo} ` +
-          `attempts=${attempts}/${MAX_PROVISION_ATTEMPTS}; dropping the row — only the ` +
-          `reconciler recovery scan can re-drive this job now`,
-      );
-      this.#sql.exec(`DELETE FROM jobs WHERE job_id = ?`, row.job_id);
-      return;
-    }
-    this.#sql.exec(
-      `UPDATE jobs SET state = 'pending', provision_started_at = NULL, attempts = ?
-       WHERE job_id = ?`,
-      attempts,
-      row.job_id,
-    );
-    console.warn(
-      `provision failed with no VM job=${row.job_id} repo=${row.repo}; re-queued for ` +
-        `retry attempt ${attempts + 1}/${MAX_PROVISION_ATTEMPTS}`,
-    );
+    return { toDestroy, nextPending: this.#dequeuePending() };
   }
 
   /**
@@ -755,19 +629,14 @@ export class Coordinator extends DurableObject<Env> {
    * its backlog straight into provisioning, bypassing admitTenantJob entirely.
    * NULL tenant_id (single mode) has no per-tenant cap or status and stays
    * unconditionally eligible, so single mode is unchanged.
-   *
-   * `excludeJobId` skips one row — markProvisionFailed's retry parking, whose
-   * row is `pending` and oldest by the time this runs, so it would otherwise win
-   * the very slot its own failure just freed and retry immediately.
    */
-  #dequeuePending(excludeJobId?: number): PendingJob | null {
+  #dequeuePending(): PendingJob | null {
     const cap = this.#maxConcurrent();
     if (cap > 0 && this.#active() >= cap) return null;
     const rows = this.#sql
       .exec<Row>(
         `SELECT j.* FROM jobs j
          WHERE j.state = 'pending'
-           AND j.job_id IS NOT ?
            AND (
              j.tenant_id IS NULL
              OR (
@@ -778,8 +647,6 @@ export class Coordinator extends DurableObject<Env> {
              )
            )
          ORDER BY j.created_at ASC LIMIT 1`,
-        // `IS NOT NULL` when nothing is excluded, which every row satisfies.
-        excludeJobId ?? null,
       )
       .toArray();
     const row = rows[0];

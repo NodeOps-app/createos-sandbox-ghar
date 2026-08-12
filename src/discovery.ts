@@ -53,14 +53,6 @@ export interface DiscoveryResult {
 }
 
 /**
- * Repos scanned concurrently inside one batch. GitHub allows far more, but this
- * is a courtesy read against a shared installation rate limit, not a race — 8 is
- * enough to turn a ~110s serial scan into ~15s, which is the only property that
- * mattered (the cron period is 300s).
- */
-const SCAN_CONCURRENCY = 8;
-
-/**
  * Rotates `repos` so iteration begins at the entry *after* `startAfter`,
  * wrapping to the front. An unknown/removed cursor (or `null`) starts at index
  * 0. This is what turns a budget-bounded partial scan into round-robin eventual
@@ -108,36 +100,18 @@ export async function discoverQueuedJobs(
   let lastScanned: string | null = null;
   let budgetBound = false;
 
-  const scanRepo = async (repo: string): Promise<QueuedJob[]> => {
-    const found: QueuedJob[] = [];
-    for (const runId of await client.activeRunIds(repo)) {
-      found.push(...(await client.queuedJobs(repo, runId)));
-    }
-    return found;
-  };
-
-  // Repos are scanned in batches of SCAN_CONCURRENCY, batches sequentially. The
-  // reads are independent and latency-bound (~1.1s per repo measured), so serial
-  // scanning made the scan's WALL TIME the real limit, not its subrequest
-  // budget: 98 repos took 104-121s of a 300s cron period, which is why raising
-  // the budget alone would have pushed ticks into overlapping each other.
-  //
-  // Batch-at-a-time rather than a free-running pool, so the cursor keeps its
-  // exact meaning: `lastScanned` is the last repo of the last COMPLETED batch,
-  // in the ordered list — never whichever repo happened to finish last. The
-  // budget is still checked at a batch boundary, so a tick can overshoot by at
-  // most one batch's worth of reads (bounded, and logged by the caller's
-  // budgetBound warning).
-  for (let i = 0; i < ordered.length; i += SCAN_CONCURRENCY) {
+  for (const repo of ordered) {
+    // Budget is spent by the repo-list fetch and prior repos; check before
+    // committing to another whole repo so a repo's jobs are never half-read.
     if (spent() >= opts.budget) {
       budgetBound = true;
       break;
     }
-    const batch = ordered.slice(i, i + SCAN_CONCURRENCY);
-    const results = await Promise.all(batch.map(scanRepo));
-    for (const found of results) jobs.push(...found);
-    covered += batch.length;
-    lastScanned = batch[batch.length - 1]!;
+    for (const runId of await client.activeRunIds(repo)) {
+      jobs.push(...(await client.queuedJobs(repo, runId)));
+    }
+    covered++;
+    lastScanned = repo;
   }
 
   return {

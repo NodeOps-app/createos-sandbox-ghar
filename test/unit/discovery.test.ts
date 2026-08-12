@@ -67,43 +67,33 @@ describe("discoverQueuedJobs", () => {
     expect(jobs.map((j) => j.repoFullName)).toEqual(["a", "b", "c"]);
   });
 
-  // Repos are scanned in concurrent batches, and the budget is checked at BATCH
-  // boundaries — so a tick can overshoot its budget by at most one batch's reads,
-  // and coverage/cursor advance a whole batch at a time. 20 repos here so several
-  // batches exist to bind between.
-  const twenty = Array.from({ length: 20 }, (_, i) => `r${String(i).padStart(2, "0")}`);
-
-  it("stops at the first batch boundary past the budget, deferring the rest", async () => {
-    // list costs 1, each repo costs 3 (2 run reads + 1 job read). The first batch
-    // is committed to at spent=1 (< 5) and costs 8*3=24; the next boundary's
-    // pre-check (25 >= 5) binds.
-    const client = new FakeClient(twenty);
+  it("stops at the budget and defers the remaining repos", async () => {
+    // list costs 1, each repo costs 3 (2 run reads + 1 job read). Spent after
+    // a=4, after b=7; the 3rd repo's pre-check (7 >= 5) binds. So 2 covered.
+    const client = new FakeClient(["a", "b", "c", "d"]);
     const { coverage } = await discoverQueuedJobs(client, { ...base, budget: 5, cursor: null });
 
     expect(coverage.budgetBound).toBe(true);
-    expect(coverage.covered).toBe(8);
-    expect(coverage.deferred).toBe(12);
-    // The cursor is the LAST repo of the completed batch in list order — never
-    // whichever concurrent read happened to settle last.
-    expect(coverage.nextCursor).toBe("r07");
-    expect(new Set(client.visited)).toEqual(new Set(twenty.slice(0, 8)));
-    // Overshoot is bounded by one batch, not unbounded.
-    expect(client.subrequests).toBeLessThanOrEqual(5 + 8 * 3);
+    expect(coverage.covered).toBe(2);
+    expect(coverage.deferred).toBe(2);
+    expect(coverage.nextCursor).toBe("b");
+    expect(client.visited).toEqual(["a", "b"]);
   });
 
   it("resumes after the cursor and reaches every repo across ticks", async () => {
+    const repos = ["a", "b", "c"];
     const seen = new Set<string>();
 
     let cursor: string | null = null;
-    for (let tick = 0; tick < 3; tick++) {
-      const client = new FakeClient(twenty);
+    for (let tick = 0; tick < 2; tick++) {
+      const client = new FakeClient(repos);
       const { coverage } = await discoverQueuedJobs(client, { ...base, budget: 5, cursor });
       for (const r of client.visited) seen.add(r);
       cursor = coverage.nextCursor;
     }
 
-    // Three budget-bound ticks (8 + 8 + 4 repos) cover the whole installation.
-    expect(seen).toEqual(new Set(twenty));
+    // Two budget-bound ticks (2 repos each) cover the whole installation.
+    expect(seen).toEqual(new Set(["a", "b", "c"]));
   });
 
   it("under repo-allowlist scans only admissible repos", async () => {

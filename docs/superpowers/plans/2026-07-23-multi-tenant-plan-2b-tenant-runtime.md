@@ -46,12 +46,10 @@ Identical to Plan 2a — restated where they bind hardest here:
 ### Task 6: Multi-mode webhook admission + provisioning + check runs
 
 **Files:**
-
 - Modify: `src/shapes.ts` (`shapeWithinCeiling`), `src/handler.ts` (queued path + `provisionAndRecord` + refusal notices), `src/sandbox.ts` (`createRunnerSandbox` bandwidth + tenant client)
 - Test: `test/unit/shapes.test.ts` (extend), `test/integration/tenancy-webhook.test.ts` (new)
 
 **Interfaces:**
-
 - Consumes: everything in the Builds-on block.
 - Produces:
   - `shapeWithinCeiling(shape: string, ceiling: string): boolean` in `shapes.ts` — pure; **unparseable input returns false** (fail closed at a security gate) and warns.
@@ -181,14 +179,14 @@ export async function admitAndDrive(
 `WorkflowJob` gains `deliveryId?: string` (set by `handleWebhook` from the `X-GitHub-Delivery` header before calling; the reconciler leaves it unset so recovered jobs mint a UUID — matching today's reconciler dedup behavior). `handleWebhook`'s queued branch becomes:
 
 ```typescript
-if (job.action === "queued") {
-  if (config.tenancyMode === "multi") {
-    job.deliveryId = delivery;
-    const word = await admitAndDrive(env, config, job, ctx, deps, "");
-    return new Response(word, { status: 202 });
+  if (job.action === "queued") {
+    if (config.tenancyMode === "multi") {
+      job.deliveryId = delivery;
+      const word = await admitAndDrive(env, config, job, ctx, deps, "");
+      return new Response(word, { status: 202 });
+    }
+    // ...existing single-mode block, untouched...
   }
-  // ...existing single-mode block, untouched...
-}
 ```
 
 Helpers at module level in `handler.ts`:
@@ -257,17 +255,17 @@ async function notifyRefusal(
 - [ ] **Step 3: Tenant-aware provisioning** — `provisionAndRecord` builds its client from the job's tenant:
 
 ```typescript
-const github = new GitHubClient(
-  config,
-  undefined,
-  job.tenant
-    ? {
-        orgLogin: job.tenant.orgLogin,
-        installationId: job.tenant.installationId,
-        runnerGroupId: job.tenant.runnerGroupId,
-      }
-    : undefined,
-);
+  const github = new GitHubClient(
+    config,
+    undefined,
+    job.tenant
+      ? {
+          orgLogin: job.tenant.orgLogin,
+          installationId: job.tenant.installationId,
+          runnerGroupId: job.tenant.runnerGroupId,
+        }
+      : undefined,
+  );
 ```
 
 In `createRunnerSandbox`, add to the `createSandbox` call:
@@ -303,7 +301,6 @@ git commit -m "feat: multi-tenant webhook admission and provisioning"
 ### Task 7: Per-tenant job TTL in the sweep
 
 **Files:**
-
 - Modify: `src/coordinator.ts` (`sweep`)
 - Test: `test/integration/tenancy.test.ts` (extend; reuse its `approved()`/`job()`/`ctx()` helpers)
 
@@ -353,41 +350,39 @@ git commit -m "feat: per-tenant job TTL in reaper sweep"
 ### Task 8: Admin approval orchestration — runner group fail-closed
 
 **Files:**
-
 - Modify: `src/admin.ts` (+ thread an optional `fetchImpl` param: `handleAdmin(req, env, fetchImpl?)` → `new GitHubClient(config, fetchImpl, …)`; production callers omit it — test seam only)
 - Test: `test/integration/admin.test.ts` (extend)
 
 **Interfaces:**
-
 - Consumes: `createRunnerGroup`, `setRunnerGroupRepos` (Task 5); the shipped approval-stamp logic in POST `/admin/tenants` (kept intact — `approved_at/by` still stamp only on transition into approved).
 - Produces: behavior only — no new routes.
 
 - [ ] **Step 1: Approval creates the group (D12, fail-closed)** — in POST `/admin/tenants`, after computing `enteringApproved` and before `adminUpsertTenant`:
 
 ```typescript
-let runnerGroupId = b.runner_group_id;
-if (enteringApproved && !b.allow_all_repos) {
-  // Gate 3 is GitHub-side: approval REQUIRES the scoped runner group.
-  // Fail closed — a tenant whose runners would land in the org Default
-  // group (visibility: all repos) must never reach `approved` (D12).
-  const projects = existing ? existing.projects : [];
-  if (projects.length === 0) {
-    return json({ error: "cannot approve: no approved projects; add projects first" }, 400);
-  }
-  try {
-    const gh = new GitHubClient(config, fetchImpl, {
-      orgLogin: b.org_login,
-      installationId: b.installation_id,
-    });
-    runnerGroupId = await gh.createRunnerGroup(
-      "createos",
-      projects.map((p) => p.repoId),
-    );
-  } catch (err) {
-    console.error(`runner group creation failed org=${b.org_login}: ${String(err)}`);
-    return json({ error: `runner group creation failed: ${String(err)}` }, 502);
-  }
-}
+      let runnerGroupId = b.runner_group_id;
+      if (enteringApproved && !b.allow_all_repos) {
+        // Gate 3 is GitHub-side: approval REQUIRES the scoped runner group.
+        // Fail closed — a tenant whose runners would land in the org Default
+        // group (visibility: all repos) must never reach `approved` (D12).
+        const projects = existing ? existing.projects : [];
+        if (projects.length === 0) {
+          return json({ error: "cannot approve: no approved projects; add projects first" }, 400);
+        }
+        try {
+          const gh = new GitHubClient(config, fetchImpl, {
+            orgLogin: b.org_login,
+            installationId: b.installation_id,
+          });
+          runnerGroupId = await gh.createRunnerGroup(
+            "createos",
+            projects.map((p) => p.repoId),
+          );
+        } catch (err) {
+          console.error(`runner group creation failed org=${b.org_login}: ${String(err)}`);
+          return json({ error: `runner group creation failed: ${String(err)}` }, 502);
+        }
+      }
 ```
 
 and the record uses this `runnerGroupId`. (An `allow_all_repos` tenant — NodeOps — passes its group id explicitly, typically `1`.)
@@ -414,126 +409,122 @@ git commit -m "feat: fail-closed runner group at tenant approval"
 ### Task 9: Multi-tenant reconciler
 
 **Files:**
-
 - Modify: `src/reconcile.ts`
 - Test: `test/integration/reconcile.test.ts` (extend)
 
 **Interfaces:**
-
 - Consumes: `adminListTenants`, tenant-scoped `GitHubClient`s, `admitAndDrive` (Task 6), `recoveryCursor`/`setRecoveryCursor`.
 - Produces: `runReconciler` handles both modes; multi-mode cursor format is `JSON.stringify({ installationId, repo })` stored via the existing cursor methods.
 
 - [ ] **Step 1: Multi branch in `runReconciler`** — `single` keeps today's body verbatim. Multi:
 
 ```typescript
-const tenants = (await co.adminListTenants()).filter((t) => t.status === "approved");
-const scopes = tenants.map((t) => ({
-  tenant: t,
-  gh: new GitHubClient(config, undefined, {
-    orgLogin: t.orgLogin,
-    installationId: t.installationId,
-    runnerGroupId: t.runnerGroupId,
-  }),
-}));
+  const tenants = (await co.adminListTenants()).filter((t) => t.status === "approved");
+  const scopes = tenants.map((t) => ({
+    tenant: t,
+    gh: new GitHubClient(config, undefined, {
+      orgLogin: t.orgLogin,
+      installationId: t.installationId,
+      runnerGroupId: t.runnerGroupId,
+    }),
+  }));
 
-// A. Liveness: the online union across ALL tenant orgs. All-or-nothing —
-//    reapUnregistered tests for absence over the whole row set, so a single
-//    tenant's failed listRunners would read that tenant's live runners as
-//    gone and destroy them mid-job. One failure skips the whole step.
-let runnersByTenant: Map<number, Runner[]> | null = new Map();
-try {
-  for (const s of scopes) {
-    runnersByTenant.set(s.tenant.installationId, await s.gh.listRunners());
+  // A. Liveness: the online union across ALL tenant orgs. All-or-nothing —
+  //    reapUnregistered tests for absence over the whole row set, so a single
+  //    tenant's failed listRunners would read that tenant's live runners as
+  //    gone and destroy them mid-job. One failure skips the whole step.
+  let runnersByTenant: Map<number, Runner[]> | null = new Map();
+  try {
+    for (const s of scopes) {
+      runnersByTenant.set(s.tenant.installationId, await s.gh.listRunners());
+    }
+  } catch (err) {
+    console.error(`reconcile: runner sweep skipped (a tenant list failed): ${String(err)}`);
+    runnersByTenant = null;
   }
-} catch (err) {
-  console.error(`reconcile: runner sweep skipped (a tenant list failed): ${String(err)}`);
-  runnersByTenant = null;
-}
-if (runnersByTenant) {
-  const online = [...runnersByTenant.values()]
-    .flat()
-    .filter((r) => r.status === "online")
-    .map((r) => r.name);
-  const { toDestroy, nextPending } = await co.reapUnregistered(
-    Date.now(),
-    online,
-    config.reconcileGraceMs,
-  );
-  await Promise.allSettled([
-    ...toDestroy.map((t) => destroyAndConfirm(env, config, t, deps)),
-    ...nextPending.map((j) => provisionAndRecord(env, j, deps)),
-  ]);
-}
-
-// B. Recovery: rotate tenants starting AFTER the cursor's tenant, one shared
-//    subrequest budget per tick; within a tenant, discoverQueuedJobs' own
-//    repo cursor rotates as before. Recovered jobs re-enter through
-//    admitAndDrive — the SAME gate ladder as the webhook, by construction.
-const rawCursor = await co.recoveryCursor();
-const parsed = parseTenantCursor(rawCursor);
-const order = rotateFrom(scopes, parsed?.installationId);
-let budget = config.recoverySubrequestBudget;
-let nextCursor: string | null = rawCursor;
-for (const s of order) {
-  if (budget <= 0) break;
-  const start = s.gh.subrequests;
-  const { jobs, coverage } = await discoverQueuedJobs(s.gh, {
-    budget,
-    cursor: s.tenant.installationId === parsed?.installationId ? parsed.repo : null,
-    policy: "org-wide", // project gating happens in admitAndDrive, not here
-    allowlist: [],
-  });
-  budget -= s.gh.subrequests - start;
-  nextCursor = JSON.stringify({
-    installationId: s.tenant.installationId,
-    repo: coverage.nextCursor,
-  });
-  for (const q of jobs) {
-    await admitAndDrive(
-      env,
-      config,
-      {
-        action: "queued",
-        jobId: q.jobId,
-        runId: q.runId,
-        repoFullName: q.repoFullName,
-        labels: q.labels,
-        installationId: s.tenant.installationId,
-      },
-      { waitUntil: (p) => p.catch((e) => console.error(String(e))) },
-      deps,
-      "reconcile: ",
+  if (runnersByTenant) {
+    const online = [...runnersByTenant.values()]
+      .flat()
+      .filter((r) => r.status === "online")
+      .map((r) => r.name);
+    const { toDestroy, nextPending } = await co.reapUnregistered(
+      Date.now(),
+      online,
+      config.reconcileGraceMs,
     );
+    await Promise.allSettled([
+      ...toDestroy.map((t) => destroyAndConfirm(env, config, t, deps)),
+      ...nextPending.map((j) => provisionAndRecord(env, j, deps)),
+    ]);
   }
-  if (coverage.budgetBound) {
-    console.warn(
-      `reconcile: budget bound at tenant ${s.tenant.orgLogin} — ` +
-        `covered ${coverage.covered}, deferred ${coverage.deferred}`,
-    );
-    break;
+
+  // B. Recovery: rotate tenants starting AFTER the cursor's tenant, one shared
+  //    subrequest budget per tick; within a tenant, discoverQueuedJobs' own
+  //    repo cursor rotates as before. Recovered jobs re-enter through
+  //    admitAndDrive — the SAME gate ladder as the webhook, by construction.
+  const rawCursor = await co.recoveryCursor();
+  const parsed = parseTenantCursor(rawCursor);
+  const order = rotateFrom(scopes, parsed?.installationId);
+  let budget = config.recoverySubrequestBudget;
+  let nextCursor: string | null = rawCursor;
+  for (const s of order) {
+    if (budget <= 0) break;
+    const start = s.gh.subrequests;
+    const { jobs, coverage } = await discoverQueuedJobs(s.gh, {
+      budget,
+      cursor: s.tenant.installationId === parsed?.installationId ? parsed.repo : null,
+      policy: "org-wide", // project gating happens in admitAndDrive, not here
+      allowlist: [],
+    });
+    budget -= s.gh.subrequests - start;
+    nextCursor = JSON.stringify({
+      installationId: s.tenant.installationId,
+      repo: coverage.nextCursor,
+    });
+    for (const q of jobs) {
+      await admitAndDrive(
+        env,
+        config,
+        {
+          action: "queued",
+          jobId: q.jobId,
+          runId: q.runId,
+          repoFullName: q.repoFullName,
+          labels: q.labels,
+          installationId: s.tenant.installationId,
+        },
+        { waitUntil: (p) => p.catch((e) => console.error(String(e))) },
+        deps,
+        "reconcile: ",
+      );
+    }
+    if (coverage.budgetBound) {
+      console.warn(
+        `reconcile: budget bound at tenant ${s.tenant.orgLogin} — ` +
+          `covered ${coverage.covered}, deferred ${coverage.deferred}`,
+      );
+      break;
+    }
   }
-}
-if (nextCursor !== rawCursor) await co.setRecoveryCursor(nextCursor);
+  if (nextCursor !== rawCursor) await co.setRecoveryCursor(nextCursor);
 
-// C. Orphaned registrations: per tenant, REUSING step A's runner lists (no
-//    re-fetch — cost). Same ownership proof as single mode: name parses as
-//    ours + offline + not busy + no live Coordinator row. The per-tick
-//    delete cap is shared across tenants.
-//    (Adapt the existing sweepOrphanedRunners body to take (gh, runners);
-//    skip when runnersByTenant is null — same fail-safe as step A.)
+  // C. Orphaned registrations: per tenant, REUSING step A's runner lists (no
+  //    re-fetch — cost). Same ownership proof as single mode: name parses as
+  //    ours + offline + not busy + no live Coordinator row. The per-tick
+  //    delete cap is shared across tenants.
+  //    (Adapt the existing sweepOrphanedRunners body to take (gh, runners);
+  //    skip when runnersByTenant is null — same fail-safe as step A.)
 
-// D. Orphaned sandboxes: UNCHANGED — account-wide by VM name, one DO,
-//    liveJobIds() spans all tenants. Deliberately tenant-blind and
-//    GitHub-independent; never gate it on the tenant loop above.
+  // D. Orphaned sandboxes: UNCHANGED — account-wide by VM name, one DO,
+  //    liveJobIds() spans all tenants. Deliberately tenant-blind and
+  //    GitHub-independent; never gate it on the tenant loop above.
 ```
 
 With two pure helpers in `reconcile.ts`:
 
 ```typescript
 /** Multi-mode cursor: {installationId, repo}. Malformed → null, loudly. */
-function parseTenantCursor(
-  raw: string | null,
-): { installationId: number; repo: string | null } | null {
+function parseTenantCursor(raw: string | null): { installationId: number; repo: string | null } | null {
   if (!raw) return null;
   try {
     const p = JSON.parse(raw) as { installationId?: unknown; repo?: unknown };
@@ -575,7 +566,6 @@ git commit -m "feat: multi-tenant reconciler with shared budget"
 ### Task 10: Docs + deploy checkpoint (flag off)
 
 **Files:**
-
 - Modify: `CONTEXT.md`, `AGENTS.md`, `README.md`, `wrangler.toml`
 
 - [ ] **Step 1: wrangler.toml** — add to `[vars]`, both explicitly at today's behavior:

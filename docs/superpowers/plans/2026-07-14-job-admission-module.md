@@ -22,23 +22,22 @@
 
 ## File Structure
 
-| File                              | Status | Responsibility                                                               |
-| --------------------------------- | ------ | ---------------------------------------------------------------------------- |
-| `src/admission.ts`                | create | Job identification and ordered admission; one lazy Shape catalog per factory |
-| `src/shapes.ts`                   | modify | Shape mapping and cached catalog only; delete admission primitives           |
-| `src/policy.ts`                   | modify | Accept the minimal Job fields policy actually consumes                       |
-| `src/handler.ts`                  | modify | Call admission from webhook and Reconciler paths                             |
-| `test/unit/admission.test.ts`     | create | Admission decision table and catalog-call invariants                         |
-| `test/unit/shapes.test.ts`        | modify | Remove tests moved to the admission interface                                |
-| `test/integration/shapes.test.ts` | modify | Assert webhook/Reconciler parity through external effects                    |
-| `CONTEXT.md`                      | modify | Define Job admission as a domain term                                        |
+| File | Status | Responsibility |
+| --- | --- | --- |
+| `src/admission.ts` | create | Job identification and ordered admission; one lazy Shape catalog per factory |
+| `src/shapes.ts` | modify | Shape mapping and cached catalog only; delete admission primitives |
+| `src/policy.ts` | modify | Accept the minimal Job fields policy actually consumes |
+| `src/handler.ts` | modify | Call admission from webhook and Reconciler paths |
+| `test/unit/admission.test.ts` | create | Admission decision table and catalog-call invariants |
+| `test/unit/shapes.test.ts` | modify | Remove tests moved to the admission interface |
+| `test/integration/shapes.test.ts` | modify | Assert webhook/Reconciler parity through external effects |
+| `CONTEXT.md` | modify | Define Job admission as a domain term |
 
 ---
 
 ### Task 1: Create the functional Job admission module
 
 **Files:**
-
 - Create: `src/admission.ts`
 - Modify: `src/policy.ts:1-25`
 - Modify: `src/shapes.ts:142-227`
@@ -46,7 +45,6 @@
 - Test: `test/unit/shapes.test.ts:210-310`
 
 **Interfaces:**
-
 - Consumes: `Config`, `PendingJob`, `Catalog`, `shapeForLabel`, `shouldProvision`.
 - Produces:
   - `interface JobCandidate { jobId; runId; repoFullName; labels }`
@@ -232,7 +230,9 @@ describe("identifyJob", () => {
     expect(identifyJob(candidate({ labels: ["ubuntu-latest"] }), config)).toEqual({
       kind: "none",
     });
-    expect(identifyJob(candidate({ labels: ["createos", "createos-2vcpu-2gb"] }), config)).toEqual({
+    expect(
+      identifyJob(candidate({ labels: ["createos", "createos-2vcpu-2gb"] }), config),
+    ).toEqual({
       kind: "ambiguous",
       labels: ["createos", "createos-2vcpu-2gb"],
     });
@@ -268,10 +268,9 @@ describe("createJobAdmission", () => {
       loadCatalog,
     });
 
-    await expect(admit(candidate({ labels: ["createos-2vcpu-2gb"] }))).resolves.toEqual({
-      kind: "refused",
-      reason: "policy-skip",
-    });
+    await expect(
+      admit(candidate({ labels: ["createos-2vcpu-2gb"] })),
+    ).resolves.toEqual({ kind: "refused", reason: "policy-skip" });
     expect(loadCatalog).not.toHaveBeenCalled();
   });
 
@@ -296,7 +295,9 @@ describe("createJobAdmission", () => {
       isForkJob: vi.fn().mockResolvedValue(false),
       loadCatalog: vi.fn().mockResolvedValue({ ok: false }),
     });
-    await expect(unavailable(candidate({ labels: ["createos-2vcpu-2gb"] }))).resolves.toEqual({
+    await expect(
+      unavailable(candidate({ labels: ["createos-2vcpu-2gb"] })),
+    ).resolves.toEqual({
       kind: "refused",
       reason: "catalog-unavailable",
       label: "createos-2vcpu-2gb",
@@ -306,7 +307,9 @@ describe("createJobAdmission", () => {
       isForkJob: vi.fn().mockResolvedValue(false),
       loadCatalog: vi.fn().mockResolvedValue(healthy),
     });
-    await expect(unknown(candidate({ labels: ["createos-99vcpu-1tb"] }))).resolves.toEqual({
+    await expect(
+      unknown(candidate({ labels: ["createos-99vcpu-1tb"] })),
+    ).resolves.toEqual({
       kind: "refused",
       reason: "unknown-shape",
       label: "createos-99vcpu-1tb",
@@ -333,13 +336,11 @@ Expected: the focused tests pass and lint exits 0. Do not run or commit the full
 #### Call-site phase: Route webhook and Reconciler intake through admission
 
 **Files:**
-
 - Modify: `src/handler.ts:1-217, 405-504`
 - Test: `test/integration/shapes.test.ts`
 - Test: `test/integration/reconcile.test.ts`
 
 **Interfaces:**
-
 - Consumes: `identifyJob` and `createJobAdmission` from Task 1.
 - Produces: both Job sources use the same admission decision; completed actions use identification only.
 
@@ -359,16 +360,8 @@ Remove imports of `resolveRequestedLabel`, `isShapedLabel`, `validateShape`, `sh
 Place this above `handleWebhook`:
 
 ```ts
-function warnAdmission(
-  scope: string,
-  candidate: { jobId: number; repoFullName: string },
-  decision: AdmissionDecision,
-): void {
-  if (
-    decision.kind === "admitted" ||
-    decision.reason === "no-label" ||
-    decision.reason === "policy-skip"
-  ) {
+function warnAdmission(scope: string, candidate: { jobId: number; repoFullName: string }, decision: AdmissionDecision): void {
+  if (decision.kind === "admitted" || decision.reason === "no-label" || decision.reason === "policy-skip") {
     return;
   }
   if (decision.reason === "ambiguous-label") {
@@ -392,55 +385,55 @@ function warnAdmission(
 Immediately after parsing the webhook Job, branch queued actions through:
 
 ```ts
-const co = coordinator(env);
+  const co = coordinator(env);
 
-if (job.action === "queued") {
-  const github = new GitHubClient(config);
-  const admit = createJobAdmission(config, {
-    isForkJob: (repoFullName, runId) => github.isForkJob(repoFullName, runId),
-    loadCatalog: () => fetchCatalog(config, deps),
-  });
-  const admission = await admit(job);
-  if (admission.kind === "refused") {
-    warnAdmission("", job, admission);
-    return new Response(admission.reason, { status: 202 });
-  }
+  if (job.action === "queued") {
+    const github = new GitHubClient(config);
+    const admit = createJobAdmission(config, {
+      isForkJob: (repoFullName, runId) => github.isForkJob(repoFullName, runId),
+      loadCatalog: () => fetchCatalog(config, deps),
+    });
+    const admission = await admit(job);
+    if (admission.kind === "refused") {
+      warnAdmission("", job, admission);
+      return new Response(admission.reason, { status: 202 });
+    }
 
-  const decision = await co.onQueued(admission.job, delivery);
-  if (decision.action === "provision") {
-    ctx.waitUntil(provisionAndRecord(env, admission.job, deps));
+    const decision = await co.onQueued(admission.job, delivery);
+    if (decision.action === "provision") {
+      ctx.waitUntil(provisionAndRecord(env, admission.job, deps));
+    }
+    return new Response(decision.action, { status: 202 });
   }
-  return new Response(decision.action, { status: 202 });
-}
 ```
 
 Then handle non-queued actions without policy or catalog:
 
 ```ts
-const identified = identifyJob(job, config);
-if (identified.kind === "none") return new Response("no-label", { status: 202 });
-if (identified.kind === "ambiguous") {
-  const refusal: AdmissionDecision = {
-    kind: "refused",
-    reason: "ambiguous-label",
-    labels: identified.labels,
-  };
-  warnAdmission("", job, refusal);
-  return new Response("ambiguous-label", { status: 202 });
-}
+  const identified = identifyJob(job, config);
+  if (identified.kind === "none") return new Response("no-label", { status: 202 });
+  if (identified.kind === "ambiguous") {
+    const refusal: AdmissionDecision = {
+      kind: "refused",
+      reason: "ambiguous-label",
+      labels: identified.labels,
+    };
+    warnAdmission("", job, refusal);
+    return new Response("ambiguous-label", { status: 202 });
+  }
 
-if (job.action === "completed") {
-  const result = await co.onCompleted(job.jobId, job.runnerName);
-  ctx.waitUntil(
-    (async () => {
-      if (result.toDestroy) await destroyAndConfirm(env, config, result.toDestroy, deps);
-      if (result.nextPending) await provisionAndRecord(env, result.nextPending, deps);
-    })(),
-  );
-  return new Response("completed", { status: 202 });
-}
+  if (job.action === "completed") {
+    const result = await co.onCompleted(job.jobId, job.runnerName);
+    ctx.waitUntil(
+      (async () => {
+        if (result.toDestroy) await destroyAndConfirm(env, config, result.toDestroy, deps);
+        if (result.nextPending) await provisionAndRecord(env, result.nextPending, deps);
+      })(),
+    );
+    return new Response("completed", { status: 202 });
+  }
 
-return new Response("noop", { status: 202 });
+  return new Response("noop", { status: 202 });
 ```
 
 - [ ] **Step 4: Replace Reconciler admission loops**
@@ -448,34 +441,34 @@ return new Response("noop", { status: 202 });
 Delete the `candidates`, `eligible`, `needsCatalog`, `catalog`, and Shape-validation loops. Replace them with:
 
 ```ts
-const admit = createJobAdmission(config, {
-  isForkJob: (repoFullName, runId) => github.isForkJob(repoFullName, runId),
-  loadCatalog: () => fetchCatalog(config, deps),
-});
+  const admit = createJobAdmission(config, {
+    isForkJob: (repoFullName, runId) => github.isForkJob(repoFullName, runId),
+    loadCatalog: () => fetchCatalog(config, deps),
+  });
 
-// Admit every candidate BEFORE mutating the Coordinator. An admission can
-// throw (a fork-gated policy check is a GitHub round-trip that rejects on a
-// token or JSON failure); interleaving `admit` with `onQueued` in one loop
-// would let a later throw strand the rows already promoted this tick in
-// `provisioning` with no VM. Two phases keep the pre-refactor atomicity: a
-// mid-admit throw aborts the tick before any row is touched.
-const admitted: PendingJob[] = [];
-for (const candidate of queued) {
-  const admission = await admit(candidate);
-  if (admission.kind === "refused") {
-    warnAdmission("reconcile: ", candidate, admission);
-    continue;
+  // Admit every candidate BEFORE mutating the Coordinator. An admission can
+  // throw (a fork-gated policy check is a GitHub round-trip that rejects on a
+  // token or JSON failure); interleaving `admit` with `onQueued` in one loop
+  // would let a later throw strand the rows already promoted this tick in
+  // `provisioning` with no VM. Two phases keep the pre-refactor atomicity: a
+  // mid-admit throw aborts the tick before any row is touched.
+  const admitted: PendingJob[] = [];
+  for (const candidate of queued) {
+    const admission = await admit(candidate);
+    if (admission.kind === "refused") {
+      warnAdmission("reconcile: ", candidate, admission);
+      continue;
+    }
+    admitted.push(admission.job);
   }
-  admitted.push(admission.job);
-}
 
-const toProvision: PendingJob[] = [];
-for (const job of admitted) {
-  const decision = await co.onQueued(job, `reconcile-${job.jobId}`);
-  if (decision.action === "provision") toProvision.push(job);
-}
+  const toProvision: PendingJob[] = [];
+  for (const job of admitted) {
+    const decision = await co.onQueued(job, `reconcile-${job.jobId}`);
+    if (decision.action === "provision") toProvision.push(job);
+  }
 
-await Promise.allSettled(toProvision.map((pending) => provisionAndRecord(env, pending, deps)));
+  await Promise.allSettled(toProvision.map((pending) => provisionAndRecord(env, pending, deps)));
 ```
 
 This factory is created once per Reconciler tick, so every policy-eligible shaped Job shares one catalog promise. The admit phase runs strictly before the Coordinator-mutation phase so a policy throw can never strand a promoted row (regression test: reconcile "aborts the tick without stranding a row").
@@ -485,44 +478,44 @@ This factory is created once per Reconciler tick, so every policy-eligible shape
 In `test/integration/shapes.test.ts`, add:
 
 ```ts
-it("returns the same refusal for shaped webhook and Reconciler intake", async () => {
-  const listShapes = vi.fn().mockRejectedValue(new Error("catalog down"));
-  const deps = {
-    makeClient: () => ({
-      createSandbox: vi.fn(),
-      getSandbox: vi.fn(),
-      listSandboxes: vi.fn().mockResolvedValue([]),
-      listShapes,
-    }),
-  };
+  it("returns the same refusal for shaped webhook and Reconciler intake", async () => {
+    const listShapes = vi.fn().mockRejectedValue(new Error("catalog down"));
+    const deps = {
+      makeClient: () => ({
+        createSandbox: vi.fn(),
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+        listShapes,
+      }),
+    };
 
-  const webhook = await post(
-    workflowJobPayload({ action: "queued", jobId: 790, labels: ["createos-2vcpu-2gb"] }),
-    "admission-parity-webhook",
-    deps,
-  );
-  expect(await webhook.text()).toBe("catalog-unavailable");
+    const webhook = await post(
+      workflowJobPayload({ action: "queued", jobId: 790, labels: ["createos-2vcpu-2gb"] }),
+      "admission-parity-webhook",
+      deps,
+    );
+    expect(await webhook.text()).toBe("catalog-unavailable");
 
-  globalThis.fetch = mockFetch({
-    ...githubRoutes(),
-    "GET /actions/runners": () => new Response(JSON.stringify({ runners: [] })),
-    "GET /installation/repositories": () =>
-      new Response(JSON.stringify({ repositories: [{ full_name: "nodeops-app/api" }] })),
-    "GET /actions/runs?status=queued": () =>
-      new Response(JSON.stringify({ workflow_runs: [{ id: 990 }] })),
-    "GET /actions/runs?status=in_progress": () =>
-      new Response(JSON.stringify({ workflow_runs: [] })),
-    "GET /actions/runs/990/jobs": () =>
-      new Response(
-        JSON.stringify({
-          jobs: [{ id: 791, status: "queued", labels: ["createos-2vcpu-2gb"] }],
-        }),
-      ),
+    globalThis.fetch = mockFetch({
+      ...githubRoutes(),
+      "GET /actions/runners": () => new Response(JSON.stringify({ runners: [] })),
+      "GET /installation/repositories": () =>
+        new Response(JSON.stringify({ repositories: [{ full_name: "nodeops-app/api" }] })),
+      "GET /actions/runs?status=queued": () =>
+        new Response(JSON.stringify({ workflow_runs: [{ id: 990 }] })),
+      "GET /actions/runs?status=in_progress": () =>
+        new Response(JSON.stringify({ workflow_runs: [] })),
+      "GET /actions/runs/990/jobs": () =>
+        new Response(
+          JSON.stringify({
+            jobs: [{ id: 791, status: "queued", labels: ["createos-2vcpu-2gb"] }],
+          }),
+        ),
+    });
+
+    await runReconciler(env as any, deps);
+    expect(listShapes).toHaveBeenCalledTimes(2);
   });
-
-  await runReconciler(env as any, deps);
-  expect(listShapes).toHaveBeenCalledTimes(2);
-});
 ```
 
 The two calls are intentional: failed catalog reads are not cached across the webhook and later Reconciler invocation; only concurrent or same-factory shaped Jobs share one promise.
@@ -550,11 +543,9 @@ rtk git commit -m "refactor: deepen job admission"
 ### Task 2: Record the domain term and complete verification
 
 **Files:**
-
 - Modify: `CONTEXT.md`
 
 **Interfaces:**
-
 - Consumes: the completed Job admission module.
 - Produces: one canonical glossary entry for future architecture work.
 

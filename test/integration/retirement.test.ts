@@ -37,12 +37,7 @@ describe("canonical Coordinator row retirement", () => {
 
     const result = await stub.onCompleted(960, runnerName(960));
 
-    expect(result.toDestroy).toEqual({
-      jobId: 960,
-      sandboxId: "sb-960",
-      tenantId: null,
-      region: "default",
-    });
+    expect(result.toDestroy).toEqual({ jobId: 960, sandboxId: "sb-960", tenantId: null, region: "default" });
     await expectDestroyingRetry(stub, 960, "sb-960");
   });
 
@@ -51,12 +46,7 @@ describe("canonical Coordinator row retirement", () => {
 
     const result = await stub.markProvisionFailed(961);
 
-    expect(result.toDestroy).toEqual({
-      jobId: 961,
-      sandboxId: "sb-961",
-      tenantId: null,
-      region: "default",
-    });
+    expect(result.toDestroy).toEqual({ jobId: 961, sandboxId: "sb-961", tenantId: null, region: "default" });
     await expectDestroyingRetry(stub, 961, "sb-961");
   });
 
@@ -66,12 +56,7 @@ describe("canonical Coordinator row retirement", () => {
 
     const result = await stub.reapUnregistered(Date.now() + 1, [], 0);
 
-    expect(result.toDestroy).toContainEqual({
-      jobId: 962,
-      sandboxId: "sb-962",
-      tenantId: null,
-      region: "default",
-    });
+    expect(result.toDestroy).toContainEqual({ jobId: 962, sandboxId: "sb-962", tenantId: null, region: "default" });
     await expectDestroyingRetry(stub, 962, "sb-962");
   });
 
@@ -81,16 +66,11 @@ describe("canonical Coordinator row retirement", () => {
 
     const result = await stub.sweep(Date.now() + 1, 0);
 
-    expect(result.toDestroy).toContainEqual({
-      jobId: 963,
-      sandboxId: "sb-963",
-      tenantId: null,
-      region: "default",
-    });
+    expect(result.toDestroy).toContainEqual({ jobId: 963, sandboxId: "sb-963", tenantId: null, region: "default" });
     await expectDestroyingRetry(stub, 963, "sb-963");
   });
 
-  it("re-queues a VM-less row for retry without inventing teardown", async () => {
+  it("deletes a VM-less row without inventing teardown", async () => {
     const stub = env.COORDINATOR.get(
       env.COORDINATOR.idFromName(`retirement-empty-${Math.random()}`),
     );
@@ -98,35 +78,7 @@ describe("canonical Coordinator row retirement", () => {
 
     const result = await stub.markProvisionFailed(964);
 
-    // Nothing to destroy (no VM was created), the slot is freed, and the row
-    // SURVIVES as pending so the next tick's drain retries it — dropping it left
-    // the budget-bound recovery scan as the only way back.
     expect(result.toDestroy).toBeNull();
-    expect(result.nextPending).toBeNull(); // never re-promotes itself in the same call
-    expect(await stub.activeCount()).toBe(0);
-    expect(await stub.liveJobIds()).toContain(964);
-
-    // The retry: a cron tick's drain pulls the parked row back into provisioning.
-    const tick = await stub.sweep(Date.now(), 3_600_000);
-    expect(tick.nextPending.map((j) => j.jobId)).toContain(964);
-  });
-
-  it("drops a VM-less row once its retry budget is spent", async () => {
-    const stub = env.COORDINATOR.get(
-      env.COORDINATOR.idFromName(`retirement-budget-${Math.random()}`),
-    );
-    await stub.onQueued(job(965), "delivery-965");
-
-    // MAX_PROVISION_ATTEMPTS = 3: two failures re-queue, the third gives up. Each
-    // retry is re-promoted by the drain the way a real cron tick would.
-    await stub.markProvisionFailed(965);
-    expect(await stub.liveJobIds()).toContain(965);
-    await stub.sweep(Date.now(), 3_600_000);
-    await stub.markProvisionFailed(965);
-    expect(await stub.liveJobIds()).toContain(965);
-    await stub.sweep(Date.now(), 3_600_000);
-    await stub.markProvisionFailed(965);
-
-    expect(await stub.liveJobIds()).not.toContain(965);
+    expect(await stub.liveJobIds()).not.toContain(964);
   });
 });

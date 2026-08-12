@@ -21,7 +21,7 @@
 - **CF Free plan is a hard constraint** (`docs/adr/0002`): the DO stays `new_sqlite_classes` and passive. All blocking network I/O (including the shapes fetch) happens in the Worker, never in the DO.
 - **oxlint + oxfmt** on every `.ts` change: `node_modules/.bin/oxlint src test`.
 - **Conventional Commits**, imperative subject ≤ 50 chars, atomic.
-- Self-documenting code; comment the _why_, not the _what_.
+- Self-documenting code; comment the *why*, not the *what*.
 - Files stay under 1100 lines.
 
 **Verification commands** (used at the end of every task):
@@ -34,22 +34,22 @@ node_modules/.bin/oxlint src test
 
 ## File Structure
 
-| File                                                                      | Status     | Responsibility                                                                                                                         |
-| ------------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/createos.ts`                                                         | **create** | Build the createos SDK client. Owns `SandboxDeps` (the test seam). Exists solely to break the `sandbox.ts` ↔ `shapes.ts` import cycle. |
-| `src/shapes.ts`                                                           | **create** | Label ↔ shape mapping, the cached + floored shape catalog, and label admission.                                                        |
-| `src/sandbox.ts`                                                          | modify     | Drop the private client factory (moved). Derive shape from the job's label. Pass the label to JIT config.                              |
-| `src/config.ts`                                                           | modify     | Parse `MIN_RUNNER_MEM_MIB`.                                                                                                            |
-| `src/types.ts`                                                            | modify     | `Config.minRunnerMemMib`; `PendingJob.label`.                                                                                          |
-| `src/coordinator.ts`                                                      | modify     | `label` column + migration; carry it through `onQueued` / `#dequeuePending`.                                                           |
-| `src/github/client.ts`                                                    | modify     | `generateJitConfig(name, label)`; `listQueuedJobs(usable)`.                                                                            |
-| `src/handler.ts`                                                          | modify     | Admit by label; thread the label into `PendingJob`; reconciler uses the real label.                                                    |
-| `src/webhook.ts`                                                          | modify     | Delete `matchesLabel` (superseded).                                                                                                    |
-| `wrangler.toml`                                                           | modify     | `MIN_RUNNER_MEM_MIB = "2048"`.                                                                                                         |
-| `test/unit/shapes.test.ts`                                                | **create** | Pure mapping, floor, cache, fetch-failure.                                                                                             |
-| `test/integration/shapes.test.ts`                                         | **create** | Shaped webhook end-to-end; unknown label; teardown during a shapes outage.                                                             |
-| `docs/adr/0004-shape-labels.md`                                           | **create** | The label naming scheme + one-label-per-runner rule.                                                                                   |
-| `CONTEXT.md`, `README.md`, `CLAUDE.md`, `.github/workflows/ghar-test.yml` | modify     | Docs + smoke coverage.                                                                                                                 |
+| File | Status | Responsibility |
+| --- | --- | --- |
+| `src/createos.ts` | **create** | Build the createos SDK client. Owns `SandboxDeps` (the test seam). Exists solely to break the `sandbox.ts` ↔ `shapes.ts` import cycle. |
+| `src/shapes.ts` | **create** | Label ↔ shape mapping, the cached + floored shape catalog, and label admission. |
+| `src/sandbox.ts` | modify | Drop the private client factory (moved). Derive shape from the job's label. Pass the label to JIT config. |
+| `src/config.ts` | modify | Parse `MIN_RUNNER_MEM_MIB`. |
+| `src/types.ts` | modify | `Config.minRunnerMemMib`; `PendingJob.label`. |
+| `src/coordinator.ts` | modify | `label` column + migration; carry it through `onQueued` / `#dequeuePending`. |
+| `src/github/client.ts` | modify | `generateJitConfig(name, label)`; `listQueuedJobs(usable)`. |
+| `src/handler.ts` | modify | Admit by label; thread the label into `PendingJob`; reconciler uses the real label. |
+| `src/webhook.ts` | modify | Delete `matchesLabel` (superseded). |
+| `wrangler.toml` | modify | `MIN_RUNNER_MEM_MIB = "2048"`. |
+| `test/unit/shapes.test.ts` | **create** | Pure mapping, floor, cache, fetch-failure. |
+| `test/integration/shapes.test.ts` | **create** | Shaped webhook end-to-end; unknown label; teardown during a shapes outage. |
+| `docs/adr/0004-shape-labels.md` | **create** | The label naming scheme + one-label-per-runner rule. |
+| `CONTEXT.md`, `README.md`, `CLAUDE.md`, `.github/workflows/ghar-test.yml` | modify | Docs + smoke coverage. |
 
 ---
 
@@ -58,12 +58,10 @@ node_modules/.bin/oxlint src test
 Pure refactor, no behavior change. `shapes.ts` (Task 2) needs an SDK client, and `sandbox.ts` will need `shapeForLabel` from `shapes.ts`. Importing each other is a cycle. Both will import `createos.ts` instead.
 
 **Files:**
-
 - Create: `src/createos.ts`
 - Modify: `src/sandbox.ts:1-23` (remove the factory, re-export the type)
 
 **Interfaces:**
-
 - Consumes: nothing.
 - Produces:
   - `interface SandboxDeps { makeClient?: (config: Config) => CreateosSandboxClient; attemptId?: () => string }`
@@ -122,25 +120,25 @@ export type SandboxHandle = Awaited<ReturnType<CreateosSandboxClient["createSand
 In `createRunnerSandbox`, change:
 
 ```ts
-const c = client(config, deps);
+  const c = client(config, deps);
 ```
 
 to:
 
 ```ts
-const c = makeSandboxClient(config, deps);
+  const c = makeSandboxClient(config, deps);
 ```
 
 In `teardownSandbox`, change:
 
 ```ts
-const c = client(config, deps);
+  const c = client(config, deps);
 ```
 
 to:
 
 ```ts
-const c = makeSandboxClient(config, deps);
+  const c = makeSandboxClient(config, deps);
 ```
 
 - [ ] **Step 4: Verify nothing changed**
@@ -163,7 +161,6 @@ git commit -m "refactor(sandbox): extract createos client factory"
 ### Task 2: `src/shapes.ts` — catalog, floor, cache, label admission
 
 **Files:**
-
 - Modify: `src/types.ts:17` (add `minRunnerMemMib`), `src/types.ts:43-47` (add `PendingJob.label`)
 - Modify: `src/config.ts:44` (parse `MIN_RUNNER_MEM_MIB`)
 - Modify: `wrangler.toml`
@@ -171,7 +168,6 @@ git commit -m "refactor(sandbox): extract createos client factory"
 - Test: `test/unit/shapes.test.ts`
 
 **Interfaces:**
-
 - Consumes: `makeSandboxClient`, `SandboxDeps` from Task 1.
 - Produces:
   - `function createosLabels(labels: string[], config: Config): string[]`
@@ -181,15 +177,15 @@ git commit -m "refactor(sandbox): extract createos client factory"
   - `function pickLabel(labels: string[], usable: Set<string>, config: Config): string | null`
   - `function resetShapeCacheForTests(): void`
 
-Note `PendingJob.label` is added here (Task 2) but not _populated_ until Task 4. Between the two tasks nothing constructs a `PendingJob` — Task 3 changes the DO, Task 4 changes the constructors — so add it as a required field and let `tsc` point at every site Task 3/4 must fix. That is the intent.
+Note `PendingJob.label` is added here (Task 2) but not *populated* until Task 4. Between the two tasks nothing constructs a `PendingJob` — Task 3 changes the DO, Task 4 changes the constructors — so add it as a required field and let `tsc` point at every site Task 3/4 must fix. That is the intent.
 
 - [ ] **Step 1: Add `minRunnerMemMib` to `Config` and `label` to `PendingJob` in `src/types.ts`**
 
 After the `runnerShape` line in `interface Config`:
 
 ```ts
-runnerShape: string; // "s-4vcpu-4gb" — the shape the bare `createos` label means
-minRunnerMemMib: number; // 2048 — shapes below this are never offered as labels
+  runnerShape: string; // "s-4vcpu-4gb" — the shape the bare `createos` label means
+  minRunnerMemMib: number; // 2048 — shapes below this are never offered as labels
 ```
 
 And replace `interface PendingJob`:
@@ -343,9 +339,7 @@ export function pickLabel(labels: string[], usable: Set<string>, config: Config)
   const ours = createosLabels(labels, config);
   if (ours.length === 0) return null;
   if (ours.length > 1) {
-    console.warn(
-      `shapes: job names ${ours.length} createos labels (${ours.join(", ")}); ignoring it`,
-    );
+    console.warn(`shapes: job names ${ours.length} createos labels (${ours.join(", ")}); ignoring it`);
     return null;
   }
   const label = ours[0]!;
@@ -423,10 +417,7 @@ describe("shapeForLabel", () => {
 describe("usableShapes", () => {
   it("excludes shapes under the memory floor and throttled shapes, and warns", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const ids = await usableShapes(
-      config,
-      depsWith(async () => CATALOG),
-    );
+    const ids = await usableShapes(config, depsWith(async () => CATALOG));
     expect([...ids].sort()).toEqual(["s-2vcpu-2gb", "s-4vcpu-4gb", "s-8vcpu-16gb"]);
     expect(warn).toHaveBeenCalledOnce();
     expect(warn.mock.calls[0]![0]).toContain("s-1vcpu-1gb");
@@ -453,24 +444,16 @@ describe("isUsableLabel", () => {
 
   it("admits a shaped label present in the catalog", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(
-      await isUsableLabel(
-        "createos-2vcpu-2gb",
-        config,
-        depsWith(async () => CATALOG),
-      ),
-    ).toBe(true);
+    expect(await isUsableLabel("createos-2vcpu-2gb", config, depsWith(async () => CATALOG))).toBe(
+      true,
+    );
   });
 
   it("denies a shaped label that exists but is under the floor, and warns", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(
-      await isUsableLabel(
-        "createos-1vcpu-1gb",
-        config,
-        depsWith(async () => CATALOG),
-      ),
-    ).toBe(false);
+    expect(await isUsableLabel("createos-1vcpu-1gb", config, depsWith(async () => CATALOG))).toBe(
+      false,
+    );
     expect(warn.mock.calls.some((c) => String(c[0]).includes("not offered"))).toBe(true);
   });
 
@@ -537,12 +520,10 @@ git commit -m "feat(shapes): add cached, floored shape catalog"
 ### Task 3: Persist the requested label on the job row
 
 **Files:**
-
 - Modify: `src/coordinator.ts:12-14` (Env), `:16-25` (Row), `:48-69` (schema + migration), `:109-130` (onQueued), `:212-223` (#dequeuePending)
 - Test: `test/integration/concurrency.test.ts` (extend)
 
 **Interfaces:**
-
 - Consumes: `PendingJob.label` from Task 2.
 - Produces: `PendingJob` values returned by `onQueued` / `#dequeuePending` / `#drainPending` now carry `label`.
 
@@ -574,7 +555,7 @@ type Row = {
 Replace the `CREATE TABLE IF NOT EXISTS jobs (...)` body and the migration block:
 
 ```ts
-this.#sql.exec(`
+    this.#sql.exec(`
       CREATE TABLE IF NOT EXISTS jobs (
         job_id      INTEGER PRIMARY KEY,
         run_id      INTEGER NOT NULL,
@@ -591,13 +572,13 @@ this.#sql.exec(`
         seen_at     INTEGER NOT NULL
       );
     `);
-// Migrate DOs created before a column existed: CREATE TABLE IF NOT EXISTS
-// won't add one to a live table. A NULL `label` is a row from before shape
-// labels, which by definition asked for the bare label.
-const cols = this.#sql.exec(`PRAGMA table_info(jobs)`).toArray() as { name: string }[];
-const has = (c: string) => cols.some((col) => col.name === c);
-if (!has("runner_name")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN runner_name TEXT`);
-if (!has("label")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN label TEXT`);
+    // Migrate DOs created before a column existed: CREATE TABLE IF NOT EXISTS
+    // won't add one to a live table. A NULL `label` is a row from before shape
+    // labels, which by definition asked for the bare label.
+    const cols = this.#sql.exec(`PRAGMA table_info(jobs)`).toArray() as { name: string }[];
+    const has = (c: string) => cols.some((col) => col.name === c);
+    if (!has("runner_name")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN runner_name TEXT`);
+    if (!has("label")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN label TEXT`);
 ```
 
 - [ ] **Step 3: Add the default-label helper and a row→PendingJob mapper**
@@ -623,16 +604,16 @@ Insert after `#maxConcurrent()`:
 - [ ] **Step 4: Persist the label in `onQueued`**
 
 ```ts
-this.#sql.exec(
-  `INSERT INTO jobs (job_id, run_id, repo, sandbox_id, runner_name, label, state, created_at, booted_at)
+    this.#sql.exec(
+      `INSERT INTO jobs (job_id, run_id, repo, sandbox_id, runner_name, label, state, created_at, booted_at)
        VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, NULL)`,
-  job.jobId,
-  job.runId,
-  job.repoFullName,
-  job.label,
-  state,
-  now,
-);
+      job.jobId,
+      job.runId,
+      job.repoFullName,
+      job.label,
+      state,
+      now,
+    );
 ```
 
 - [ ] **Step 5: Return the label from `#dequeuePending`**
@@ -640,8 +621,8 @@ this.#sql.exec(
 Replace its final two lines:
 
 ```ts
-this.#sql.exec(`UPDATE jobs SET state = 'provisioning' WHERE job_id = ?`, row.job_id);
-return this.#toPending(row);
+    this.#sql.exec(`UPDATE jobs SET state = 'provisioning' WHERE job_id = ?`, row.job_id);
+    return this.#toPending(row);
 ```
 
 - [ ] **Step 6: Extend `test/integration/concurrency.test.ts`**
@@ -649,24 +630,24 @@ return this.#toPending(row);
 Add this case. It is the regression test for the whole reason the column exists: a shaped job that waits behind the cap must boot at the size it asked for, not the default.
 
 ```ts
-it("a job queued at the cap dequeues with its label intact", async () => {
-  const co = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
+  it("a job queued at the cap dequeues with its label intact", async () => {
+    const co = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
 
-  // MAX_CONCURRENT is 2 in vitest.config.ts — fill both slots.
-  await co.onQueued({ jobId: 901, runId: 1, repoFullName: "o/r", label: "createos" }, "d-901");
-  await co.onQueued({ jobId: 902, runId: 1, repoFullName: "o/r", label: "createos" }, "d-902");
+    // MAX_CONCURRENT is 2 in vitest.config.ts — fill both slots.
+    await co.onQueued({ jobId: 901, runId: 1, repoFullName: "o/r", label: "createos" }, "d-901");
+    await co.onQueued({ jobId: 902, runId: 1, repoFullName: "o/r", label: "createos" }, "d-902");
 
-  const third = await co.onQueued(
-    { jobId: 903, runId: 1, repoFullName: "o/r", label: "createos-8vcpu-16gb" },
-    "d-903",
-  );
-  expect(third.action).toBe("queued");
+    const third = await co.onQueued(
+      { jobId: 903, runId: 1, repoFullName: "o/r", label: "createos-8vcpu-16gb" },
+      "d-903",
+    );
+    expect(third.action).toBe("queued");
 
-  // Free a slot; the promoted job must still carry its shaped label.
-  const { nextPending } = await co.onCompleted(901);
-  expect(nextPending?.jobId).toBe(903);
-  expect(nextPending?.label).toBe("createos-8vcpu-16gb");
-});
+    // Free a slot; the promoted job must still carry its shaped label.
+    const { nextPending } = await co.onCompleted(901);
+    expect(nextPending?.jobId).toBe(903);
+    expect(nextPending?.label).toBe("createos-8vcpu-16gb");
+  });
 ```
 
 - [ ] **Step 7: Run the DO tests**
@@ -691,7 +672,6 @@ git commit -m "feat(coordinator): persist requested label on job rows"
 This is the task that makes the feature real, and it is where the existing suite goes green again.
 
 **Files:**
-
 - Modify: `src/webhook.ts:97-99` (delete `matchesLabel`)
 - Modify: `src/github/client.ts:41-60` (`generateJitConfig`), `:142-150` (`listQueuedJobs`), `:176-192` (`#queuedLabelJobs`)
 - Modify: `src/sandbox.ts` (`createRunnerSandbox`)
@@ -699,7 +679,6 @@ This is the task that makes the feature real, and it is where the existing suite
 - Test: `test/unit/webhook.test.ts`, `test/unit/sandbox.test.ts`, `test/unit/client.test.ts`, `test/integration/*.test.ts` (fixture updates)
 
 **Interfaces:**
-
 - Consumes: `createosLabels`, `shapeForLabel`, `isUsableLabel`, `pickLabel`, `usableShapes` (Task 2); `PendingJob.label` (Tasks 2–3).
 - Produces:
   - `generateJitConfig(runnerName: string, label: string): Promise<string>`
@@ -816,8 +795,8 @@ import { shapeForLabel } from "./shapes";
 In `createRunnerSandbox`, change the JIT call to pass the label:
 
 ```ts
-const runnerName = `ghar-${job.jobId}-${attemptId()}`;
-const jitConfig = await github.generateJitConfig(runnerName, job.label);
+  const runnerName = `ghar-${job.jobId}-${attemptId()}`;
+  const jitConfig = await github.generateJitConfig(runnerName, job.label);
 ```
 
 and the `createSandbox` call's `shape`:
@@ -847,27 +826,27 @@ import { createosLabels, isUsableLabel, usableShapes } from "./shapes";
 Replace lines 90–99 (from `const job = parseWorkflowJob(body);` through the `const pending: PendingJob = {...}` block) with:
 
 ```ts
-const job = parseWorkflowJob(body);
-if (!job) return new Response("ignored", { status: 202 });
+  const job = parseWorkflowJob(body);
+  if (!job) return new Response("ignored", { status: 202 });
 
-// "Is this ours" is a pure label question for every action — the catalog is
-// only needed to admit a `queued` job below. Gating teardown on the shapes API
-// would leak every shaped VM during a shapes outage.
-const ours = createosLabels(job.labels, config);
-if (ours.length === 0) return new Response("no-label", { status: 202 });
-if (ours.length > 1) {
-  console.warn(`job ${job.jobId} names ${ours.length} createos labels (${ours.join(", ")})`);
-  return new Response("ambiguous-label", { status: 202 });
-}
-const label = ours[0]!;
+  // "Is this ours" is a pure label question for every action — the catalog is
+  // only needed to admit a `queued` job below. Gating teardown on the shapes API
+  // would leak every shaped VM during a shapes outage.
+  const ours = createosLabels(job.labels, config);
+  if (ours.length === 0) return new Response("no-label", { status: 202 });
+  if (ours.length > 1) {
+    console.warn(`job ${job.jobId} names ${ours.length} createos labels (${ours.join(", ")})`);
+    return new Response("ambiguous-label", { status: 202 });
+  }
+  const label = ours[0]!;
 
-const co = coordinator(env);
-const pending: PendingJob = {
-  jobId: job.jobId,
-  runId: job.runId,
-  repoFullName: job.repoFullName,
-  label,
-};
+  const co = coordinator(env);
+  const pending: PendingJob = {
+    jobId: job.jobId,
+    runId: job.runId,
+    repoFullName: job.repoFullName,
+    label,
+  };
 ```
 
 Then, inside `if (job.action === "queued") {`, add the catalog check as the first statement:
@@ -928,19 +907,19 @@ In `runReconciler`, replace step B's fetch and its `shouldProvision` call:
 `test/unit/sandbox.test.ts` — every `createRunnerSandbox` call now needs a `label` on its `PendingJob`, and the mocked client needs no `listShapes` (the bare label short-circuits). Add `label: "createos"` to each job fixture, and assert the shape is threaded:
 
 ```ts
-it("derives the VM shape from the job's label", async () => {
-  const createSandbox = vi.fn().mockResolvedValue({ id: "sb_1" });
-  const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as never;
-  const job = { jobId: 7, runId: 1, repoFullName: "o/r", label: "createos-8vcpu-16gb" };
+  it("derives the VM shape from the job's label", async () => {
+    const createSandbox = vi.fn().mockResolvedValue({ id: "sb_1" });
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as never;
+    const job = { jobId: 7, runId: 1, repoFullName: "o/r", label: "createos-8vcpu-16gb" };
 
-  await createRunnerSandbox(config, github, job, {
-    makeClient: () => ({ createSandbox }) as never,
-    attemptId: () => "aa",
+    await createRunnerSandbox(config, github, job, {
+      makeClient: () => ({ createSandbox }) as never,
+      attemptId: () => "aa",
+    });
+
+    expect(createSandbox.mock.calls[0]![0].shape).toBe("s-8vcpu-16gb");
+    expect(github.generateJitConfig).toHaveBeenCalledWith("ghar-7-aa", "createos-8vcpu-16gb");
   });
-
-  expect(createSandbox.mock.calls[0]![0].shape).toBe("s-8vcpu-16gb");
-  expect(github.generateJitConfig).toHaveBeenCalledWith("ghar-7-aa", "createos-8vcpu-16gb");
-});
 ```
 
 `test/unit/client.test.ts` — `generateJitConfig` now takes two args; update its calls to `generateJitConfig("ghar-1-aa", "createos")` and assert the posted body's `labels` is `["createos"]`. Any `listQueuedJobs()` call becomes `listQueuedJobs(new Set(["s-2vcpu-2gb"]))`.
@@ -967,12 +946,10 @@ git commit -m "feat(labels): select VM shape from the runs-on label"
 ### Task 5: End-to-end integration tests
 
 **Files:**
-
 - Create: `test/integration/shapes.test.ts`
 - Modify: `test/helpers/mocks.ts` (a shapes route helper)
 
 **Interfaces:**
-
 - Consumes: everything from Tasks 1–4.
 - Produces: nothing consumed by later tasks.
 
@@ -982,12 +959,7 @@ These are the three behaviors that only a real DO + real handler can prove, and 
 
 ```ts
 /** The `listShapes()` half of a mocked createos client. */
-export function shapeCatalog(): {
-  id: string;
-  vcpu: number;
-  mem_mib: number;
-  default_disk_mib: number;
-}[] {
+export function shapeCatalog(): { id: string; vcpu: number; mem_mib: number; default_disk_mib: number }[] {
   return [
     { id: "s-2vcpu-2gb", vcpu: 2, mem_mib: 2048, default_disk_mib: 10240 },
     { id: "s-4vcpu-4gb", vcpu: 4, mem_mib: 4096, default_disk_mib: 10240 },
@@ -1164,7 +1136,6 @@ git commit -m "test(shapes): cover shaped boot, bad label, outage teardown"
 ### Task 6: Documentation, ADR, and live smoke coverage
 
 **Files:**
-
 - Create: `docs/adr/0004-shape-labels.md`
 - Modify: `CONTEXT.md`, `README.md`, `CLAUDE.md`, `.github/workflows/ghar-test.yml`
 
@@ -1197,9 +1168,9 @@ Add a section under the setup runbook:
 ```yaml
 jobs:
   build:
-    runs-on: [createos] # RUNNER_SHAPE (default s-4vcpu-4gb)
+    runs-on: [createos]             # RUNNER_SHAPE (default s-4vcpu-4gb)
   big:
-    runs-on: [createos-8vcpu-16gb] # a specific createos shape
+    runs-on: [createos-8vcpu-16gb]  # a specific createos shape
 ```
 
 Available labels are derived live from the createos shape catalog
@@ -1233,16 +1204,16 @@ Under "Toolchain gotchas":
 Append a second job so one dispatch exercises both the bare and the shaped path. It asserts the shape actually took effect rather than just running green — `nproc` on a `s-2vcpu-2gb` VM must be 2.
 
 ```yaml
-smoke-shaped:
-  runs-on: [createos-2vcpu-2gb]
-  steps:
-    - name: Identify the runner
-      run: |
-        echo "host: $(hostname)"
-        echo "cpus: $(nproc)   mem: $(free -h | awk '/Mem:/{print $2}')"
-    - name: Assert the requested shape
-      run: |
-        test "$(nproc)" -eq 2 || { echo "expected 2 vCPU, got $(nproc)"; exit 1; }
+  smoke-shaped:
+    runs-on: [createos-2vcpu-2gb]
+    steps:
+      - name: Identify the runner
+        run: |
+          echo "host: $(hostname)"
+          echo "cpus: $(nproc)   mem: $(free -h | awk '/Mem:/{print $2}')"
+      - name: Assert the requested shape
+        run: |
+          test "$(nproc)" -eq 2 || { echo "expected 2 vCPU, got $(nproc)"; exit 1; }
 ```
 
 - [ ] **Step 6: Commit**

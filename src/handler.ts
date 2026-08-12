@@ -5,8 +5,7 @@ import { createJobAdmission, identifyJob, type AdmissionDecision } from "./admis
 import { fetchCatalog, shapeForLabel, shapeWithinCeiling } from "./shapes";
 import { GitHubClient } from "./github/client";
 import { createRunnerSandbox, launchRunner, teardownSandbox, type SandboxDeps } from "./sandbox";
-import { isPermanentProvisionFailure } from "./createos";
-import { notify, jobRef, alertContext } from "./notify";
+import { notify, jobRef } from "./notify";
 import { monthKey, dayKey, weightForLabel } from "./quota";
 import type {
   PendingJob,
@@ -167,27 +166,15 @@ export async function failProvision(
   sandboxId?: string,
   region?: string,
 ): Promise<void> {
-  // Whether the row gets another go decides whether this alert needs a human at
-  // all, so it is computed once, reported, and then passed to the DO.
-  const retryable = !isPermanentProvisionFailure(err);
   console.error(`provision failed job=${job.jobId}: ${String(err)}`);
   await notify(
     config,
-    `ghar provision failed: ${String(err)}\n` +
-      jobRef(job.repoFullName, job.runId, job.jobId) +
-      alertContext({
-        region: region ?? "?",
-        sandbox: sandboxId,
-        label: job.label,
-        tenant: job.tenant?.orgLogin,
-        // The operator's first question: does this heal on its own?
-        outcome: retryable ? "will retry" : "DROPPED (permanent)",
-      }),
+    `ghar provision failed: ${String(err)}\n` + jobRef(job.repoFullName, job.runId, job.jobId),
   );
 
   let result: ProvisionFailedResult;
   try {
-    result = await coordinator(env).markProvisionFailed(job.jobId, sandboxId, region, retryable);
+    result = await coordinator(env).markProvisionFailed(job.jobId, sandboxId, region);
   } catch (doErr) {
     console.error(`markProvisionFailed unreachable job=${job.jobId}: ${String(doErr)}`);
     if (sandboxId) await destroyUnrecorded(config, job.jobId, sandboxId, region, deps);
@@ -587,17 +574,7 @@ export async function destroyAndConfirm(
     console.error(`teardown failed sandbox=${task.sandboxId} job=${task.jobId}: ${String(err)}`);
     await notify(
       config,
-      `ghar teardown failed — sandbox ${task.sandboxId} (job ${task.jobId}): ${String(err)}` +
-        alertContext({
-          // NULL region = a pre-region row, which teardown resolves to the
-          // primary — worth showing as such rather than omitting, since "which
-          // control plane refused" is the whole question on a teardown failure.
-          region: task.region ?? "primary (row has none)",
-          tenant: task.tenantId,
-          // The row stays `destroying`, so this is self-healing unless it keeps
-          // repeating for the same sandbox — which is the signal to act on.
-          outcome: "row left destroying; reaper retries next cron",
-        }),
+      `ghar teardown failed — sandbox ${task.sandboxId} (job ${task.jobId}): ${String(err)}`,
     );
   }
 }

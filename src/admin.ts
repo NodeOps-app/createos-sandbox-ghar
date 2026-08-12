@@ -163,25 +163,6 @@ export async function handleAdmin(
       return json(await co.adminListTenants());
     }
 
-    if (route === "GET /admin/stale-jobs") {
-      // Debug/incident-response read: the same "stuck longer than threshold"
-      // check the cron alert (alertStaleJobs) runs, exposed on demand across
-      // every tenant — an operator chasing a live incident for one org can't
-      // wait for the next 5-minute tick, and has no other way to see a
-      // community tenant's job state (no CreateOS/GitHub access of their own).
-      // Unfiltered by tenant on purpose (spans every org in one call); a
-      // caller narrows by grepping repoFullName ("org/repo") client-side.
-      const thresholdParam = url.searchParams.get("threshold_ms");
-      let thresholdMs = config.slowJobThresholdMs;
-      if (thresholdParam !== null) {
-        thresholdMs = Number(thresholdParam);
-        if (!Number.isSafeInteger(thresholdMs) || thresholdMs < 0) {
-          return json({ error: "invalid threshold_ms", threshold_ms: thresholdParam }, 400);
-        }
-      }
-      return json(await co.staleJobs(Date.now(), thresholdMs));
-    }
-
     if (route === "POST /admin/tenants") {
       const b = TenantBody.parse(await req.json());
       // Read-before-write is safe here: adminGetTenant never throws, so it

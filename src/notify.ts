@@ -20,30 +20,6 @@ export function jobRef(repoFullName: string, runId: number, jobId: number): stri
 }
 
 /**
- * The facts an operator needs BEFORE they can start bisecting an alert, as one
- * copy-pasteable `key=value` line.
- *
- * Added after the 2026-08-12 incident, where every alert said only
- * `CreateosSandboxTimeoutError ... POST /v1/sandboxes/<id>/exec` — which left
- * open the two questions that actually decide what you do next: WHICH control
- * plane (a regional fault vs. a global one) and WILL IT COME BACK (a retrying
- * row heals itself; a dropped one needs a human). Answering those took a live
- * API dig per alert; they are free at the call site.
- *
- * Absent fields are dropped rather than rendered empty, so a single-mode
- * deployment never sees `tenant=` noise and a pre-VM failure never claims a
- * sandbox id it does not have.
- */
-export function alertContext(
-  fields: Record<string, string | number | boolean | null | undefined>,
-): string {
-  const parts = Object.entries(fields)
-    .filter(([, v]) => v != null && v !== "")
-    .map(([k, v]) => `${k}=${v}`);
-  return parts.length > 0 ? `\n${parts.join(" ")}` : "";
-}
-
-/**
  * Posts a failure alert to the configured webhook (Slack-compatible `{ text }`
  * payload). A no-op when ALERT_WEBHOOK_URL is unset. Never throws — alerting
  * must not break the provisioning/teardown path it reports on.

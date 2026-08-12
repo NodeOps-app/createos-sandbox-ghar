@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { notify, jobRef, alertContext } from "../../src/notify";
+import { notify, jobRef } from "../../src/notify";
 import type { Config } from "../../src/types";
 
 const base = { alertWebhookUrl: undefined } as unknown as Config;
@@ -80,32 +80,5 @@ describe("jobRef", () => {
     // repoFullName is webhook-supplied; a malformed one must still produce a
     // readable alert rather than "org=undefined".
     expect(jobRef("weird", 1, 2)).toContain("org=weird repo= run=1 job=2");
-  });
-});
-
-describe("alertContext", () => {
-  it("renders the fields an operator needs, as one copy-pasteable line", () => {
-    expect(alertContext({ region: "eu", sandbox: "sb_1", outcome: "will retry" })).toBe(
-      "\nregion=eu sandbox=sb_1 outcome=will retry",
-    );
-  });
-
-  // A pre-VM failure has no sandbox id and a single-mode row has no tenant.
-  // Rendering `sandbox=` empty would read as "we lost the id" rather than
-  // "there was never one".
-  it("drops absent fields instead of rendering them empty", () => {
-    expect(alertContext({ region: "us", sandbox: undefined, tenant: null, label: "" })).toBe(
-      "\nregion=us",
-    );
-  });
-
-  // Attempt 0 is a real, meaningful value — a `pending` row that has never been
-  // tried. Only null/undefined/"" mean "absent".
-  it("keeps zero and false, which are values, not absences", () => {
-    expect(alertContext({ attempt: 0, retryable: false })).toBe("\nattempt=0 retryable=false");
-  });
-
-  it("returns an empty string when nothing is known, so callers can concatenate blindly", () => {
-    expect(alertContext({ region: null })).toBe("");
   });
 });

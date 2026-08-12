@@ -19,7 +19,7 @@
 - A booting Runner or Sandbox always has a Coordinator row and must never be removed.
 - Keep `MAX_RUNNER_DELETES_PER_TICK = 10` and `MAX_SANDBOX_DESTROYS_PER_TICK = 5`.
 - No silent bounds. When a batch truncates, warn with kind, limit, collected count, attempted count, and dropped count.
-- **Preserve the disabled-sandbox-sweep warning.** When `sandboxNamesAreSweepable(config)` is false the current `sweepOrphanedSandboxes` logs a loud `sandbox sweep: DISABLED — …` and refuses the sweep. The classifier alone keeps the _safety_ (it yields no orphans) but drops that signal; the sandbox adapter's `list()` MUST re-emit the identical warning and return `[]`, or an unsafe prefix silently reclaims nothing — the exact failure this rule exists to prevent.
+- **Preserve the disabled-sandbox-sweep warning.** When `sandboxNamesAreSweepable(config)` is false the current `sweepOrphanedSandboxes` logs a loud `sandbox sweep: DISABLED — …` and refuses the sweep. The classifier alone keeps the *safety* (it yields no orphans) but drops that signal; the sandbox adapter's `list()` MUST re-emit the identical warning and return `[]`, or an unsafe prefix silently reclaims nothing — the exact failure this rule exists to prevent.
 - Keep reclamation late in the Reconciler: Runner registrations after admission, Sandboxes last and independent of GitHub availability.
 - No new dependency, config, schema, or Durable Object network I/O.
 - Run `rtk oxfmt --write` on every changed TypeScript file.
@@ -28,24 +28,22 @@
 
 ## File Structure
 
-| File                                 | Status | Responsibility                                                                     |
-| ------------------------------------ | ------ | ---------------------------------------------------------------------------------- |
-| `src/reclamation.ts`                 | create | Shared orphan proof, bound, cleanup execution, result accounting, and two adapters |
-| `src/handler.ts`                     | modify | Keep Reconciler ordering; call reclamation instead of owning sweep snippets        |
-| `test/unit/reclamation.test.ts`      | create | Generic module contract, resource classifiers, cap warning, and failures           |
-| `test/integration/reconcile.test.ts` | modify | Exercise non-empty Orphaned Sandbox deletion and booting-Sandbox protection        |
-| `CONTEXT.md`                         | modify | Define Orphan reclamation across both external resource kinds                      |
+| File | Status | Responsibility |
+| --- | --- | --- |
+| `src/reclamation.ts` | create | Shared orphan proof, bound, cleanup execution, result accounting, and two adapters |
+| `src/handler.ts` | modify | Keep Reconciler ordering; call reclamation instead of owning sweep snippets |
+| `test/unit/reclamation.test.ts` | create | Generic module contract, resource classifiers, cap warning, and failures |
+| `test/integration/reconcile.test.ts` | modify | Exercise non-empty Orphaned Sandbox deletion and booting-Sandbox protection |
+| `CONTEXT.md` | modify | Define Orphan reclamation across both external resource kinds |
 
 ---
 
 ### Task 1: Create deep orphan reclamation and both adapters
 
 **Files:**
-
 - Create: `src/reclamation.ts`
 
 **Interfaces:**
-
 - Consumes: `Config`, `Runner`, `GitHubAdapter`, `CreateosClient`, `jobIdFromRunnerName`, `jobIdFromSandboxName`.
 - Produces:
   - `ReclamationAdapter<T>`
@@ -105,7 +103,9 @@ export async function reclaimOrphans<T>(
     );
   }
 
-  const results = await Promise.allSettled(batch.map(({ resource }) => adapter.remove(resource)));
+  const results = await Promise.allSettled(
+    batch.map(({ resource }) => adapter.remove(resource)),
+  );
   let failed = 0;
   results.forEach((result, index) => {
     if (result.status === "rejected") {
@@ -203,11 +203,9 @@ Expected: typecheck and lint exit 0; no other file changes yet.
 #### Integration phase: Replace copied Reconciler sweeps
 
 **Files:**
-
 - Modify: `src/handler.ts:260-380, 505-525`
 
 **Interfaces:**
-
 - Consumes: reclamation factories and `reclaimOrphans` from Task 1.
 - Produces: Reconciler C/D call sites with existing ordering and fail-safe catches.
 
@@ -216,7 +214,11 @@ Expected: typecheck and lint exit 0; no other file changes yet.
 Remove imports of `jobIdFromRunnerName`, `jobIdFromSandboxName`, and the two per-tick constants. Add:
 
 ```ts
-import { reclaimOrphans, runnerReclamationAdapter, sandboxReclamationAdapter } from "./reclamation";
+import {
+  reclaimOrphans,
+  runnerReclamationAdapter,
+  sandboxReclamationAdapter,
+} from "./reclamation";
 ```
 
 - [ ] **Step 2: Delete copied sweep implementations**
@@ -228,13 +230,16 @@ Delete `sweepOrphanedRunners` and `sweepOrphanedSandboxes` in full. Do not move 
 Keep it after queued-Job admission and use:
 
 ```ts
-if (runners) {
-  try {
-    await reclaimOrphans(runnerReclamationAdapter(github, runners), () => co.liveJobIds());
-  } catch (err) {
-    console.error(`reconcile: orphaned-runner sweep failed: ${String(err)}`);
+  if (runners) {
+    try {
+      await reclaimOrphans(
+        runnerReclamationAdapter(github, runners),
+        () => co.liveJobIds(),
+      );
+    } catch (err) {
+      console.error(`reconcile: orphaned-runner sweep failed: ${String(err)}`);
+    }
   }
-}
 ```
 
 - [ ] **Step 4: Replace Reconciler step D**
@@ -242,11 +247,14 @@ if (runners) {
 Keep it last and independent of the GitHub reads:
 
 ```ts
-try {
-  await reclaimOrphans(sandboxReclamationAdapter(config, runtime.createos), () => co.liveJobIds());
-} catch (err) {
-  console.error(`reconcile: orphaned-sandbox sweep failed: ${String(err)}`);
-}
+  try {
+    await reclaimOrphans(
+      sandboxReclamationAdapter(config, runtime.createos),
+      () => co.liveJobIds(),
+    );
+  } catch (err) {
+    console.error(`reconcile: orphaned-sandbox sweep failed: ${String(err)}`);
+  }
 ```
 
 - [ ] **Step 5: Confirm the duplicated executor is gone**
@@ -278,11 +286,9 @@ rtk git commit -m "refactor: deepen orphan reclamation"
 ### Task 2: Add the generic reclamation contract
 
 **Files:**
-
 - Create: `test/unit/reclamation.test.ts`
 
 **Interfaces:**
-
 - Consumes: `ReclamationAdapter`, `reclaimOrphans`.
 - Produces: deterministic coverage for ordering, live protection, bounds, and failures.
 
@@ -290,7 +296,10 @@ rtk git commit -m "refactor: deepen orphan reclamation"
 
 ```ts
 import { describe, expect, it, vi } from "vitest";
-import { reclaimOrphans, type ReclamationAdapter } from "../../src/reclamation";
+import {
+  reclaimOrphans,
+  type ReclamationAdapter,
+} from "../../src/reclamation";
 
 interface Resource {
   id: number;
@@ -311,7 +320,9 @@ function adapter(
       return resources;
     },
     classify: (resource) =>
-      resource.jobId === null ? null : { jobId: resource.jobId, label: `resource-${resource.id}` },
+      resource.jobId === null
+        ? null
+        : { jobId: resource.jobId, label: `resource-${resource.id}` },
     remove,
   };
 }
@@ -400,7 +411,10 @@ Extend the file's import block, define `baseConfig` before the first `describe`,
 
 ```ts
 import { loadConfig } from "../../src/config";
-import { runnerReclamationAdapter, sandboxReclamationAdapter } from "../../src/reclamation";
+import {
+  runnerReclamationAdapter,
+  sandboxReclamationAdapter,
+} from "../../src/reclamation";
 
 const baseConfig = loadConfig({
   GITHUB_ORG: "nodeops-app",
@@ -489,11 +503,9 @@ rtk git commit -m "test: cover orphan reclamation"
 ### Task 3: Cover non-empty Orphaned Sandbox destruction
 
 **Files:**
-
 - Modify: `test/integration/reconcile.test.ts`
 
 **Interfaces:**
-
 - Consumes: `runReconciler`, runtime adapter helpers, Sandbox ownership naming.
 - Produces: regression coverage for a real destructive candidate and a booting-resource exclusion.
 
@@ -581,11 +593,9 @@ rtk git commit -m "test: cover sandbox reclamation"
 ### Task 4: Document and fully verify reclamation
 
 **Files:**
-
 - Modify: `CONTEXT.md`
 
 **Interfaces:**
-
 - Consumes: Tasks 1–4.
 - Produces: canonical Orphan reclamation vocabulary and verified destructive behavior.
 

@@ -19,26 +19,26 @@ public GitHub App alone grants nothing.
 
 ## Decisions (settled during brainstorming)
 
-| #   | Decision            | Choice                                                                                                                                                                                                        |
-| --- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D1  | Tenant unit         | GitHub **org**, keyed by App `installation_id`. Org login is display only.                                                                                                                                    |
-| D2  | Admission unit      | **Project** = an approved repo within a Tenant.                                                                                                                                                               |
-| D3  | Quota placement     | On the **Tenant**. Per-Project usage recorded for attribution, never enforced.                                                                                                                                |
-| D4  | GitHub App          | **One public App.** Existing private App retired via quiet swap (§9).                                                                                                                                         |
-| D5  | Deployments         | **One Worker**, evolved in place. No parallel community deployment.                                                                                                                                           |
-| D6  | Coordinator         | **Single DO retained** (`idFromName("singleton")`). Revisit triggers in §11.                                                                                                                                  |
-| D7  | Cloudflare plan     | **Workers Paid ($5/mo).** Kills the 100k req/day availability cliff (error 1027), raises subrequests 50 → 10,000, CPU 10 ms → 30 s. Go rewrite rejected: re-litigates every encoded gotcha to save ~$5.40/mo. |
-| D8  | Quota unit          | **Weighted minutes** = wall minutes of VM lifetime × (shape vCPU ÷ 2).                                                                                                                                        |
-| D9  | Metering window     | VM lifetime: `booted_at` → destroy confirmation. Calendar month, UTC.                                                                                                                                         |
-| D10 | Exhaustion          | Hard stop: no provision, check run with balance + reset date, Slack alert. No degraded tier.                                                                                                                  |
-| D11 | Capacity protection | Per-Tenant concurrency caps only; operator keeps Σ(caps) ≤ CreateOS plan capacity. No global arbiter DO in v1.                                                                                                |
-| D12 | Runner groups       | One per Tenant org, created at approval, `visibility: selected` scoped to approved Projects. Fail-closed: group creation failure blocks approval.                                                             |
-| D13 | Community shape cap | `4vcpu-8gb` default `max_shape`, per-Tenant overridable.                                                                                                                                                      |
-| D14 | Job TTL             | 30 min default, per-Tenant configurable (raise for tenants with longer builds).                                                                                                                               |
-| D15 | Bandwidth           | 100 GB per VM via `bandwidth_quota_bytes`. Monthly egress total recorded per Tenant, alert-only.                                                                                                              |
-| D16 | Onboarding          | Google Form → manual review → authenticated admin endpoint. Never an env var (a push to `main` is a deploy).                                                                                                  |
-| D17 | Unapproved traffic  | Ignore + post a check run ("not approved, apply here <link>"). Requires `checks:write` on the App **at creation** — adding later forces every install to re-accept.                                           |
-| D18 | NodeOps             | Tenant #1 with `allow_all_repos: true`. The only Tenant with that flag.                                                                                                                                       |
+| # | Decision | Choice |
+| --- | --- | --- |
+| D1 | Tenant unit | GitHub **org**, keyed by App `installation_id`. Org login is display only. |
+| D2 | Admission unit | **Project** = an approved repo within a Tenant. |
+| D3 | Quota placement | On the **Tenant**. Per-Project usage recorded for attribution, never enforced. |
+| D4 | GitHub App | **One public App.** Existing private App retired via quiet swap (§9). |
+| D5 | Deployments | **One Worker**, evolved in place. No parallel community deployment. |
+| D6 | Coordinator | **Single DO retained** (`idFromName("singleton")`). Revisit triggers in §11. |
+| D7 | Cloudflare plan | **Workers Paid ($5/mo).** Kills the 100k req/day availability cliff (error 1027), raises subrequests 50 → 10,000, CPU 10 ms → 30 s. Go rewrite rejected: re-litigates every encoded gotcha to save ~$5.40/mo. |
+| D8 | Quota unit | **Weighted minutes** = wall minutes of VM lifetime × (shape vCPU ÷ 2). |
+| D9 | Metering window | VM lifetime: `booted_at` → destroy confirmation. Calendar month, UTC. |
+| D10 | Exhaustion | Hard stop: no provision, check run with balance + reset date, Slack alert. No degraded tier. |
+| D11 | Capacity protection | Per-Tenant concurrency caps only; operator keeps Σ(caps) ≤ CreateOS plan capacity. No global arbiter DO in v1. |
+| D12 | Runner groups | One per Tenant org, created at approval, `visibility: selected` scoped to approved Projects. Fail-closed: group creation failure blocks approval. |
+| D13 | Community shape cap | `4vcpu-8gb` default `max_shape`, per-Tenant overridable. |
+| D14 | Job TTL | 30 min default, per-Tenant configurable (raise for tenants with longer builds). |
+| D15 | Bandwidth | 100 GB per VM via `bandwidth_quota_bytes`. Monthly egress total recorded per Tenant, alert-only. |
+| D16 | Onboarding | Google Form → manual review → authenticated admin endpoint. Never an env var (a push to `main` is a deploy). |
+| D17 | Unapproved traffic | Ignore + post a check run ("not approved, apply here <link>"). Requires `checks:write` on the App **at creation** — adding later forces every install to re-accept. |
+| D18 | NodeOps | Tenant #1 with `allow_all_repos: true`. The only Tenant with that flag. |
 
 ## 1. Domain model
 
@@ -57,20 +57,20 @@ public GitHub App alone grants nothing.
 
 Every abuse edge and which mechanism closes it. No unlisted path provisions a VM.
 
-| #   | Gate                                  | Level  | Enforced where           | Bounds                                                                                          |
-| --- | ------------------------------------- | ------ | ------------------------ | ----------------------------------------------------------------------------------------------- |
-| 1   | Org not an approved Tenant            | org    | admission                | Random public installs                                                                          |
-| 2   | Repo not an approved Project          | repo   | admission                | Scope creep inside an approved org                                                              |
-| 3   | Runner group scoped to approved repos | org    | **GitHub-side**          | Defence in depth: even past gates 1–2, GitHub won't schedule an unapproved repo onto the runner |
-| 4   | Exactly one createos label            | job    | admission (exists today) | Ambiguous requests                                                                              |
-| 5   | Requested shape ≤ Tenant `max_shape`  | org    | admission                | Size farming                                                                                    |
-| 6   | Tenant concurrency cap                | org    | Coordinator              | **Our capacity** — bounds burn rate at cap × TTL regardless of workload                         |
-| 7   | Monthly weighted-minute grant         | org    | admission                | Total consumption                                                                               |
-| 8   | Job TTL (reaper kills VM at N min)    | org    | reaper                   | A single runaway job                                                                            |
-| 9   | 100 GB bandwidth per VM               | VM     | CreateOS                 | Egress abuse                                                                                    |
-| 10  | Σ(Tenant caps) ≤ plan capacity        | global | operator, at approval    | Oversubscription                                                                                |
+| # | Gate | Level | Enforced where | Bounds |
+| --- | --- | --- | --- | --- |
+| 1 | Org not an approved Tenant | org | admission | Random public installs |
+| 2 | Repo not an approved Project | repo | admission | Scope creep inside an approved org |
+| 3 | Runner group scoped to approved repos | org | **GitHub-side** | Defence in depth: even past gates 1–2, GitHub won't schedule an unapproved repo onto the runner |
+| 4 | Exactly one createos label | job | admission (exists today) | Ambiguous requests |
+| 5 | Requested shape ≤ Tenant `max_shape` | org | admission | Size farming |
+| 6 | Tenant concurrency cap | org | Coordinator | **Our capacity** — bounds burn rate at cap × TTL regardless of workload |
+| 7 | Monthly weighted-minute grant | org | admission | Total consumption |
+| 8 | Job TTL (reaper kills VM at N min) | org | reaper | A single runaway job |
+| 9 | 100 GB bandwidth per VM | VM | CreateOS | Egress abuse |
+| 10 | Σ(Tenant caps) ≤ plan capacity | global | operator, at approval | Oversubscription |
 
-Gate 6 caps _rate_; gate 7 caps _total_. That pair is why per-Project
+Gate 6 caps *rate*; gate 7 caps *total*. That pair is why per-Project
 enforcement is deliberately absent: attribution answers "which repo burned the
 month," and the Tenant's own budget bounds the damage.
 
@@ -137,20 +137,20 @@ existing rollback rule (Worker rollback does not revert DO SQLite).
 
 ## 5. File responsibilities (changes only)
 
-| File                   | Change                                                                                                                                                                                                                                      |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/config.ts`        | Drops `githubOrg`, `githubInstallationId`, `repoAllowlist`, `provisionPolicy` (become per-Tenant). Keeps App credentials, community defaults (grant, cap, shape, TTL), admin bearer secret.                                                 |
-| `src/registry.ts`      | **New.** Tenant/Project reads + writes over the DO tables. The admission path's lookup surface.                                                                                                                                             |
-| `src/quota.ts`         | **New.** Weighted-minute math, UTC month key, balance arithmetic. Pure functions, no I/O.                                                                                                                                                   |
-| `src/policy.ts`        | `shouldProvision(tenant, project)` — registry lookup replaces the env-string org comparison.                                                                                                                                                |
-| `src/admission.ts`     | Ordered decision gains: Tenant status → Project (or `allow_all_repos`) → shape ≤ `max_shape` → quota balance. Existing label identification and catalog validation unchanged. Refusals carry a reason the caller can turn into a check run. |
-| `src/coordinator.ts`   | New tables; `jobs.tenant_id`; per-Tenant cap replaces global `MAX_CONCURRENT`; ledger writes on teardown; per-Tenant TTL feeds `sweep`/`reapUnregistered`.                                                                                  |
-| `src/github/auth.ts`   | Installation-token cache keyed on `installation_id`.                                                                                                                                                                                        |
-| `src/github/client.ts` | Adds `createRunnerGroup`, `setRunnerGroupRepos`, `createCheckRun`. `generateJitConfig` takes the Tenant's org + group id.                                                                                                                   |
-| `src/handler.ts`       | Resolves Tenant from webhook `installation.id`; threads it through; posts check runs on refusals per D17.                                                                                                                                   |
-| `src/reconcile.ts`     | **Extracted** from `handler.ts` (reconciler + reaper + sweeps) — the file is 623 lines and this work grows it; targeted split of code being touched.                                                                                        |
-| `src/admin.ts`         | **New.** Bearer-authenticated `POST /admin/tenants`, `POST /admin/projects` (+ status changes). Approval orchestrates runner-group creation and fails closed (D12).                                                                         |
-| `src/webhook.ts`       | `parseWorkflowJob` also extracts `installation.id`. HMAC path unchanged (one App, one secret).                                                                                                                                              |
+| File | Change |
+| --- | --- |
+| `src/config.ts` | Drops `githubOrg`, `githubInstallationId`, `repoAllowlist`, `provisionPolicy` (become per-Tenant). Keeps App credentials, community defaults (grant, cap, shape, TTL), admin bearer secret. |
+| `src/registry.ts` | **New.** Tenant/Project reads + writes over the DO tables. The admission path's lookup surface. |
+| `src/quota.ts` | **New.** Weighted-minute math, UTC month key, balance arithmetic. Pure functions, no I/O. |
+| `src/policy.ts` | `shouldProvision(tenant, project)` — registry lookup replaces the env-string org comparison. |
+| `src/admission.ts` | Ordered decision gains: Tenant status → Project (or `allow_all_repos`) → shape ≤ `max_shape` → quota balance. Existing label identification and catalog validation unchanged. Refusals carry a reason the caller can turn into a check run. |
+| `src/coordinator.ts` | New tables; `jobs.tenant_id`; per-Tenant cap replaces global `MAX_CONCURRENT`; ledger writes on teardown; per-Tenant TTL feeds `sweep`/`reapUnregistered`. |
+| `src/github/auth.ts` | Installation-token cache keyed on `installation_id`. |
+| `src/github/client.ts` | Adds `createRunnerGroup`, `setRunnerGroupRepos`, `createCheckRun`. `generateJitConfig` takes the Tenant's org + group id. |
+| `src/handler.ts` | Resolves Tenant from webhook `installation.id`; threads it through; posts check runs on refusals per D17. |
+| `src/reconcile.ts` | **Extracted** from `handler.ts` (reconciler + reaper + sweeps) — the file is 623 lines and this work grows it; targeted split of code being touched. |
+| `src/admin.ts` | **New.** Bearer-authenticated `POST /admin/tenants`, `POST /admin/projects` (+ status changes). Approval orchestrates runner-group creation and fails closed (D12). |
+| `src/webhook.ts` | `parseWorkflowJob` also extracts `installation.id`. HMAC path unchanged (one App, one secret). |
 
 ## 6. Request flow (changed segments)
 
@@ -187,7 +187,7 @@ the shape catalog. A suspended Tenant's in-flight VMs still tear down cleanly.
   into `usage.egress_bytes`. Alert-only; never blocks teardown.
 - **Bill from the shape the VM actually ran, persisted at provision time — not
   reconstructed from config at teardown.** `weightForLabel` derives the weight
-  from `runnerLabel`/`runnerShape` as they read _now_, so changing either while
+  from `runnerLabel`/`runnerShape` as they read *now*, so changing either while
   a VM is alive reprices that VM against a shape it never ran on (a
   `RUNNER_LABEL` rename also strands the persisted `jobs.label`, per the
   AGENTS.md gotcha). `src/quota.ts` is pure and takes the shape as an argument,
@@ -217,7 +217,7 @@ multi-secret verify path.
 Order is load-bearing:
 
 1. Create the public App (same webhook URL, `checks:write` from day one, D17).
-2. **Install it on NodeOps-app _before_ deploying new code.** Old code 401s
+2. **Install it on NodeOps-app *before* deploying new code.** Old code 401s
    the new App's deliveries cleanly; NodeOps CI continues via the old App.
 3. Deploy the multi-tenant Worker holding the new App's credentials, NodeOps
    pre-seeded (D18). Old App now 401s.

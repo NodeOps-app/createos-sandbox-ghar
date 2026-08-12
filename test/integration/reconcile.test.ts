@@ -5,7 +5,7 @@ import {
   runInDurableObject,
 } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { runReconciler, runReaper, MAX_SANDBOX_DESTROYS_PER_TICK } from "../../src/reconcile";
+import { runReconciler, runReaper } from "../../src/reconcile";
 import { resetShapeCacheForTests } from "../../src/shapes";
 import { resetCredentialSessionsForTests } from "../../src/github/auth";
 import { shapeCatalog, runnerName } from "../helpers/mocks";
@@ -551,41 +551,6 @@ describe("runReconciler — orphaned sandbox sweep", () => {
     globalThis.fetch = realFetch;
   });
 
-  it("reclaims a leaked VM while a retry of the SAME job runs under the same name", async () => {
-    // VM names carry only a job id (`gha-ci-<jobId>`, stable across attempts to
-    // stay inside the 22-char createos cap), so a provision that 5xx'd AFTER the
-    // control plane created the VM leaves a leaked twin of the retry's VM. Keyed
-    // on job id alone both read as "live" and the leak was shielded for the whole
-    // life of the job — burning capacity during exactly the burst that made it.
-    const singleton = stub("singleton");
-    await singleton.onQueued(job(9808), "sb-sweep-superseded");
-    await singleton.recordSandboxCreated(9808, "sb_retry_9808", runnerName(9808), "default");
-    patchGitHub();
-    const leaked = { ...vm(vmName(9808)), id: "sb_leaked_9808", destroy: vi.fn() };
-    const retry = { ...vm(vmName(9808)), id: "sb_retry_9808", destroy: vi.fn() };
-
-    await runReconciler(env as any, depsWith([leaked, retry]));
-
-    expect(leaked.destroy).toHaveBeenCalledOnce(); // the row names the other VM
-    expect(retry.destroy).not.toHaveBeenCalled(); // the one the row owns
-    globalThis.fetch = realFetch;
-  });
-
-  it("spares a VM whose row has not recorded an id yet — the create-to-record window", async () => {
-    // A row between createSandbox returning and recordSandboxCreated persisting
-    // the id owns a very much alive VM it cannot name. Reading that null as
-    // "owns a different VM" would destroy every provision mid-flight.
-    const singleton = stub("singleton");
-    await singleton.onQueued(job(9809), "sb-sweep-unrecorded");
-    patchGitHub();
-    const midCreate = { ...vm(vmName(9809)), id: "sb_unrecorded_9809", destroy: vi.fn() };
-
-    await runReconciler(env as any, depsWith([midCreate]));
-
-    expect(midCreate.destroy).not.toHaveBeenCalled();
-    globalThis.fetch = realFetch;
-  });
-
   it("never destroys a VM it did not create", async () => {
     // The createos account also holds hand-made boxes and other projects' VMs.
     // The name is the only thing standing between them and a destroy call.
@@ -655,12 +620,7 @@ describe("runReconciler — orphaned sandbox sweep", () => {
         CREATEOS_REGIONS: "us=https://api-us.local,eu=https://api-eu.local",
       };
       const euOrphan = vm(vmName(9807));
-      // Exactly the shared cap, read from the source rather than hardcoded: the
-      // starvation this asserts only exists when the first region alone can
-      // exhaust the budget, so the count must follow the constant when it moves.
-      const usOrphans = Array.from({ length: MAX_SANDBOX_DESTROYS_PER_TICK }, (_, i) =>
-        vm(vmName(9820 + i)),
-      );
+      const usOrphans = [0, 1, 2, 3, 4].map((i) => vm(vmName(9820 + i)));
       const deps = {
         makeClient: (_c: unknown, region?: { name: string }) => ({
           createSandbox: vi.fn(),
@@ -870,33 +830,25 @@ describe("runReconciler — multi-tenant mode", () => {
     const s = stub("singleton");
     await s.adminUpsertTenant(approvedTenant(40201));
     await s.adminUpsertTenant(approvedTenant(40202));
-    // Tenant A needs MORE repos than one scan batch (8) for the budget to be able
-    // to bind part-way through it — the whole point of this case.
-    const aRepos = Array.from(
-      { length: 9 },
-      (_, i) => `mt-org-40201/r${String(i).padStart(2, "0")}`,
-    );
     patchMultiGitHub({
-      40201: { org: "mt-org-40201", repos: aRepos },
+      40201: { org: "mt-org-40201", repos: ["mt-org-40201/r1", "mt-org-40201/r2"] },
       40202: { org: "mt-org-40202", repos: ["mt-org-40202/r1"] },
     });
 
     // Cost per repo here is 2 subrequests (activeRunIds' two status reads; no
-    // jobsByRepo means queuedJobs is never reached) plus 1 for the tenant's own
-    // installationRepos() call. Repos are scanned in batches of 8 with the budget
-    // checked at batch boundaries: budget=3 commits to the first batch (spent 1 <
-    // 3), which covers r00-r07 for 16, then binds at the next boundary (17 >= 3).
-    // Tenant A is left mid-list and tenant B is never reached this tick.
+    // jobsByRepo means queuedJobs is never reached) plus 1 for the tenant's
+    // own installationRepos() call. Budget=3 covers tenant A's r1 (spent: 1 +
+    // 2 = 3) and hits the boundary check (3 >= 3) before r2 — budget-bound at
+    // tenant A, tenant B never reached this tick.
     await runReconciler(multiEnv({ RECOVERY_SUBREQUEST_BUDGET: "3" }), {});
     expect(await s.recoveryCursor()).toBe(
-      JSON.stringify({ installationId: 40201, repo: "mt-org-40201/r07" }),
+      JSON.stringify({ installationId: 40201, repo: "mt-org-40201/r1" }),
     );
 
     // Tick 2: rotation resumes AT tenant A (per its stored repo cursor, so it
-    // picks up where it stopped), a generous budget lets it finish A's remaining
-    // repos AND roll into tenant B, which the persisted cursor now reflects.
-    // A costs 1 + 9*2 = 19, so the budget must clear that with room for B.
-    await runReconciler(multiEnv({ RECOVERY_SUBREQUEST_BUDGET: "40" }), {});
+    // picks up r2), a generous budget lets it finish A's remaining repo AND
+    // roll into tenant B, which the persisted cursor now reflects.
+    await runReconciler(multiEnv({ RECOVERY_SUBREQUEST_BUDGET: "20" }), {});
     expect(await s.recoveryCursor()).toBe(
       JSON.stringify({ installationId: 40202, repo: "mt-org-40202/r1" }),
     );

@@ -25,29 +25,27 @@
 
 ## File Structure
 
-| File                                                                        | Status | Responsibility                                                                |
-| --------------------------------------------------------------------------- | ------ | ----------------------------------------------------------------------------- |
-| `src/lifecycle.ts`                                                          | create | Provisioning, failure disposal, teardown confirmation, and effect scheduling  |
-| `src/types.ts`                                                              | modify | Replace three overlapping result types with `LifecycleEffects`                |
-| `src/coordinator.ts`                                                        | modify | Return array-based lifecycle effects from every capacity-releasing transition |
-| `src/handler.ts`                                                            | modify | Delete lifecycle implementation and call the deep module                      |
-| `test/integration/lifecycle.test.ts`                                        | create | Verify teardown-first versus parallel execution and durable confirmation      |
-| `test/integration/{provision,reaper,reconcile,teardown,retirement}.test.ts` | modify | Expect arrays from the unified interface                                      |
-| `CONTEXT.md`                                                                | modify | Define lifecycle effects as the Worker half of a Coordinator transition       |
+| File | Status | Responsibility |
+| --- | --- | --- |
+| `src/lifecycle.ts` | create | Provisioning, failure disposal, teardown confirmation, and effect scheduling |
+| `src/types.ts` | modify | Replace three overlapping result types with `LifecycleEffects` |
+| `src/coordinator.ts` | modify | Return array-based lifecycle effects from every capacity-releasing transition |
+| `src/handler.ts` | modify | Delete lifecycle implementation and call the deep module |
+| `test/integration/lifecycle.test.ts` | create | Verify teardown-first versus parallel execution and durable confirmation |
+| `test/integration/{provision,reaper,reconcile,teardown,retirement}.test.ts` | modify | Expect arrays from the unified interface |
+| `CONTEXT.md` | modify | Define lifecycle effects as the Worker half of a Coordinator transition |
 
 ---
 
 ### Task 1: Unify Coordinator results and extract lifecycle execution
 
 **Files:**
-
 - Create: `src/lifecycle.ts`
 - Modify: `src/types.ts:90-123`
 - Modify: `src/coordinator.ts`
 - Modify: `src/handler.ts`
 
 **Interfaces:**
-
 - Consumes: `ControllerRuntime`, `PendingJob`, `TeardownTask`, Sandbox functions, Coordinator methods.
 - Produces:
   - `LifecycleEffects { toDestroy: TeardownTask[]; nextPending: PendingJob[] }`
@@ -89,32 +87,32 @@ async sweep(nowMs: number, maxAgeMs: number): Promise<LifecycleEffects>;
 In `markProvisionFailed`, normalize the private values once:
 
 ```ts
-const nextPending = this.#dequeuePending();
-return {
-  toDestroy: toDestroy ? [toDestroy] : [],
-  nextPending: nextPending ? [nextPending] : [],
-};
+    const nextPending = this.#dequeuePending();
+    return {
+      toDestroy: toDestroy ? [toDestroy] : [],
+      nextPending: nextPending ? [nextPending] : [],
+    };
 ```
 
 In both `onCompleted` return sites use:
 
 ```ts
-const nextPending = this.#dequeuePending();
-return {
-  toDestroy: [],
-  nextPending: nextPending ? [nextPending] : [],
-};
+      const nextPending = this.#dequeuePending();
+      return {
+        toDestroy: [],
+        nextPending: nextPending ? [nextPending] : [],
+      };
 ```
 
 and:
 
 ```ts
-const toDestroy = this.#retireRow(row);
-const nextPending = this.#dequeuePending();
-return {
-  toDestroy: toDestroy ? [toDestroy] : [],
-  nextPending: nextPending ? [nextPending] : [],
-};
+    const toDestroy = this.#retireRow(row);
+    const nextPending = this.#dequeuePending();
+    return {
+      toDestroy: toDestroy ? [toDestroy] : [],
+      nextPending: nextPending ? [nextPending] : [],
+    };
 ```
 
 `reapUnregistered` and `sweep` already build arrays; change only their declared result type and keep their returned object unchanged.
@@ -124,7 +122,11 @@ return {
 ```ts
 import { notify } from "./notify";
 import type { ControllerRuntime } from "./runtime";
-import { createRunnerSandbox, launchRunner, teardownSandbox } from "./sandbox";
+import {
+  createRunnerSandbox,
+  launchRunner,
+  teardownSandbox,
+} from "./sandbox";
 import type { LifecycleEffects, PendingJob, TeardownTask } from "./types";
 
 export type LifecycleMode = "teardown-first" | "parallel";
@@ -152,7 +154,11 @@ export async function provisionAndRecord(
   }
 
   try {
-    const decision = await coordinator.recordSandboxCreated(job.jobId, sandboxId, runnerName);
+    const decision = await coordinator.recordSandboxCreated(
+      job.jobId,
+      sandboxId,
+      runnerName,
+    );
     if (decision.action === "destroy") {
       await teardownSandbox(createos, sandboxId);
       return;
@@ -195,7 +201,9 @@ async function destroyUnrecorded(
   try {
     await teardownSandbox(runtime.createos, sandboxId);
   } catch (err) {
-    console.error(`unrecorded teardown failed sandbox=${sandboxId} job=${jobId}: ${String(err)}`);
+    console.error(
+      `unrecorded teardown failed sandbox=${sandboxId} job=${jobId}: ${String(err)}`,
+    );
     await notify(
       runtime.config,
       `ghar VM leaked — sandbox ${sandboxId} (job ${jobId}) has no Coordinator row and could not be destroyed: ${String(err)}. The orphaned-sandbox sweep will retry.`,
@@ -203,12 +211,17 @@ async function destroyUnrecorded(
   }
 }
 
-async function destroyAndConfirm(runtime: ControllerRuntime, task: TeardownTask): Promise<void> {
+async function destroyAndConfirm(
+  runtime: ControllerRuntime,
+  task: TeardownTask,
+): Promise<void> {
   try {
     await teardownSandbox(runtime.createos, task.sandboxId);
     await runtime.coordinator.markDestroyed(task.jobId);
   } catch (err) {
-    console.error(`teardown failed sandbox=${task.sandboxId} job=${task.jobId}: ${String(err)}`);
+    console.error(
+      `teardown failed sandbox=${task.sandboxId} job=${task.jobId}: ${String(err)}`,
+    );
     await notify(
       runtime.config,
       `ghar teardown failed — sandbox ${task.sandboxId} (job ${task.jobId}): ${String(err)}`,
@@ -261,14 +274,21 @@ ctx.waitUntil(executeLifecycleEffects(runtime, effects, "teardown-first"));
 `runReaper` becomes:
 
 ```ts
-const effects = await runtime.coordinator.sweep(Date.now(), runtime.config.reaperMaxAgeMs);
+const effects = await runtime.coordinator.sweep(
+  Date.now(),
+  runtime.config.reaperMaxAgeMs,
+);
 await executeLifecycleEffects(runtime, effects, "parallel");
 ```
 
 Reconciler step A becomes:
 
 ```ts
-const effects = await co.reapUnregistered(Date.now(), online, config.reconcileGraceMs);
+const effects = await co.reapUnregistered(
+  Date.now(),
+  online,
+  config.reconcileGraceMs,
+);
 await executeLifecycleEffects(runtime, effects, "parallel");
 ```
 
@@ -317,11 +337,9 @@ rtk git commit -m "refactor: deepen worker lifecycle"
 ### Task 2: Verify lifecycle scheduling semantics
 
 **Files:**
-
 - Create: `test/integration/lifecycle.test.ts`
 
 **Interfaces:**
-
 - Consumes: `createControllerRuntime`, adapter test helpers, `executeLifecycleEffects`.
 - Produces: regression coverage for teardown-first and parallel modes.
 
@@ -458,11 +476,9 @@ rtk git commit -m "test: cover lifecycle scheduling"
 ### Task 3: Document and fully verify the lifecycle seam
 
 **Files:**
-
 - Modify: `CONTEXT.md`
 
 **Interfaces:**
-
 - Consumes: Tasks 1–2.
 - Produces: canonical lifecycle-effect vocabulary and a verified runtime path.
 
