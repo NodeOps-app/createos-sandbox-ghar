@@ -281,6 +281,8 @@ describe("launchRunner", () => {
     });
     expect(runCommand.mock.calls[0]![0]).toBe("bash");
     expect(runCommand.mock.calls[0]![1][1]).toContain("setsid");
+    // fully detached in a subshell so the guest agent's exec read EOFs at once
+    expect(runCommand.mock.calls[0]![1][1]).toMatch(/\(\s*setsid .* &\s*\)/);
   });
 });
 
