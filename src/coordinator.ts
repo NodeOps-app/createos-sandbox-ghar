@@ -106,7 +106,7 @@ const ROW_AGE = "COALESCE(provision_started_at, created_at)";
  * tick for as long as the pending-expiry window allows. Past this the row is
  * dropped exactly as before and the slow recovery scan is the last resort.
  */
-const MAX_PROVISION_ATTEMPTS = 3;
+export const MAX_PROVISION_ATTEMPTS = 3;
 
 export class Coordinator extends DurableObject<Env> {
   #sql: SqlStorage;
@@ -367,6 +367,9 @@ export class Coordinator extends DurableObject<Env> {
         repoFullName: r.repo,
         state: r.state,
         ageMs: nowMs - r.created_at,
+        region: r.region,
+        attempts: r.attempts,
+        label: r.label,
       }));
   }
 

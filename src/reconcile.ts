@@ -18,7 +18,8 @@ import {
   type SandboxDeps,
 } from "./sandbox";
 import { makeSandboxClient, type ListedSandbox } from "./createos";
-import { notify, jobRef } from "./notify";
+import { notify, jobRef, alertContext } from "./notify";
+import { MAX_PROVISION_ATTEMPTS } from "./coordinator";
 import {
   coordinator,
   provisionAndRecord,
@@ -290,7 +291,14 @@ async function alertStaleJobs(env: Bindings, config: Config): Promise<void> {
         .map(
           (s) =>
             `• ${s.state}, waiting ${Math.round(s.ageMs / 1000)}s\n` +
-            jobRef(s.repoFullName, s.runId, s.jobId),
+            jobRef(s.repoFullName, s.runId, s.jobId) +
+            // A `pending` row has no region yet (it has not been provisioned) and
+            // attempt 0 — both render honestly rather than being faked.
+            alertContext({
+              region: s.region,
+              label: s.label,
+              attempt: s.attempts > 0 ? `${s.attempts}/${MAX_PROVISION_ATTEMPTS}` : null,
+            }),
         )
         .join("\n") +
       (shown.length < stale.length ? `\n…and ${stale.length - shown.length} more (see logs)` : ""),

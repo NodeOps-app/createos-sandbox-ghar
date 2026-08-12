@@ -258,4 +258,10 @@ export interface StaleJob {
   repoFullName: string;
   state: string;
   ageMs: number;
+  // The three fields that turn "a job is stuck" into "and here is where to look":
+  // which control plane it is stuck against, how close it is to being dropped,
+  // and what size it asked for. All already on the row — staleJobs SELECTs *.
+  region: string | null;
+  attempts: number;
+  label: string | null;
 }
