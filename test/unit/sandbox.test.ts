@@ -531,6 +531,49 @@ describe("createRunnerSandbox region failover", () => {
     expect(github.generateJitConfig).toHaveBeenCalledOnce();
   });
 
+  // Strict primary-first put every provision on regions[0] and only spilled to
+  // the rest on a fault, so one control plane absorbed the whole burst while the
+  // others idled. The ladder now starts at jobId % N.
+  it("spreads healthy provisions across regions by job id, still covering every region on failover", async () => {
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+    const picked = async (jobId: number) => {
+      const us = { createSandbox: vi.fn().mockResolvedValue({ id: "sb_us", runCommand: vi.fn() }) };
+      const eu = { createSandbox: vi.fn().mockResolvedValue({ id: "sb_eu", runCommand: vi.fn() }) };
+      const res = await createRunnerSandbox(
+        twoRegions,
+        github,
+        { ...job, jobId },
+        regionRoutedClients({ us, eu }),
+      );
+      // The region that did NOT boot it was never dialed — balancing must not
+      // cost an extra create call.
+      expect((res.region === "us" ? eu : us).createSandbox).not.toHaveBeenCalled();
+      return res.region;
+    };
+
+    expect(await picked(100)).toBe("us");
+    expect(await picked(101)).toBe("eu");
+
+    // An odd job now STARTS at eu, so failover has to walk back round to us.
+    const us = { createSandbox: vi.fn().mockResolvedValue({ id: "sb_us", runCommand: vi.fn() }) };
+    const eu = {
+      createSandbox: vi
+        .fn()
+        .mockRejectedValue(
+          new CreateosSandboxServerError("eu down", new Response(null, { status: 503 })),
+        ),
+    };
+    const res = await createRunnerSandbox(
+      twoRegions,
+      github,
+      { ...job, jobId: 101 },
+      regionRoutedClients({ us, eu }),
+    );
+    expect(res.region).toBe("us");
+    expect(eu.createSandbox).toHaveBeenCalledOnce();
+    expect(us.createSandbox).toHaveBeenCalledOnce();
+  });
+
   it("throws the retry's error when the wave has not cleared", async () => {
     const us = {
       createSandbox: vi

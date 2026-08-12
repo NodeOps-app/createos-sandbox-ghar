@@ -2,10 +2,12 @@ export type ProvisionPolicy = "org-wide" | "repo-allowlist" | "fork-gated";
 
 /**
  * One CreateOS control plane. `regions[0]` is the primary — every admission-time
- * read (shape catalog) and every pre-region row targets it. Provisioning fails
- * over to the rest in order on region-level faults (see isFailoverEligible), and
- * the region that actually booted the VM is persisted on the job row so teardown
- * dials the control plane that owns it.
+ * read (shape catalog) and every pre-region row targets it. PROVISIONING does not:
+ * it starts at a per-job offset (see regionLadder) so creates spread across the
+ * list instead of piling onto the primary, then fails over through the remaining
+ * regions in order on region-level faults (see isFailoverEligible). The region
+ * that actually booted the VM is persisted on the job row so teardown dials the
+ * control plane that owns it.
  */
 export interface Region {
   name: string; // "us" | "eu" | "default" (legacy CREATEOS_BASE_URL fallback)

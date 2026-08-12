@@ -4,7 +4,6 @@ import type { GitHubClient } from "./github/client";
 import {
   isFailoverEligible,
   makeSandboxClient,
-  primaryRegion,
   regionByName,
   type SandboxDeps,
   type SandboxHandle,
@@ -22,6 +21,27 @@ import { shapeForLabel } from "./shapes";
 const RETRY_ALL_REGIONS_MS = 1_500;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The order this job tries the configured control planes in — every region, once,
+ * starting at a per-job offset so provisions SPREAD instead of all landing on
+ * `regions[0]` and only spilling over on a fault.
+ *
+ * The offset is `jobId % N` rather than a counter or a random pick because a
+ * Worker isolate has no shared state to round-robin with, and reaching into the
+ * DO for one would put a blocking call on the provisioning hot path. Job ids are
+ * dense and monotonic, so modulo spreads a burst evenly across N regions, scales
+ * to any N without a config change, and — unlike random — is reproducible: the
+ * job id in a log line tells you which region it should have started at.
+ *
+ * Failover semantics are unchanged: the ladder still walks EVERY region before
+ * giving up, only the starting point moves.
+ */
+function regionLadder(config: Config, jobId: number): Region[] {
+  const regions = config.createosRegions;
+  const start = jobId % regions.length;
+  return regions.map((_, i) => regions[(start + i) % regions.length]!);
+}
 
 // Re-exported so existing consumers (handler.ts, index.ts, tests) keep importing
 // SandboxDeps/SandboxHandle from here.
@@ -219,33 +239,38 @@ export async function createRunnerSandbox(
     };
   };
 
-  // Region failover: the JIT config is minted ONCE and reused on every attempt
-  // — it is a GitHub credential, indifferent to which control plane boots the
-  // VM. Retry only on region-level faults (isFailoverEligible: 5xx/connection/
-  // timeout — capacity exhaustion is a bare 503); a 4xx is a request defect and
-  // fails identically everywhere. A single configured region loops exactly once,
-  // i.e. the pre-region behavior. If an attempt throws AFTER the VM booted
-  // server-side (response lost), that VM leaks under a stable per-job name the
-  // orphaned-sandbox sweep reclaims — same as the pre-failover leak path.
-  for (const [i, region] of config.createosRegions.entries()) {
+  // Region failover over the balanced ladder (regionLadder): the JIT config is
+  // minted ONCE and reused on every attempt — it is a GitHub credential,
+  // indifferent to which control plane boots the VM. Retry only on region-level
+  // faults (isFailoverEligible: 5xx/connection/timeout — capacity exhaustion is a
+  // bare 503); a 4xx is a request defect and fails identically everywhere. A
+  // single configured region loops exactly once, i.e. the pre-region behavior. If
+  // an attempt throws AFTER the VM booted server-side (response lost), that VM
+  // leaks under a stable per-job name the orphaned-sandbox sweep reclaims — same
+  // as the pre-failover leak path.
+  const ladder = regionLadder(config, job.jobId);
+  for (const [i, region] of ladder.entries()) {
     try {
       return await attempt(region);
     } catch (err) {
       if (!isFailoverEligible(err)) throw err;
-      if (i < config.createosRegions.length - 1) {
+      if (i < ladder.length - 1) {
         console.warn(
           `createSandbox failed in region ${region.name} job=${job.jobId}: ${String(err)} — ` +
-            `failing over to ${config.createosRegions[i + 1]!.name}`,
+            `failing over to ${ladder[i + 1]!.name}`,
         );
         continue;
       }
       // Every region refused, and every refusal was region-level. Before giving
       // the job back to the Coordinator — which can only retry it on the next
-      // cron tick, minutes away — spend one more attempt on the primary after a
-      // short pause. A 5xx wave that hits every region at once (measured
-      // 2026-08-10 on a 45-job matrix burst) clears in seconds, so this is the
-      // difference between a job starting late and a job starting after a full
-      // retry cycle.
+      // cron tick, minutes away — spend one more attempt on this job's OWN first
+      // region after a short pause. A 5xx wave that hits every region at once
+      // (measured 2026-08-10 on a 45-job matrix burst) clears in seconds, so this
+      // is the difference between a job starting late and a job starting after a
+      // full retry cycle. Retrying `ladder[0]` rather than the global primary
+      // keeps the retry wave as spread as the first wave was — funnelling every
+      // job's last chance onto one control plane is the concentration
+      // regionLadder exists to avoid.
       //
       // Deliberately ONE attempt, at ONE region, after a delay: retrying the
       // whole ladder immediately would double the create load on a control plane
@@ -253,12 +278,12 @@ export async function createRunnerSandbox(
       // IS overload. The spaced-out retries belong to the Coordinator
       // (#requeueForRetry, ~5 min apart), which is the right backoff for a wave.
       console.warn(
-        `createSandbox failed in every region (${config.createosRegions.length}) ` +
+        `createSandbox failed in every region (${ladder.length}) ` +
           `job=${job.jobId}: ${String(err)} — one retry at ` +
-          `${primaryRegion(config).name} in ${RETRY_ALL_REGIONS_MS}ms`,
+          `${ladder[0]!.name} in ${RETRY_ALL_REGIONS_MS}ms`,
       );
       await (deps.sleep ?? sleep)(RETRY_ALL_REGIONS_MS);
-      return await attempt(primaryRegion(config));
+      return await attempt(ladder[0]!);
     }
   }
   // Unreachable: the last iteration either returns or throws. TS needs the exit.
