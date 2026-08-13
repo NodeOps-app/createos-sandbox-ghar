@@ -6,6 +6,11 @@ export { Coordinator };
 
 export interface Bindings {
   COORDINATOR: DurableObjectNamespace<Coordinator>;
+  /**
+   * Which code is actually live. Optional because the test runtime does not
+   * provide it — see the `/version` route.
+   */
+  CF_VERSION_METADATA?: { id: string; tag: string; timestamp: string };
   [key: string]: unknown;
 }
 
@@ -14,6 +19,22 @@ export default {
     const url = new URL(req.url);
     if (req.method === "GET" && url.pathname === "/health") {
       return new Response("ok", { status: 200 });
+    }
+    // Which version is serving right now. A push to `main` deploys via Workers
+    // Builds, which lands ~30-45s AFTER the push — while a smoke job gets a
+    // runner in ~5s. So `ghar-test` would provision against the PREVIOUS
+    // version and report on code that was never tested. Its wait-for-deploy
+    // gate polls this route until `timestamp` passes the push, which is the
+    // only thing that makes the smoke a statement about the pushed commit.
+    // Unauthenticated on purpose: it is the deploy's own liveness signal, it
+    // exposes nothing but a version id, and requiring a token would put a
+    // Cloudflare credential in the smoke workflow to learn a public fact.
+    if (req.method === "GET" && url.pathname === "/version") {
+      const v = env.CF_VERSION_METADATA;
+      return Response.json(
+        v ? { id: v.id, tag: v.tag, timestamp: v.timestamp } : { error: "no version binding" },
+        { status: v ? 200 : 503 },
+      );
     }
     if (req.method === "POST" && url.pathname === "/webhook") {
       return handleWebhook(req, env, ctx);

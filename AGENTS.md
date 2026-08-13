@@ -60,7 +60,7 @@ Each file does one thing. Keep files under 1100 lines.
 
 | File                              | Responsibility                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/index.ts`                    | Worker entry: `fetch` router (`/health`, `/webhook`) + `scheduled` (cron). Exports the `Coordinator` DO.                                                                                                                                                                                                                                                                                                                                                                         |
+| `src/index.ts`                    | Worker entry: `fetch` router (`/health`, `/version`, `/webhook`) + `scheduled` (cron). Exports the `Coordinator` DO. `/version` reads the `[version_metadata]` binding so `ghar-test` can tell which build is live.                                                                                                                                                                                                                                                                                                                                                                         |
 | `src/config.ts`                   | `loadConfig(env)` → validated `Config`. **All** env parsing lives here.                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `src/types.ts`                    | Shared domain types — the interface contract between modules.                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `src/webhook.ts`                  | `verifySignature` (HMAC), `parseWorkflowJob`, `matchesLabel`. Pure.                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -147,5 +147,41 @@ Before claiming a change works:
 4. For anything touching the provisioning or teardown path, run the end-to-end smoke: **Actions → `ghar-test` → Run workflow** — a `ghar-<jobId>` microVM must boot, run green, and disappear.
 
 Do not claim "it works" from a passing test suite alone if you changed the runtime path — the tests mock the network, so they cannot catch Workers-runtime traps (see the `fetch` gotcha above).
+
+### A release is stable only once `ghar-test` is green
+
+`ghar-test` also runs on every push to `main`, and **all ten jobs must pass** for
+that deploy to count as stable. Actions cannot gate the deploy — Workers Builds
+already shipped it — so this is post-deploy verification: watch the run, and roll
+back if it goes red.
+
+Three things about that workflow are load-bearing and easy to "simplify" away:
+
+- **The smoke must wait for its own deploy.** Workers Builds publishes ~30-45s
+  after the push (measured: `07bf774` pushed 14:44:55Z, live 14:45:42Z) while a
+  smoke job gets a runner in ~5s — so an ungated push-triggered run provisions
+  against the version the push *replaced*, and a green smoke certifies code that
+  never ran. `wait-for-deploy` polls `GET /version` until the live version is
+  newer than the push. It reads the run's server-side `run_started_at`, **not**
+  the commit timestamp, which a pusher controls and could backdate to satisfy the
+  gate instantly. It also must not carry an `if:` at job level — a skipped job
+  skips everything that `needs:` it, which would disable the whole smoke on
+  `workflow_dispatch`; it exits 0 internally instead.
+
+- **`timeout-minutes` does not catch the failure that matters.** A job-level
+  timeout starts when a job is assigned to a runner, so a job that is *never*
+  assigned is never cancelled. When provisioning breaks, the smoke does not go
+  red — it goes silent, and silence reads as success. The `verdict` job runs on
+  a GitHub-hosted runner with **no `needs:`** (a `needs:` on a hung job hangs too)
+  and turns "still queued past the deadline" into a red run. Keep both properties.
+- **Red does not always mean roll back.** `verdict` probes CreateOS directly —
+  a builtin rootfs against a custom template — because a broken *platform* looks
+  identical to a broken *deploy* from inside Actions. On 2026-08-12 that
+  distinction cost hours: 14 good commits were reverted during a CreateOS
+  outage and it fixed nothing. Custom-template exec broken means escalate, not
+  roll back.
+
+Rollback is `bunx wrangler@latest rollback <version-id>` and reverts **code
+only** — see the migration rule under Conventions before using it.
 
 > A local, untracked `.agents/` directory (if present) holds this deployment's ADRs, design specs and status notes. Read it before changing architecture; it is not part of the public repo.

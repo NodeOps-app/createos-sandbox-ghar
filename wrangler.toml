@@ -17,6 +17,12 @@ new_sqlite_classes = ["Coordinator"]
 [triggers]
 crons = ["*/5 * * * *"]
 
+# Lets the Worker report which version is serving, on GET /version. `ghar-test`
+# gates its smoke jobs on that timestamp so it tests the code the push deployed
+# rather than the one it replaced — see the route comment in src/index.ts.
+[version_metadata]
+binding = "CF_VERSION_METADATA"
+
 [vars]
 GITHUB_ORG = "NodeOps-app"
 CREATEOS_BASE_URL = "https://api.sb.createos.sh"

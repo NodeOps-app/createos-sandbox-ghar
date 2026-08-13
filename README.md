@@ -156,7 +156,12 @@ Point the GitHub App's webhook URL at the deployed Worker (`https://<worker>.wor
 
 ```bash
 curl https://<worker>.workers.dev/health     # → ok
+curl https://<worker>.workers.dev/version    # → {"id":"…","tag":"","timestamp":"…"}
 ```
+
+`/version` reports which build is serving. Both routes are public and
+unauthenticated; `/version` exposes only a Cloudflare version id. `ghar-test`
+polls it to wait for its own deploy before smoking (see AGENTS.md).
 
 Then add a `runs-on: [createos]` job to a repo in the org and watch a microVM boot, run it, and disappear. This repo ships one: **Actions → ghar-test → Run workflow**.
 

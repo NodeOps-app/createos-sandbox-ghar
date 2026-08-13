@@ -1,11 +1,90 @@
 name: ghar-test
 
+# A push to `main` IS a production deploy (Cloudflare Workers Builds deploys from
+# `main` itself — see AGENTS.md). Actions cannot gate that, so this workflow is
+# post-deploy verification, not a pre-merge gate: the code is already live by the
+# time these jobs run. A release counts as stable only once all ten jobs are green;
+# the `verdict` job below says so out loud and tells you how to roll back.
+#
+# No `paths-ignore`: Workers Builds redeploys on ANY push to main, docs included,
+# so every push is a deploy worth verifying.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  # Same hardcoded prod Worker as scripts/onboard-tenant.sh and
+  # tools/ghar-degradation.sh. Only /version is read, and it is public.
+  WORKER_URL: https://createos-sandbox-ghar.hello-927.workers.dev
 
 jobs:
+  # Makes the smoke a statement about the commit that was just pushed.
+  #
+  # Workers Builds deploys from `main` on its own, and it lands ~30-45s after the
+  # push (measured: 07bf774 pushed 14:44:55Z, live 14:45:42Z). A smoke job gets a
+  # runner in ~5s. So without this gate every push-triggered run provisions
+  # against the version the push REPLACED, and a green smoke would certify code
+  # that never ran. Poll GET /version until the live version is newer than the
+  # push, then let the createos jobs go.
+  #
+  # No Cloudflare credential: /version is public, which is the whole reason the
+  # route exists rather than a `wrangler deployments list` call.
+  wait-for-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+    steps:
+      # Deliberately not `if:` on the job — a SKIPPED job skips everything that
+      # `needs:` it, which would disable the whole smoke on workflow_dispatch.
+      # The job always runs and exits 0 when there is no deploy to wait for.
+      - name: Wait for Workers Builds to publish this push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -uo pipefail
+          if [ "$EVENT" != "push" ]; then
+            echo "event=$EVENT — nothing was deployed by this run, going straight to smoke"
+            exit 0
+          fi
+
+          # Server-side push time, not the commit's own timestamp: a commit date
+          # is attacker-controlled and a backdated one would satisfy the gate
+          # instantly, which is the one direction that silently defeats it.
+          pushed=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq '.run_started_at')
+          pushed_s=$(date -u -d "$pushed" +%s)
+          echo "push registered at $pushed"
+
+          deadline=$(( $(date +%s) + 9 * 60 ))
+          while :; do
+            # 404 until the first deploy carrying /version lands — that is a
+            # valid "not yet", not an error.
+            live=$(curl -fsS -m 10 "$WORKER_URL/version" | jq -r '.timestamp // empty' 2>/dev/null || true)
+            if [ -n "$live" ]; then
+              live_s=$(date -u -d "$live" +%s 2>/dev/null || echo 0)
+              if [ "$live_s" -gt "$pushed_s" ]; then
+                echo "live version published at $live ($(( live_s - pushed_s ))s after the push) — releasing the smoke"
+                exit 0
+              fi
+              echo "live version is $live, older than the push — waiting"
+            else
+              echo "/version not answering yet — waiting"
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::Workers Builds did not publish a newer version within 9m — the smoke would have tested the previous deploy, so failing instead."
+              exit 1
+            fi
+            sleep 10
+          done
+
   smoke:
+    needs: wait-for-deploy
     runs-on: [createos]
+    timeout-minutes: 15
     steps:
       - name: Identify the runner
         run: |
@@ -35,7 +114,9 @@ jobs:
           test "$(docker run --rm ghar-smoke:latest cat /proof)" = "baked"
 
   smoke-services:
+    needs: wait-for-deploy
     runs-on: [createos]
+    timeout-minutes: 15
     services:
       redis:
         image: redis:7-alpine
@@ -52,7 +133,10 @@ jobs:
   # (/dev/fd for asdf's checksum, /dev/shm for shared memory, a C toolchain for cgo, and a
   # tool cache at the path setup-python's RUNPATH is hard-linked to).
   smoke-toolchain:
+    needs: wait-for-deploy
     runs-on: [createos]
+    # Longest job by far: it installs Go, three Pythons, Bun and asdf at job time.
+    timeout-minutes: 30
     steps:
       - name: Prove the ubuntu-latest baseline is present
         run: |
@@ -121,6 +205,7 @@ jobs:
   # are denied at label admission, so a job can never land on one. Add a row here
   # when the catalog grows a shape — an unlisted shape is an untested shape.
   smoke-shaped:
+    needs: wait-for-deploy
     strategy:
       fail-fast: false
       matrix:
@@ -139,6 +224,7 @@ jobs:
           # then it flakes the smoke without exercising any controller code path.
     name: smoke-shaped (${{ matrix.label }})
     runs-on: ${{ matrix.label }}
+    timeout-minutes: 15
     steps:
       - name: Identify the runner
         run: |
@@ -146,3 +232,143 @@ jobs:
           echo "host: $(hostname)"
           echo "cpus: $(nproc)   mem: $(free -h | awk '/Mem:/{print $2}')"
           echo "disk: $(df -h / | awk 'NR==2{print $2" total, "$4" free"}')"
+
+  # The release verdict. This job exists because a broken controller does not make
+  # the smoke go red — it makes it go SILENT. When provisioning breaks, the jobs
+  # above sit `queued` waiting for a runner that never arrives, and `timeout-minutes`
+  # does NOT save you: a job-level timeout starts counting when a job is assigned to
+  # a runner, so a job that is never assigned is never cancelled. On 2026-08-12 ten
+  # jobs sat queued for 1h40m while the run still read "in progress" — no failure
+  # signal anywhere. So this job runs on a GitHub-hosted runner (never blocked by
+  # our own infra), watches the run from outside, and converts "still queued past
+  # the deadline" into a red run.
+  #
+  # It deliberately takes NO `needs:` — a `needs:` on a job that hangs forever would
+  # hang this one too, which is the exact failure it exists to catch.
+  #
+  # On red it also answers the question that actually decides what you do next:
+  # is it this commit, or is the platform down? It probes CreateOS directly — a
+  # builtin rootfs vs a custom template. Both broken, or builtin fine and custom
+  # broken, means the platform, and rolling back our code will not help. That
+  # distinction is not academic: the 2026-08-12 rollback reverted 14 good commits
+  # during a platform outage and fixed nothing.
+  #
+  # Alert-only by design. It never rolls back on its own; it tells a human exactly
+  # how to. Permissions are `actions: read` and nothing else, and it holds
+  # CREATEOS_API_KEY with no repo write (same split as bump-runner.yml).
+  verdict:
+    name: verdict
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      actions: read
+    steps:
+      - name: Wait for the smoke jobs and judge the run
+        id: judge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          # Generous: a healthy run provisions in seconds and finishes in minutes.
+          # This is the "never arrived" threshold, not a performance budget.
+          DEADLINE_MIN: 25
+        run: |
+          set -uo pipefail
+          deadline=$(( $(date +%s) + DEADLINE_MIN * 60 ))
+          while :; do
+            jobs=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
+                     --jq '.jobs[] | select(.name != "verdict") | "\(.status)\t\(.conclusion // "-")\t\(.name)"' 2>/dev/null)
+            # An empty read is a GitHub API hiccup, not a green run — never let it
+            # short-circuit the wait, or a transient 502 reads as "all jobs done".
+            if [ -n "$jobs" ]; then
+              pending=$(printf '%s\n' "$jobs" | grep -cE '^(queued|in_progress)' || true)
+              if [ "$pending" -eq 0 ]; then stuck=0; break; fi
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then stuck=1; break; fi
+            sleep 20
+          done
+
+          printf '%s\n' "$jobs" | awk -F'\t' '{printf "%-12s %-10s %s\n", $1, $2, $3}'
+
+          bad=$(printf '%s\n' "$jobs" | awk -F'\t' '$2 != "success"' | wc -l | tr -d ' ')
+          {
+            echo "stuck=$stuck"
+            echo "bad=$bad"
+            if [ "$stuck" = "0" ] && [ "$bad" = "0" ]; then echo "ok=true"; else echo "ok=false"; fi
+          } >> "$GITHUB_OUTPUT"
+
+          # `if`, not `[ … ] && echo`: a false `&&` as the last command in the group
+          # makes the group — and so the whole step — exit 1, failing a green run.
+          {
+            echo "### ghar smoke"
+            echo
+            echo '```'
+            printf '%s\n' "$jobs" | awk -F'\t' '{printf "%-12s %-10s %s\n", $1, $2, $3}'
+            echo '```'
+            if [ "$stuck" = "1" ]; then
+              echo "> Jobs were still waiting for a runner after ${DEADLINE_MIN}m — provisioning never delivered."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Is it us or is it the platform? A builtin rootfs is the control; a custom
+      # template is what our runners actually boot from. Only the custom side
+      # failing still means the platform (2026-08-12), because no Worker code sits
+      # in this path — this is a raw control-plane call.
+      - name: Probe CreateOS to place the blame
+        if: steps.judge.outputs.ok != 'true'
+        id: probe
+        env:
+          CREATEOS_API_KEY: ${{ secrets.CREATEOS_API_KEY }}
+          BASE: https://api.sb.createos.sh
+        run: |
+          set -uo pipefail
+          api() { curl -s -m 45 -H "X-Api-Key: $CREATEOS_API_KEY" "$@"; }
+
+          boot_and_exec() {
+            id=$(api -X POST -H 'content-type: application/json' \
+                   -d "{\"name\":\"verdict-probe\",\"rootfs\":\"$1\",\"shape\":\"s-1vcpu-2gb\",\"disk_mib\":10240}" \
+                   "$BASE/v1/sandboxes" | jq -r '.data.id // empty')
+            [ -n "$id" ] || { echo "no"; return; }
+            sleep 3
+            out=$(api -X POST -H 'content-type: application/json' \
+                    -d '{"cmd":"bash","args":["-c","echo OK"]}' "$BASE/v1/sandboxes/$id/exec" \
+                  | jq -r 'select(.data.result.exit_code == 0) | "yes"')
+            api -X DELETE "$BASE/v1/sandboxes/$id" > /dev/null
+            echo "${out:-no}"
+          }
+
+          tpl=$(api "$BASE/v1/templates" | jq -r '(.data.data // .data)[] | select(.name == "ghar-runner") | .id' | head -1)
+          builtin=$(boot_and_exec "debian:13")
+          custom=$([ -n "$tpl" ] && boot_and_exec "$tpl" || echo "no")
+          echo "builtin(debian:13)=$builtin  custom(ghar-runner)=$custom"
+
+          if [ "$custom" = "no" ]; then blame=platform; else blame=ours; fi
+          echo "blame=$blame" >> "$GITHUB_OUTPUT"
+
+      - name: Say what to do
+        if: steps.judge.outputs.ok != 'true'
+        env:
+          BLAME: ${{ steps.probe.outputs.blame }}
+        run: |
+          {
+            if [ "$BLAME" = "platform" ]; then
+              echo "## :no_entry: NOT a stable release — but do NOT roll back"
+              echo
+              echo "CreateOS cannot exec into a custom template right now, and no Worker code"
+              echo "is in that path. Rolling back our code will not fix it. Escalate to the"
+              echo "CreateOS team, then re-run this workflow once they confirm a fix."
+            else
+              echo "## :rotating_light: NOT a stable release — roll back"
+              echo
+              echo "CreateOS itself is answering, so this points at the deployed Worker."
+              echo
+              echo '```bash'
+              echo "bunx wrangler@latest deployments list   # note the version id BELOW the current one"
+              echo "bunx wrangler@latest rollback <version-id>"
+              echo '```'
+              echo
+              echo "Rollback reverts **code only** — a DO SQLite migration does not revert."
+              echo "Confirm the change was additive before rolling back (see AGENTS.md)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
