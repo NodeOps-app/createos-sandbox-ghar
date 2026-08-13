@@ -158,7 +158,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh api /rate_limit --jq '.rate.limit'
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.3"
       - name: Prove cgo and the race detector work
@@ -174,7 +174,7 @@ jobs:
       # the interpreter it drops must actually load libpython — which only happens if
       # RUNNER_TOOL_CACHE matches the RUNPATH those binaries were linked against. The org
       # asks for 3.11, 3.12 and 3.13, so prove the span rather than one lucky version.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: |
             3.11
