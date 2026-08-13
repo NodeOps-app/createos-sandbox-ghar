@@ -11,6 +11,7 @@
 **Cron reconciler — DEPLOYED + smoke-verified (2026-07-07, version `b6cf4216`).** The `*/5` cron now runs `runReconciler` then `runReaper` (sequential; shared singleton DO). Reconciler closes the two gaps a webhook-only controller can't: (A) reap VMs whose runner never came online past `RECONCILE_GRACE_MS` (180s), keyed on live runner identity not age; (B) replay every still-`queued` label job through `onQueued` (GitHub as source of truth) so an abandoned/never-delivered `queued` webhook is re-driven within one tick. Both GitHub reads fail safe (an API error skips the step). Slot release is unified: `reapUnregistered`/`sweep` promote pending jobs into freed slots via `#drainPending` (the same canonical `#dequeuePending` completions use) — a bulk reap no longer frees capacity that nothing is pulled into. `GitHubClient` list reads are fully paginated (`#getPaged`, warns on `MAX_PAGES`); `#activeRunIds` is `?status=`-filtered so it walks only active runs. Post-deploy `ghar-test.yml` smoke ran green (happy path unregressed). The original stuck run (`sdk` #28826369965, 5 jobs queued ~9h) had already self-resolved to `failure` before deploy, so nothing to re-drive there.
 
 Known gaps / follow-ups:
+
 - `fc-sdk` carries the same Workers fetch-bind fix on branch `fix/workers-fetch-bind` — needs push + republish there.
 - `org-wide` policy serves fork PRs (safety = VM isolation + `MAX_CONCURRENT`); tighten to `repo-allowlist`/`fork-gated` for public repos.
 - Alerting is live (provision + teardown failures) but dormant until `ALERT_WEBHOOK_URL` secret is set.

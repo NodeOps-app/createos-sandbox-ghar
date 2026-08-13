@@ -27,6 +27,7 @@ export interface GitHubTenant {
 export class GitHubClient {
   #tokens: TokenCache;
   #subrequests = 0;
+  #rateLimit: { remaining: number; limit: number } | null = null;
   constructor(
     private config: Config,
     // Bound to globalThis so `this.fetchImpl(...)` keeps fetch's own `this`
@@ -126,12 +127,32 @@ export class GitHubClient {
     return this.#subrequests;
   }
 
+  /**
+   * `x-ratelimit-remaining` / `x-ratelimit-limit` from the most recent GET, or
+   * null before the first one.
+   *
+   * The recovery scan's real ceiling is not the subrequest budget but this: an
+   * App installation gets 5,000 requests/hour (more for large installations, by a
+   * rule GitHub does not let us query), and a 300-repo scan costs ~600 reads —
+   * so raising the budget to cover a whole installation every 5-minute tick would
+   * mean ~7,200/hour. The header is the only way to learn which tier we are on,
+   * which is why the reconciler logs it once per tick instead of guessing.
+   */
+  get rateLimit(): { remaining: number; limit: number } | null {
+    return this.#rateLimit;
+  }
+
   async #get<T>(path: string): Promise<T> {
     this.#subrequests++;
     const res = await this.fetchImpl(`${this.config.githubApiUrl}${path}`, {
       method: "GET",
       headers: await this.#headers(),
     });
+    const remaining = Number(res.headers.get("x-ratelimit-remaining"));
+    const limit = Number(res.headers.get("x-ratelimit-limit"));
+    if (Number.isFinite(remaining) && Number.isFinite(limit) && limit > 0) {
+      this.#rateLimit = { remaining, limit };
+    }
     if (!res.ok) throw new Error(`GET ${path} failed: ${res.status} ${await res.text()}`);
     return (await res.json()) as T;
   }

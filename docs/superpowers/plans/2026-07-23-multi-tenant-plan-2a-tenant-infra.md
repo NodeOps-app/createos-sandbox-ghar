@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land the tenant-runtime **infrastructure** — reconcile extraction, tenancy flag, DO tenant admission + per-tenant cap, quota ledger, per-tenant GitHub identity + org endpoints — behind `TENANCY_MODE` defaulting to `single`, so deploying this plan changes **nothing** in production. The wiring that *uses* it (webhook gate ladder, per-tenant TTL, approval orchestration, multi-tenant reconciler, deploy checkpoint) is **Plan 2b**.
+**Goal:** Land the tenant-runtime **infrastructure** — reconcile extraction, tenancy flag, DO tenant admission + per-tenant cap, quota ledger, per-tenant GitHub identity + org endpoints — behind `TENANCY_MODE` defaulting to `single`, so deploying this plan changes **nothing** in production. The wiring that _uses_ it (webhook gate ladder, per-tenant TTL, approval orchestration, multi-tenant reconciler, deploy checkpoint) is **Plan 2b**.
 
 **Architecture:** The webhook queued path in `multi` mode becomes: identify label (pure, filters ~all traffic free) → one DO read `admitTenantJob` (tenant status + project + quota balance in one RPC) → pure shape-ceiling check → cached catalog validate → `onQueued` carrying `{tenantId, weight, cap}`. Billing writes happen in the one place every teardown already confirms (`markDestroyed`), using a **weight persisted at admission time** (commit `11fb56c`) with the quota.ts label parse as fallback for old rows. Per-tenant GitHub identity rides the existing `credentialSession` registry (already keyed by installation id). The reconciler gains a tenant loop; the reaper reads per-tenant TTLs via SQL join. Refusal check runs are deduped to one per (repo, UTC day) via a DO insert-or-ignore.
 
@@ -32,11 +32,13 @@
 ### Task 1: Extract `src/reconcile.ts` (pure move, no behavior change)
 
 **Files:**
+
 - Create: `src/reconcile.ts`
 - Modify: `src/handler.ts` (remove moved code; `export` shared helpers), `src/index.ts` (import from `./reconcile`)
 - Modify: any test importing `runReconciler`/`runReaper` from `../../src/handler` (find with the rg below)
 
 **Interfaces:**
+
 - Consumes: `provisionAndRecord`, `destroyAndConfirm`, `failProvision` — these STAY in `handler.ts` and become `export`ed (they are the webhook path's provisioning core; reconcile shares them).
 - Produces: `runReconciler(env: Bindings, deps?: SandboxDeps): Promise<void>` and `runReaper(env: Bindings, deps?: SandboxDeps): Promise<void>` exported from `src/reconcile.ts` with signatures identical to today's.
 
@@ -82,10 +84,12 @@ git commit -m "refactor: extract cron reconcile/reap into reconcile.ts"
 ### Task 2: Tenancy flag + webhook `installation.id`/`head_sha`
 
 **Files:**
+
 - Modify: `src/types.ts` (`Config`, `WorkflowJob`), `src/config.ts`, `src/webhook.ts`
 - Test: `test/unit/config.test.ts`, `test/unit/webhook.test.ts` (extend)
 
 **Interfaces:**
+
 - Produces:
   - `Config.tenancyMode: "single" | "multi"` (env `TENANCY_MODE`, default `"single"`, anything else throws)
   - `Config.communityBandwidthBytes: number` (env `COMMUNITY_VM_BANDWIDTH_BYTES`, default `107_374_182_400` = 100 GB, spec D15)
@@ -97,10 +101,10 @@ git commit -m "refactor: extract cron reconcile/reap into reconcile.ts"
 `src/types.ts` — in `Config` after `adminToken`:
 
 ```typescript
-  // Multi-tenancy master switch. "single" = the pre-tenant behavior, verbatim.
-  tenancyMode: "single" | "multi";
-  communityBandwidthBytes: number; // per-VM egress quota for community tenants (D15)
-  applyFormUrl: string; // onboarding form link used in refusal check runs ("" = generic copy)
+// Multi-tenancy master switch. "single" = the pre-tenant behavior, verbatim.
+tenancyMode: "single" | "multi";
+communityBandwidthBytes: number; // per-VM egress quota for community tenants (D15)
+applyFormUrl: string; // onboarding form link used in refusal check runs ("" = generic copy)
 ```
 
 In `WorkflowJob` after `runnerName`:
@@ -137,10 +141,9 @@ function mode(env: Record<string, unknown>): "single" | "multi" {
 `src/webhook.ts`, in `parseWorkflowJob` before the `return`:
 
 ```typescript
-  const installation = isObject(p.installation) && isPosInt(p.installation.id)
-    ? p.installation.id
-    : undefined;
-  const headSha = isNonEmptyString(wj.head_sha) ? wj.head_sha : undefined;
+const installation =
+  isObject(p.installation) && isPosInt(p.installation.id) ? p.installation.id : undefined;
+const headSha = isNonEmptyString(wj.head_sha) ? wj.head_sha : undefined;
 ```
 
 Add `installationId: installation, headSha,` to the returned object.
@@ -197,10 +200,12 @@ git commit -m "feat: add tenancy flag and webhook tenant fields"
 ### Task 3: Coordinator — `admitTenantJob`, tenant-aware `onQueued`, schema
 
 **Files:**
+
 - Modify: `src/types.ts` (new DO contract types; `PendingJob` gains `tenant`), `src/coordinator.ts`
 - Test: `test/integration/tenancy.test.ts` (new)
 
 **Interfaces:**
+
 - Produces (Task 6/9 consume):
 
 ```typescript
@@ -242,8 +247,8 @@ export interface TenantCtx {
 - [ ] **Step 1: Types** — add the three types above to `src/types.ts`; change `PendingJob`:
 
 ```typescript
-  /** Tenant owning this job (multi mode); null for single-mode rows. */
-  tenant: PendingTenant | null;
+/** Tenant owning this job (multi mode); null for single-mode rows. */
+tenant: PendingTenant | null;
 ```
 
 - [ ] **Step 2: Schema** — constructor DDL gains:
@@ -260,7 +265,7 @@ export interface TenantCtx {
 Column-guard block gains:
 
 ```typescript
-    if (!has("weight")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN weight REAL`);
+if (!has("weight")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN weight REAL`);
 ```
 
 `Row` gains `weight: number | null;`. Extend the migration comment: a NULL `weight` bills via the quota.ts label parse at teardown (the pre-persisted-weight behavior).
@@ -453,10 +458,12 @@ git commit -m "feat: tenant admission read and per-tenant cap in DO"
 ### Task 4: Ledger — bill at `markDestroyed`, egress best-effort
 
 **Files:**
+
 - Modify: `src/quota.ts` (add `dayKey`), `src/coordinator.ts` (`markDestroyed`), `src/createos.ts` (`SandboxHandle` gains `getBandwidth`), `src/sandbox.ts` (`teardownSandbox` returns egress), `src/handler.ts` (`destroyAndConfirm` forwards), `src/types.ts` (`TeardownTask` gains `tenantId`)
 - Test: `test/integration/tenancy.test.ts` (extend), `test/unit/quota.test.ts` (extend), plus update `test/helpers/mocks.ts` sandbox double with a `getBandwidth` stub
 
 **Interfaces:**
+
 - Produces:
   - `quota.dayKey(nowMs: number): string` → `"2026-07-23"` (UTC; Task 6's refusal dedup key)
   - `TeardownTask.tenantId: number | null` — bandwidth is read at teardown **only** when non-null (cost gate)
@@ -564,8 +571,8 @@ export async function teardownSandbox(
 `src/handler.ts` `destroyAndConfirm`:
 
 ```typescript
-    const egress = await teardownSandbox(config, task.sandboxId, deps, task.tenantId !== null);
-    await coordinator(env).markDestroyed(task.jobId, egress ?? undefined);
+const egress = await teardownSandbox(config, task.sandboxId, deps, task.tenantId !== null);
+await coordinator(env).markDestroyed(task.jobId, egress ?? undefined);
 ```
 
 Update the sandbox client double in `test/helpers/mocks.ts` (and any inline doubles) so handles expose `getBandwidth: async () => ({ used_bytes: 0 })`.
@@ -589,7 +596,9 @@ describe("ledger", () => {
 
     await runInDurableObject(s, async (_i, state) => {
       const rows = state.storage.sql
-        .exec(`SELECT repo_full_name, weighted_minutes, egress_bytes FROM usage ORDER BY repo_full_name`)
+        .exec(
+          `SELECT repo_full_name, weighted_minutes, egress_bytes FROM usage ORDER BY repo_full_name`,
+        )
         .toArray();
       expect(rows).toHaveLength(2); // "" total + org1/app — nothing from job 12
       expect(rows[0].repo_full_name).toBe("");
@@ -626,10 +635,12 @@ git commit -m "feat: bill VM lifetime to the ledger at teardown"
 ### Task 5: Per-tenant GitHub identity + runner-group/check-run endpoints
 
 **Files:**
+
 - Modify: `src/github/auth.ts` (`credentialSession` installation override), `src/github/client.ts` (tenant identity + 3 endpoints)
 - Test: `test/unit/auth.test.ts`, `test/unit/client.test.ts` (extend)
 
 **Interfaces:**
+
 - Produces:
   - `credentialSession(config, fetchImpl?, installationId?)` — session keyed on the **effective** installation id
   - `GitHubClient` constructor: `(config, fetchImpl?, tenant?: GitHubTenant)` where `GitHubTenant = { orgLogin: string; installationId: number; runnerGroupId?: number | null }`; all org-scoped paths use `tenant?.orgLogin ?? config.githubOrg`; `generateJitConfig` uses `tenant?.runnerGroupId ?? config.runnerGroupId`
@@ -743,13 +754,19 @@ it("tenant identity routes org paths and jit runner group", async () => {
   const calls: string[] = [];
   const f = mockFetch({
     "POST /app/installations/777/access_tokens": () =>
-      new Response(JSON.stringify({ token: "t", expires_at: new Date(Date.now() + 3600_000).toISOString() })),
+      new Response(
+        JSON.stringify({ token: "t", expires_at: new Date(Date.now() + 3600_000).toISOString() }),
+      ),
     "POST /orgs/acme/actions/runners/generate-jitconfig": (req) => {
       calls.push(req.url);
       return new Response(JSON.stringify({ encoded_jit_config: "jit" }));
     },
   });
-  const c = new GitHubClient(cfg(), f, { orgLogin: "acme", installationId: 777, runnerGroupId: 42 });
+  const c = new GitHubClient(cfg(), f, {
+    orgLogin: "acme",
+    installationId: 777,
+    runnerGroupId: 42,
+  });
   await c.generateJitConfig("cos-1-aa", "createos");
   expect(calls[0]).toContain("/orgs/acme/");
 });
@@ -758,7 +775,9 @@ it("createRunnerGroup adopts an existing group on 409", async () => {
   const put: string[] = [];
   const f = mockFetch({
     "POST /app/installations": () =>
-      new Response(JSON.stringify({ token: "t", expires_at: new Date(Date.now() + 3600_000).toISOString() })),
+      new Response(
+        JSON.stringify({ token: "t", expires_at: new Date(Date.now() + 3600_000).toISOString() }),
+      ),
     "POST /orgs/acme/actions/runner-groups": () => new Response("exists", { status: 409 }),
     "GET /orgs/acme/actions/runner-groups?per_page=100": () =>
       new Response(JSON.stringify({ runner_groups: [{ id: 42, name: "createos" }] })),

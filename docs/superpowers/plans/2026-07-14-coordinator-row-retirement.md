@@ -23,9 +23,9 @@
 
 ## File Structure
 
-| File | Status | Responsibility |
-| --- | --- | --- |
-| `src/coordinator.ts` | modify | Add and use canonical private row retirement |
+| File                                  | Status | Responsibility                                                       |
+| ------------------------------------- | ------ | -------------------------------------------------------------------- |
+| `src/coordinator.ts`                  | modify | Add and use canonical private row retirement                         |
 | `test/integration/retirement.test.ts` | create | Exercise the same retirement contract through all public entry paths |
 
 ---
@@ -33,9 +33,11 @@
 ### Task 1: Add canonical private row retirement
 
 **Files:**
+
 - Modify: `src/coordinator.ts:145-165, 251-271, 282-299, 361-420`
 
 **Interfaces:**
+
 - Consumes: private `Row`, `TeardownTask`, and `#sql`.
 - Produces: private `#retireRow(row, sandboxId?): TeardownTask | null`.
 - Public Coordinator interface: unchanged.
@@ -88,8 +90,8 @@ Replace its implementation with:
 Replace its local `toDestroy` branch with:
 
 ```ts
-    const toDestroy = this.#retireRow(row);
-    return { toDestroy, nextPending: this.#dequeuePending() };
+const toDestroy = this.#retireRow(row);
+return { toDestroy, nextPending: this.#dequeuePending() };
 ```
 
 Keep the existing missing-row/Destroying early return and runner-name-first row selection unchanged.
@@ -99,8 +101,8 @@ Keep the existing missing-row/Destroying early return and runner-name-first row 
 Replace the Sandbox/delete branch inside its loop with:
 
 ```ts
-      const task = this.#retireRow(r);
-      if (task) toDestroy.push(task);
+const task = this.#retireRow(r);
+if (task) toDestroy.push(task);
 ```
 
 Keep the online-Runner skip, `ROW_AGE` query, and final `#drainPending()` unchanged.
@@ -110,23 +112,21 @@ Keep the online-Runner skip, `ROW_AGE` query, and final `#drainPending()` unchan
 Use this for existing Destroying rows:
 
 ```ts
-    for (const row of this.#sql
-      .exec<Row>(`SELECT * FROM jobs WHERE state = 'destroying'`)
-      .toArray()) {
-      const task = this.#retireRow(row);
-      if (task) toDestroy.push(task);
-    }
+for (const row of this.#sql.exec<Row>(`SELECT * FROM jobs WHERE state = 'destroying'`).toArray()) {
+  const task = this.#retireRow(row);
+  if (task) toDestroy.push(task);
+}
 ```
 
 Use this for stale active rows:
 
 ```ts
-    for (const row of this.#sql
-      .exec<Row>(`SELECT * FROM jobs WHERE state IN ${ACTIVE_STATES} AND ${ROW_AGE} < ?`, cutoff)
-      .toArray()) {
-      const task = this.#retireRow(row);
-      if (task) toDestroy.push(task);
-    }
+for (const row of this.#sql
+  .exec<Row>(`SELECT * FROM jobs WHERE state IN ${ACTIVE_STATES} AND ${ROW_AGE} < ?`, cutoff)
+  .toArray()) {
+  const task = this.#retireRow(row);
+  if (task) toDestroy.push(task);
+}
 ```
 
 Keep pending expiry, delivery expiry, and the final `#drainPending()` unchanged.
@@ -152,9 +152,11 @@ rtk git commit -m "refactor: centralize row retirement"
 ### Task 2: Add one retirement contract across public entry paths
 
 **Files:**
+
 - Create: `test/integration/retirement.test.ts`
 
 **Interfaces:**
+
 - Consumes: public Coordinator methods only.
 - Produces: a parameterized contract proving every entry path returns the same teardown effect and retains the Destroying row for retry.
 
@@ -183,11 +185,7 @@ async function seeded(jobId: number, sandboxId: string): Promise<Stub> {
   return stub;
 }
 
-async function expectDestroyingRetry(
-  stub: Stub,
-  jobId: number,
-  sandboxId: string,
-): Promise<void> {
+async function expectDestroyingRetry(stub: Stub, jobId: number, sandboxId: string): Promise<void> {
   expect(await stub.activeCount()).toBe(0);
   expect(await stub.liveJobIds()).toContain(jobId);
   const retry = await stub.sweep(Date.now(), 3_600_000);
@@ -271,9 +269,11 @@ rtk git commit -m "test: unify retirement expectations"
 ### Task 3: Complete full verification
 
 **Files:**
+
 - Modify: none.
 
 **Interfaces:**
+
 - Consumes: Tasks 1–2.
 - Produces: a verified behavior-preserving Coordinator refactor.
 

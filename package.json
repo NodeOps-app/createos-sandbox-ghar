@@ -1,20 +1,22 @@
 {
   "name": "createos-sandbox-ghar",
-  "type": "module",
   "private": true,
   "description": "Ephemeral GitHub Actions self-hosted runners on CreateOS Sandbox microVMs — one throwaway VM per job, driven by a Cloudflare Worker + Durable Object.",
+  "homepage": "https://github.com/NodeOps-app/createos-sandbox-ghar#readme",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/NodeOps-app/createos-sandbox-ghar.git"
   },
-  "homepage": "https://github.com/NodeOps-app/createos-sandbox-ghar#readme",
+  "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "bunx wrangler@latest deploy",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "oxlint src test",
+    "format": "oxfmt src test template vitest.config.ts",
+    "format:check": "oxfmt --check src test template vitest.config.ts",
     "typecheck": "tsc --noEmit",
     "build:template": "bun run template/build.ts"
   },
@@ -25,6 +27,7 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.8.71",
     "@cloudflare/workers-types": "5.20260703.1",
+    "oxfmt": "0.62.0",
     "oxlint": "1.72.0",
     "typescript": "6.0.3",
     "vitest": "3.2.4",

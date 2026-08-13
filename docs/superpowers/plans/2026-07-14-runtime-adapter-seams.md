@@ -26,28 +26,30 @@
 
 ## File Structure
 
-| File | Status | Responsibility |
-| --- | --- | --- |
-| `src/runtime.ts` | create | Invocation-scoped composition root and adapter interfaces |
-| `src/createos.ts` | modify | Production CreateOS adapter construction; remove `SandboxDeps` |
-| `src/sandbox.ts` | modify | Consume `CreateosClient`, `GitHubAdapter`, and attempt-token function directly |
-| `src/shapes.ts` | modify | Consume `CreateosClient` directly for catalog reads |
-| `src/handler.ts` | modify | Construct one runtime at each entry and pass it through all work |
-| `src/admission.ts` | unchanged | Continue consuming callable admission dependencies |
-| `test/helpers/adapters.ts` | create | Default GitHub/CreateOS adapters with narrow overrides |
-| `test/unit/runtime.test.ts` | create | Runtime identity and default-construction tests |
-| `test/unit/{sandbox,shapes}.test.ts` | modify | Use direct CreateOS adapters |
-| `test/integration/{provision,reaper,reconcile,shapes}.test.ts` | modify | Replace repeated `makeClient` objects and handler-global fetch mutation |
+| File                                                           | Status    | Responsibility                                                                 |
+| -------------------------------------------------------------- | --------- | ------------------------------------------------------------------------------ |
+| `src/runtime.ts`                                               | create    | Invocation-scoped composition root and adapter interfaces                      |
+| `src/createos.ts`                                              | modify    | Production CreateOS adapter construction; remove `SandboxDeps`                 |
+| `src/sandbox.ts`                                               | modify    | Consume `CreateosClient`, `GitHubAdapter`, and attempt-token function directly |
+| `src/shapes.ts`                                                | modify    | Consume `CreateosClient` directly for catalog reads                            |
+| `src/handler.ts`                                               | modify    | Construct one runtime at each entry and pass it through all work               |
+| `src/admission.ts`                                             | unchanged | Continue consuming callable admission dependencies                             |
+| `test/helpers/adapters.ts`                                     | create    | Default GitHub/CreateOS adapters with narrow overrides                         |
+| `test/unit/runtime.test.ts`                                    | create    | Runtime identity and default-construction tests                                |
+| `test/unit/{sandbox,shapes}.test.ts`                           | modify    | Use direct CreateOS adapters                                                   |
+| `test/integration/{provision,reaper,reconcile,shapes}.test.ts` | modify    | Replace repeated `makeClient` objects and handler-global fetch mutation        |
 
 ---
 
 ### Task 1: Add the invocation-scoped runtime
 
 **Files:**
+
 - Create: `src/runtime.ts`
 - Test: `test/unit/runtime.test.ts`
 
 **Interfaces:**
+
 - Consumes: `Bindings`, `Coordinator`, `Config`, `GitHubClient`, `CreateosClient`, `makeSandboxClient`.
 - Produces:
   - `GitHubAdapter`
@@ -117,10 +119,7 @@ export function createControllerRuntime(
 import { env } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import type { CreateosClient } from "../../src/createos";
-import {
-  createControllerRuntime,
-  type GitHubAdapter,
-} from "../../src/runtime";
+import { createControllerRuntime, type GitHubAdapter } from "../../src/runtime";
 
 const github = (): GitHubAdapter => ({
   generateJitConfig: vi.fn().mockResolvedValue("jit"),
@@ -189,6 +188,7 @@ rtk git commit -m "refactor: add controller runtime"
 ### Task 2: Make Sandbox and Shape modules consume direct capabilities
 
 **Files:**
+
 - Modify: `src/runtime.ts`
 - Modify: `src/createos.ts:53-74`
 - Modify: `src/sandbox.ts:1-186`
@@ -197,6 +197,7 @@ rtk git commit -m "refactor: add controller runtime"
 - Test: `test/unit/shapes.test.ts`
 
 **Interfaces:**
+
 - Consumes: `CreateosClient`, `GitHubAdapter`.
 - Produces:
   - `createRunnerSandbox(config, github, job, createos, attemptId)`
@@ -334,7 +335,7 @@ export async function fetchCatalog(
 In `test/unit/sandbox.test.ts`, replace each:
 
 ```ts
-makeClient: () => ({ createSandbox, getSandbox, listShapes, listSandboxes })
+makeClient: () => ({ createSandbox, getSandbox, listShapes, listSandboxes });
 ```
 
 with the direct object argument:
@@ -365,10 +366,12 @@ Expected: Sandbox naming, JIT, launch, teardown, Shape cache, and catalog tests 
 #### Orchestration phase: Thread one runtime through Worker code
 
 **Files:**
+
 - Modify: `src/handler.ts`
 - Modify: `src/index.ts` only if exported dependency types are referenced there
 
 **Interfaces:**
+
 - Consumes: `ControllerRuntime`, `ControllerDeps`, `createControllerRuntime`.
 - Produces: `handleWebhook`, `runReconciler`, and `runReaper` retain their public env-based interface with `ControllerDeps` as the optional test seam.
 
@@ -377,11 +380,7 @@ Expected: Sandbox naming, JIT, launch, teardown, Shape cache, and catalog tests 
 Use:
 
 ```ts
-import {
-  createControllerRuntime,
-  type ControllerDeps,
-  type ControllerRuntime,
-} from "./runtime";
+import { createControllerRuntime, type ControllerDeps, type ControllerRuntime } from "./runtime";
 ```
 
 Remove `loadConfig`, direct `GitHubClient`, `makeSandboxClient`, `SandboxDeps`, and the private `coordinator(env)` function from `src/handler.ts`.
@@ -455,9 +454,7 @@ async function destroyUnrecorded(
   try {
     await teardownSandbox(runtime.createos, sandboxId);
   } catch (err) {
-    console.error(
-      `unrecorded teardown failed sandbox=${sandboxId} job=${jobId}: ${String(err)}`,
-    );
+    console.error(`unrecorded teardown failed sandbox=${sandboxId} job=${jobId}: ${String(err)}`);
     await notify(
       runtime.config,
       `ghar VM leaked — sandbox ${sandboxId} (job ${jobId}) has no Coordinator row and could not be destroyed: ${String(err)}. The orphaned-sandbox sweep will retry.`,
@@ -473,9 +470,7 @@ async function destroyAndConfirm(
     await teardownSandbox(runtime.createos, task.sandboxId);
     await runtime.coordinator.markDestroyed(task.jobId);
   } catch (err) {
-    console.error(
-      `teardown failed sandbox=${task.sandboxId} job=${task.jobId}: ${String(err)}`,
-    );
+    console.error(`teardown failed sandbox=${task.sandboxId} job=${task.jobId}: ${String(err)}`);
     await notify(
       runtime.config,
       `ghar teardown failed — sandbox ${task.sandboxId} (job ${task.jobId}): ${String(err)}`,
@@ -498,23 +493,19 @@ const { config, coordinator: co, github, createos } = runtime;
 Replace every webhook-path call exactly as follows:
 
 ```ts
-provisionAndRecord(env, admission.job, deps)
+provisionAndRecord(env, admission.job, deps);
 // becomes
-provisionAndRecord(runtime, admission.job)
+provisionAndRecord(runtime, admission.job);
 
-destroyAndConfirm(env, config, result.toDestroy, deps)
+destroyAndConfirm(env, config, result.toDestroy, deps);
 // becomes
-destroyAndConfirm(runtime, result.toDestroy)
+destroyAndConfirm(runtime, result.toDestroy);
 ```
 
 Replace `runReaper` in full with:
 
 ```ts
-
-export async function runReaper(
-  env: Bindings,
-  deps: ControllerDeps = {},
-): Promise<void> {
+export async function runReaper(env: Bindings, deps: ControllerDeps = {}): Promise<void> {
   const runtime = createControllerRuntime(env, deps);
   const { toDestroy, nextPending } = await runtime.coordinator.sweep(
     Date.now(),
@@ -541,13 +532,13 @@ export async function runReconciler(
 Keep its A/B/C/D ordering and replace mapped calls as follows:
 
 ```ts
-destroyAndConfirm(env, config, task, deps)
+destroyAndConfirm(env, config, task, deps);
 // becomes
-destroyAndConfirm(runtime, task)
+destroyAndConfirm(runtime, task);
 
-provisionAndRecord(env, job, deps)
+provisionAndRecord(env, job, deps);
 // becomes
-provisionAndRecord(runtime, job)
+provisionAndRecord(runtime, job);
 ```
 
 Admission factories use:
@@ -572,6 +563,7 @@ Expected: no matches.
 #### Test-migration phase: Add default adapters and remove repeated fakes
 
 **Files:**
+
 - Create: `test/helpers/adapters.ts`
 - Modify: `test/integration/provision.test.ts`
 - Modify: `test/integration/reaper.test.ts`
@@ -581,6 +573,7 @@ Expected: no matches.
 - Modify: `test/unit/shapes.test.ts`
 
 **Interfaces:**
+
 - Consumes: `GitHubAdapter`, `CreateosClient`, `ControllerDeps`.
 - Produces: `githubAdapter(overrides?)`, `createosAdapter(overrides?)`, `controllerDeps(overrides?)`.
 
@@ -606,9 +599,7 @@ export function githubAdapter(overrides: Partial<GitHubAdapter> = {}): GitHubAda
   };
 }
 
-export function createosAdapter(
-  overrides: Partial<CreateosClient> = {},
-): CreateosClient {
+export function createosAdapter(overrides: Partial<CreateosClient> = {}): CreateosClient {
   return {
     createSandbox: vi.fn(async () => unexpected("createSandbox")),
     getSandbox: vi.fn(async () => unexpected("getSandbox")),
@@ -618,9 +609,7 @@ export function createosAdapter(
   };
 }
 
-export function controllerDeps(
-  overrides: ControllerDeps = {},
-): ControllerDeps {
+export function controllerDeps(overrides: ControllerDeps = {}): ControllerDeps {
   return {
     github: githubAdapter(),
     createos: createosAdapter(),
@@ -715,9 +704,11 @@ rtk git commit -m "refactor: thread controller runtime"
 ### Task 3: Complete verification and smoke preparation
 
 **Files:**
+
 - Modify: none.
 
 **Interfaces:**
+
 - Consumes: Tasks 1–4.
 - Produces: verified invocation-scoped adapters and reusable test fakes.
 

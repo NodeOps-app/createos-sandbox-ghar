@@ -28,32 +28,32 @@
 
 ## Required execution order
 
-| Order | Plan | Why here | Depends on |
-| --- | --- | --- | --- |
-| 0 | Baseline `03575a8` | Confirm the leak-hardening commit is present and green | none |
-| 1 | [Job admission module](2026-07-14-job-admission-module.md) | Highest correctness leverage; removes duplicated policy/catalog ordering | `03575a8` baseline |
-| 2 | [Coordinator row retirement](2026-07-14-coordinator-row-retirement.md) | Pure Durable Object deepening with minimal file overlap | plan 1 only for baseline |
-| 3 | [Runtime adapter seams](2026-07-14-runtime-adapter-seams.md) | Centralizes GitHub/CreateOS construction before Worker logic moves files | plans 1–2 |
-| 4 | [Worker lifecycle execution](2026-07-14-worker-lifecycle-execution.md) | Moves provisioning/teardown effects using the assembled runtime | plan 3 |
-| 5 | [Orphan reclamation module](2026-07-14-orphan-reclamation-module.md) | Last destructive refactor; reuses runtime and failure conventions | plans 3–4 |
+| Order | Plan                                                                   | Why here                                                                 | Depends on               |
+| ----- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------ |
+| 0     | Baseline `03575a8`                                                     | Confirm the leak-hardening commit is present and green                   | none                     |
+| 1     | [Job admission module](2026-07-14-job-admission-module.md)             | Highest correctness leverage; removes duplicated policy/catalog ordering | `03575a8` baseline       |
+| 2     | [Coordinator row retirement](2026-07-14-coordinator-row-retirement.md) | Pure Durable Object deepening with minimal file overlap                  | plan 1 only for baseline |
+| 3     | [Runtime adapter seams](2026-07-14-runtime-adapter-seams.md)           | Centralizes GitHub/CreateOS construction before Worker logic moves files | plans 1–2                |
+| 4     | [Worker lifecycle execution](2026-07-14-worker-lifecycle-execution.md) | Moves provisioning/teardown effects using the assembled runtime          | plan 3                   |
+| 5     | [Orphan reclamation module](2026-07-14-orphan-reclamation-module.md)   | Last destructive refactor; reuses runtime and failure conventions        | plans 3–4                |
 
 The plans are ordered patches, not five alternatives. Later plans name interfaces produced by earlier plans and should be executed against the preceding plan's committed state.
 
 ## End-state file map
 
-| File | Responsibility after all plans |
-| --- | --- |
-| `src/index.ts` | Worker routing and scheduled ordering only |
-| `src/handler.ts` | Translate webhook/cron inputs into calls to deep modules; no duplicated admission, lifecycle, or reclamation snippets |
-| `src/admission.ts` | Identify a Job's requested Runner label and perform ordered Job admission with one lazily shared Shape catalog per intake batch |
-| `src/lifecycle.ts` | Provision/create-record-launch, provision-failure disposal, destroy-confirm, and execution of Coordinator effects |
-| `src/reclamation.ts` | External-list-before-live-row orphan proof, bounded cleanup, warnings, and failure accounting for two adapters |
-| `src/runtime.ts` | Construct one invocation-scoped Config, Coordinator stub, GitHub adapter, CreateOS adapter, and attempt-token source |
-| `src/coordinator.ts` | Durable Job state machine with one private row-retirement implementation |
-| `src/shapes.ts` | Shape mapping and cached catalog only; admission choreography does not leak from it |
-| `src/createos.ts` | Narrow CreateOS capability types and production adapter construction |
-| `src/github/client.ts` | GitHub transport implementing `GitHubAdapter` |
-| `test/helpers/adapters.ts` | Default GitHub/CreateOS test adapters; tests override only exercised behavior |
+| File                       | Responsibility after all plans                                                                                                  |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `src/index.ts`             | Worker routing and scheduled ordering only                                                                                      |
+| `src/handler.ts`           | Translate webhook/cron inputs into calls to deep modules; no duplicated admission, lifecycle, or reclamation snippets           |
+| `src/admission.ts`         | Identify a Job's requested Runner label and perform ordered Job admission with one lazily shared Shape catalog per intake batch |
+| `src/lifecycle.ts`         | Provision/create-record-launch, provision-failure disposal, destroy-confirm, and execution of Coordinator effects               |
+| `src/reclamation.ts`       | External-list-before-live-row orphan proof, bounded cleanup, warnings, and failure accounting for two adapters                  |
+| `src/runtime.ts`           | Construct one invocation-scoped Config, Coordinator stub, GitHub adapter, CreateOS adapter, and attempt-token source            |
+| `src/coordinator.ts`       | Durable Job state machine with one private row-retirement implementation                                                        |
+| `src/shapes.ts`            | Shape mapping and cached catalog only; admission choreography does not leak from it                                             |
+| `src/createos.ts`          | Narrow CreateOS capability types and production adapter construction                                                            |
+| `src/github/client.ts`     | GitHub transport implementing `GitHubAdapter`                                                                                   |
+| `test/helpers/adapters.ts` | Default GitHub/CreateOS test adapters; tests override only exercised behavior                                                   |
 
 ## Cross-plan interfaces
 
@@ -103,10 +103,7 @@ export interface ControllerRuntime {
   attemptId: () => string;
 }
 
-export function createControllerRuntime(
-  env: Bindings,
-  deps?: ControllerDeps,
-): ControllerRuntime;
+export function createControllerRuntime(env: Bindings, deps?: ControllerDeps): ControllerRuntime;
 ```
 
 Plan 4 produces:

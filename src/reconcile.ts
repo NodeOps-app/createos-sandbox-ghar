@@ -18,7 +18,8 @@ import {
   type SandboxDeps,
 } from "./sandbox";
 import { makeSandboxClient, type ListedSandbox } from "./createos";
-import { notify, jobRef } from "./notify";
+import { notify, jobRef, alertContext } from "./notify";
+import { MAX_PROVISION_ATTEMPTS } from "./coordinator";
 import {
   coordinator,
   provisionAndRecord,
@@ -39,8 +40,20 @@ import type { PendingJob, Config, QueuedJob, Region, Runner } from "./types";
  */
 const MAX_RUNNER_DELETES_PER_TICK = 10;
 
-/** Destroys at most this many orphaned VMs per cron tick. Same budget logic as above. */
-const MAX_SANDBOX_DESTROYS_PER_TICK = 5;
+/**
+ * Destroys at most this many orphaned VMs per cron tick, shared across regions.
+ *
+ * NOT the same budget logic as the runner deletes above: these calls go to
+ * CreateOS, not GitHub, so they are outside the installation rate limit that
+ * bounds the reconciler's reads — and unlike a stale registration, every leaked
+ * VM burns real capacity for as long as it lives, so reclaiming slowly has a
+ * direct cost. 5 was a Free-plan-era number (the 50-subrequest invocation cap)
+ * and it bound on 2026-08-10 with 6 leaked VMs across two regions, deferring one
+ * to the following tick. Raised to cover the realistic worst case: a job whose
+ * provision fails can leak one VM per region attempted, so a matrix burst can
+ * leak them in double digits at once.
+ */
+export const MAX_SANDBOX_DESTROYS_PER_TICK = 25;
 
 /**
  * Stuck jobs listed individually in one stale-job alert. A real backlog can be
@@ -115,7 +128,14 @@ async function sweepOrphanedSandboxes(
   // same ownership oracle. Ownership is name-derived and region-independent — a
   // leaked VM is reclaimed from the region its name is found in, regardless of
   // which region the (missing) row would have named.
-  const live = new Set(await coordinator(env).liveJobIds());
+  //
+  // job id → the VM that job's row owns (null = a row that has not recorded one
+  // yet, i.e. mid-create). Per-VM rather than merely per-job, which is what lets
+  // a leaked VM be reclaimed while a RETRY of the same job runs under the same
+  // name — see Coordinator.liveVmOwnership.
+  const owned = new Map(
+    (await coordinator(env).liveVmOwnership()).map((o) => [o.jobId, o.sandboxId]),
+  );
 
   // Phase 2 — evaluate + destroy. The per-tick budget is SHARED across regions
   // (N regions must not multiply the per-tick subrequest spend the budget
@@ -140,7 +160,13 @@ async function sweepOrphanedSandboxes(
       if (s.status === "destroyed" || s.status === "failed") return false;
       if (!s.name) return false;
       const jobId = jobIdFromSandboxName(s.name, config);
-      return jobId !== null && !live.has(jobId);
+      if (jobId === null) return false; // not a name we mint — someone else's box
+      if (!owned.has(jobId)) return true; // no row at all: nothing is coming for it
+      const ownedId = owned.get(jobId)!;
+      // A row that has not recorded a VM yet is mid-create and its VM is alive.
+      // Only a row naming some OTHER VM proves THIS one was superseded — the
+      // leaked predecessor of a retried provision, which shares its name.
+      return ownedId !== null && ownedId !== s.id;
     });
     if (orphans.length === 0) continue;
 
@@ -265,7 +291,14 @@ async function alertStaleJobs(env: Bindings, config: Config): Promise<void> {
         .map(
           (s) =>
             `• ${s.state}, waiting ${Math.round(s.ageMs / 1000)}s\n` +
-            jobRef(s.repoFullName, s.runId, s.jobId),
+            jobRef(s.repoFullName, s.runId, s.jobId) +
+            // A `pending` row has no region yet (it has not been provisioned) and
+            // attempt 0 — both render honestly rather than being faked.
+            alertContext({
+              region: s.region,
+              label: s.label,
+              attempt: s.attempts > 0 ? `${s.attempts}/${MAX_PROVISION_ATTEMPTS}` : null,
+            }),
         )
         .join("\n") +
       (shown.length < stale.length ? `\n…and ${stale.length - shown.length} more (see logs)` : ""),
@@ -280,6 +313,30 @@ export async function runReaper(env: Bindings, deps: SandboxDeps = {}): Promise<
     ...toDestroy.map((task) => destroyAndConfirm(env, config, task, deps)),
     ...nextPending.map((job) => provisionAndRecord(env, job, deps)),
   ]);
+}
+
+/**
+ * Reports what each tenant's installation has left of its hourly GitHub request
+ * allowance, once per tick.
+ *
+ * The recovery scan's true ceiling is this allowance, not the subrequest budget:
+ * an installation gets 5,000 requests/hour (large installations get more, by a
+ * rule GitHub does not expose), and one pass over a 300-repo installation costs
+ * ~600 reads — so scanning a whole installation every 5-minute tick would want
+ * ~7,200/hour. Before raising RECOVERY_SUBREQUEST_BUDGET, read this line: it is
+ * the only way to learn which tier the installation is actually on. Warns rather
+ * than logs once under 20% so the headroom shrinking is not silent.
+ */
+function logRateLimits(scopes: { tenant: { orgLogin: string }; gh: GitHubClient }[]): void {
+  for (const s of scopes) {
+    const rl = s.gh.rateLimit;
+    if (!rl) continue;
+    const line =
+      `reconcile: github rate limit ${s.tenant.orgLogin} — ` +
+      `${rl.remaining}/${rl.limit} remaining this hour`;
+    if (rl.remaining < rl.limit * 0.2) console.warn(`${line} (under 20% headroom)`);
+    else console.log(line);
+  }
 }
 
 /**
@@ -390,6 +447,17 @@ async function runMultiTenantReconciler(
   const parsed = parseTenantCursor(rawCursor);
   const order = rotateFrom(scopes, parsed?.installationId);
   let budget = config.recoverySubrequestBudget;
+  // The budget stays first-come-takes-all, and the loop still breaks when a
+  // tenant exhausts it. That does mean a large installation (300+ repos against
+  // a 200-read budget) can spend several consecutive ticks entirely on itself
+  // while the tenants behind it wait — observed 2026-08-10. It is deliberately
+  // NOT split per tenant: only ONE repo cursor is persisted, so scanning every
+  // tenant every tick would leave all but the cursor's tenant restarting at the
+  // head of its repo list forever, never reaching its tail. Fixing that properly
+  // means a cursor per tenant, and the thing it would buy — faster recovery of a
+  // LOST WEBHOOK for a small tenant — is now the scan's only remaining job:
+  // provision failures re-queue in the Coordinator (#requeueForRetry) instead of
+  // waiting to be rediscovered here. Revisit if a second large tenant appears.
   let nextCursor: string | null = rawCursor;
   // Provisions started during recovery must complete within THIS invocation —
   // the synthetic ctx below has no real ExecutionContext behind it, so unlike
@@ -466,6 +534,7 @@ async function runMultiTenantReconciler(
   }
   if (nextCursor !== rawCursor) await co.setRecoveryCursor(nextCursor);
   await Promise.allSettled(recoveryProvisions);
+  logRateLimits(scopes);
 
   // C. Orphaned registrations: per tenant, REUSING step A's runner lists (no
   //    re-fetch — cost). Same ownership proof as single mode: name parses as

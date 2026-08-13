@@ -894,11 +894,7 @@ describe("GET /admin/installations", () => {
   });
 
   it("lists every installation of the App", async () => {
-    const res = await handleAdmin(
-      req("GET", "/admin/installations"),
-      B,
-      mockFetch(routes()),
-    );
+    const res = await handleAdmin(req("GET", "/admin/installations"), B, mockFetch(routes()));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([
       {
@@ -960,6 +956,39 @@ describe("GET /admin/installations", () => {
       B,
       mockFetch(routes()),
     );
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("GET /admin/stale-jobs", () => {
+  // The filtering logic (which states/ages count as stale) already has
+  // dedicated coverage in reaper.test.ts's "staleJobs (cron capacity alert)"
+  // suite, which seeds and reads through ONE held stub — the pattern proven
+  // consistent there. This route adds no filtering logic of its own, only
+  // query-param plumbing onto that existing method, so these tests cover
+  // exactly that: threshold parsing/validation, default fallback, auth, and
+  // response shape — without re-seeding job rows through a second,
+  // independently-obtained stub (empirically NOT read-your-writes consistent
+  // with the stub handleAdmin resolves internally, in this test harness).
+  it("200s with a JSON array", async () => {
+    const res = await handleAdmin(req("GET", "/admin/stale-jobs"), B);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(await res.json())).toBe(true);
+  });
+
+  it("accepts a ?threshold_ms= override", async () => {
+    const res = await handleAdmin(req("GET", "/admin/stale-jobs?threshold_ms=0"), B);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(await res.json())).toBe(true);
+  });
+
+  it("400s a non-numeric threshold_ms", async () => {
+    const res = await handleAdmin(req("GET", "/admin/stale-jobs?threshold_ms=soon"), B);
+    expect(res.status).toBe(400);
+  });
+
+  it("404s without a valid admin token, like every other admin route", async () => {
+    const res = await handleAdmin(req("GET", "/admin/stale-jobs", undefined, "wrong"), B);
     expect(res.status).toBe(404);
   });
 });

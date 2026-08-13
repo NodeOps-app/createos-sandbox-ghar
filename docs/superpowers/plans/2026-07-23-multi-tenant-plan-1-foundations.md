@@ -32,10 +32,12 @@
 ### Task 1: Weighted-minute quota math (`src/quota.ts`)
 
 **Files:**
+
 - Create: `src/quota.ts`
 - Test: `test/unit/quota.test.ts`
 
 **Interfaces:**
+
 - Consumes: nothing (pure module, zero imports).
 - Produces (Plan 2's ledger writes and admission checks call these):
   - `monthKey(nowMs: number): string` — UTC calendar-month bucket, `"2026-07"`.
@@ -161,11 +163,13 @@ git commit -m "feat: add weighted-minute quota math"
 ### Task 2: Tenant types + Coordinator schema migration
 
 **Files:**
+
 - Modify: `src/types.ts` (append after the `Config` interface block)
 - Modify: `src/coordinator.ts:74-96` (constructor DDL block) and `:106-115` (column-guard block); `Row` type at `:18-30`
 - Test: `test/integration/registry.test.ts` (new)
 
 **Interfaces:**
+
 - Consumes: existing constructor migration pattern (`PRAGMA table_info` + guarded `ALTER`).
 - Produces (Tasks 3–4 and Plan 2 rely on these exact shapes):
 
@@ -177,12 +181,12 @@ export interface TenantRecord {
   orgLogin: string;
   status: TenantStatus;
   allowAllRepos: boolean;
-  minuteGrant: number;      // weighted minutes per UTC calendar month
+  minuteGrant: number; // weighted minutes per UTC calendar month
   concurrencyCap: number;
-  maxShape: string;         // "s-4vcpu-8gb"
+  maxShape: string; // "s-4vcpu-8gb"
   jobTtlMs: number;
   runnerGroupId: number | null; // NULL until approval creates the group (Plan 2)
-  contact: string | null;   // JSON blob from the onboarding form
+  contact: string | null; // JSON blob from the onboarding form
   notes: string | null;
   approvedAt: number | null;
   approvedBy: string | null;
@@ -191,7 +195,7 @@ export interface TenantRecord {
 export interface ProjectRecord {
   installationId: number;
   repoFullName: string;
-  repoId: number;           // runner-group scoping API takes repo ids
+  repoId: number; // runner-group scoping API takes repo ids
   addedAt: number;
 }
 ```
@@ -211,7 +215,7 @@ Add the two interfaces + type alias above verbatim, with this leading comment:
 
 - [ ] **Step 2: Add the three tables to the Coordinator constructor DDL**
 
-In `src/coordinator.ts`, inside the existing `this.#sql.exec(\`...\`)` template literal (after the `meta` table's `);`), append:
+In `src/coordinator.ts`, inside the existing `this.#sql.exec(\`...\`)`template literal (after the`meta`table's`);`), append:
 
 ```sql
       CREATE TABLE IF NOT EXISTS tenants (
@@ -251,7 +255,7 @@ In `src/coordinator.ts`, inside the existing `this.#sql.exec(\`...\`)` template 
 In the existing column-guard block (after the `job_started_at` guard), add:
 
 ```typescript
-    if (!has("tenant_id")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN tenant_id INTEGER`);
+if (!has("tenant_id")) this.#sql.exec(`ALTER TABLE jobs ADD COLUMN tenant_id INTEGER`);
 ```
 
 And extend the migration comment's list with one clause, matching its existing style: a NULL `tenant_id` is a row from before multi-tenancy, owned by the seeded first tenant once backfilled; until then no code reads it, so old and new code agree.
@@ -316,11 +320,13 @@ git commit -m "feat: add tenant registry schema to Coordinator"
 ### Task 3: Registry persistence + Coordinator RPC (`src/registry.ts`)
 
 **Files:**
+
 - Create: `src/registry.ts`
 - Modify: `src/coordinator.ts` (append RPC methods at the end of the class; add imports)
 - Test: `test/integration/registry.test.ts` (extend)
 
 **Interfaces:**
+
 - Consumes: Task 2's tables and `TenantRecord`/`ProjectRecord`/`TenantStatus` types.
 - Produces — Coordinator RPC methods Task 4's admin API and Plan 2's admission call:
   - `adminUpsertTenant(t: TenantRecord): void`
@@ -459,7 +465,12 @@ export function listProjects(sql: SqlStorage, installationId: number): ProjectRe
       `SELECT * FROM projects WHERE installation_id = ? ORDER BY repo_full_name`,
       installationId,
     )
-    .toArray() as { installation_id: number; repo_full_name: string; repo_id: number; added_at: number }[];
+    .toArray() as {
+    installation_id: number;
+    repo_full_name: string;
+    repo_id: number;
+    added_at: number;
+  }[];
   return rows.map((r) => ({
     installationId: r.installation_id,
     repoFullName: r.repo_full_name,
@@ -649,6 +660,7 @@ git commit -m "feat: add tenant registry operations"
 ### Task 4: Admin API (`src/admin.ts`) + config + routing
 
 **Files:**
+
 - Modify: `package.json` (add zod)
 - Modify: `src/config.ts:72` area (add `adminToken`), `src/types.ts` (`Config` gains `adminToken?: string`)
 - Modify: `src/webhook.ts:6` (`function timingSafeEqual` → `export function timingSafeEqual`)
@@ -658,6 +670,7 @@ git commit -m "feat: add tenant registry operations"
 - Test: `test/integration/admin.test.ts` (new)
 
 **Interfaces:**
+
 - Consumes: Task 3's `admin*` RPC methods; `timingSafeEqual` from `webhook.ts`.
 - Produces: `handleAdmin(req: Request, env: Bindings): Promise<Response>`; routes (all JSON, all bearer-authed, snake_case bodies matching the DB):
   - `GET  /admin/tenants` → `TenantRecord[]`
@@ -767,7 +780,8 @@ function json(data: unknown, status = 200): Response {
 
 export async function handleAdmin(req: Request, env: Bindings): Promise<Response> {
   const config = loadConfig(env as Record<string, unknown>);
-  if (!(await authorized(req, config.adminToken))) return new Response("not found", { status: 404 });
+  if (!(await authorized(req, config.adminToken)))
+    return new Response("not found", { status: 404 });
 
   const co = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
   const route = `${req.method} ${new URL(req.url).pathname}`;
@@ -837,9 +851,9 @@ Add to the imports: `import { handleAdmin } from "./admin";`
 In `fetch`, before the final 404:
 
 ```typescript
-    if (url.pathname.startsWith("/admin/")) {
-      return handleAdmin(req, env);
-    }
+if (url.pathname.startsWith("/admin/")) {
+  return handleAdmin(req, env);
+}
 ```
 
 - [ ] **Step 5: Add the test binding**
@@ -880,7 +894,9 @@ const tenantBody = (over: Record<string, unknown> = {}) => ({
 
 describe("admin auth", () => {
   it("404s a wrong token — no probeable surface", async () => {
-    expect((await handleAdmin(req("GET", "/admin/tenants", undefined, "wrong"), B)).status).toBe(404);
+    expect((await handleAdmin(req("GET", "/admin/tenants", undefined, "wrong"), B)).status).toBe(
+      404,
+    );
   });
 
   it("404s a missing Authorization header", async () => {
@@ -922,7 +938,7 @@ describe("admin API", () => {
       }),
       B,
     );
-    expect((await add.json() as { added: number }).added).toBe(1);
+    expect(((await add.json()) as { added: number }).added).toBe(1);
 
     const del = await handleAdmin(
       req("DELETE", "/admin/projects", { installation_id: 502, repo_full_name: "acme/api" }),
@@ -956,10 +972,12 @@ git commit -m "feat: add bearer-authed tenant admin API"
 ### Task 5: Docs, deploy checkpoint, prod verification
 
 **Files:**
+
 - Modify: `CONTEXT.md` (glossary), `AGENTS.md` (file table), `README.md` (operator surface)
 - No source changes.
 
 **Interfaces:**
+
 - Consumes: everything above, deployed.
 - Produces: a verified production deployment Plan 2 builds on, and the documented operator surface.
 

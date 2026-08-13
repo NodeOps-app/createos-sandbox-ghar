@@ -33,7 +33,11 @@ RUNNER_SHAPE = "s-4vcpu-4gb"
 # labels: an Actions runner needs ~2 GiB to check out and build anything.
 MIN_RUNNER_MEM_MIB = "2048"
 RUNNER_DISK_MIB = "30720"
-MAX_CONCURRENT = "50"
+# Deploy-wide ceiling, checked IN ADDITION to each tenant's own concurrency_cap
+# — the lower of the two binds. Raised 50 -> 200 with NodeOps-app's tenant cap so
+# a matrix burst (the examples run fans out ~45 jobs at once) is not queued by the
+# deploy-wide gate. Community tenants stay bounded by their own caps (5, 10).
+MAX_CONCURRENT = "200"
 PROVISION_POLICY = "org-wide"
 REPO_ALLOWLIST = ""
 # GitHub runner group the JIT runner registers into. 1 = the org-wide "Default"
