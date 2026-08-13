@@ -93,7 +93,7 @@ bun run build:template   # rebuild the ghar-runner rootfs (needs CREATEOS_* env)
 
 ## Gotchas — read these, they will bite you
 
-- **Do NOT upgrade `@cloudflare/vitest-pool-workers` past `0.8.71` or `vitest` past `3.2.4`.** The vitest-4 line of pool-workers ships no `defineWorkersConfig` / `./config` export and `vitest.config.ts` breaks. The pin is deliberate.
+- **Do NOT upgrade `@cloudflare/vitest-pool-workers` past `0.8.71` or `vitest` past `3.2.4`.** The vitest-4 line of pool-workers ships no `defineWorkersConfig` / `./config` export and `vitest.config.ts` breaks. The pin is deliberate — `.github/dependabot.yml` `ignore`s both names for exactly this reason; don't remove that entry to "fix" a stale-dependency warning.
 - **Never call `fetch` as a method** (`this.x.fetch(...)`, `obj.fetch(...)`) — Workers throws `Illegal invocation` when `fetch`'s `this` isn't `globalThis`. Bind at the injection seam (`fetch.bind(globalThis)`) or call through a local var. Tests mock `fetch`, so they will **not** catch this; only a real run does.
 - **`RUNNER_DISK_MIB` must be ≤ your CreateOS plan's disk cap** or `createSandbox` returns 403. The code default (30720) exceeds the common 10240 cap.
 - **`GITHUB_INSTALLATION_ID` is the numeric installation id**, not the App client id (`Iv23…`). The wrong one makes token minting 404.

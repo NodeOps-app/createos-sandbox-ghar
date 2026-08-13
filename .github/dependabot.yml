@@ -1,0 +1,52 @@
+version: 2
+
+updates:
+  # GitHub Actions used across ci.yml, bump-runner.yml, ghar-test.yml. Grouped
+  # into one weekly PR — mirrors how the 2026-08-13 manual bump (checkout,
+  # setup-go, setup-python) landed as a single commit.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(ci)"
+
+  # bun, not npm: this repo is bun-only (see AGENTS.md Conventions), and
+  # Dependabot's `npm` ecosystem expects a package-lock/yarn.lock/pnpm-lock,
+  # not bun.lock. `bun` is its own package-ecosystem value.
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      # Patch/minor land together with less review overhead; majors (e.g. a
+      # TypeScript major) stay individual PRs since those are the ones that
+      # actually need a human to run the full gate before merging.
+      minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+    ignore:
+      # The pin is deliberate — see the AGENTS.md gotcha next to these two
+      # names. vitest 4.x / vitest-pool-workers past 0.8.71 breaks
+      # vitest.config.ts (`defineWorkersConfig` / `./config` export is gone
+      # on that line). Do not let Dependabot "fix" this.
+      - dependency-name: "vitest"
+        update-types:
+          ["version-update:semver-patch", "version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "@cloudflare/vitest-pool-workers"
+        update-types:
+          ["version-update:semver-patch", "version-update:semver-minor", "version-update:semver-major"]
+    commit-message:
+      prefix: "chore(deps)"
+
+# No `docker` entry: template/Dockerfile's `FROM nodeops/sandbox:debian` carries
+# no version tag to bump, and the one thing in it that IS versioned
+# (RUNNER_VERSION) is already kept current by bump-runner.yml's daily cron
+# against actions/runner's own releases — a second automated bumper for the
+# same value would just race it. See AGENTS.md "No language runtime is baked
+# into the template" and the bump-runner.yml header.
