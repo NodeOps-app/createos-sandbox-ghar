@@ -95,6 +95,10 @@ describe("isPermanentProvisionFailure", () => {
       "rate limited (429 — the one 4xx that means 'later')",
       new CreateosSandboxRateLimitError("slow down", new Response(null, { status: 429 })),
     ],
+    [
+      "name conflict (409 — a leaked prior attempt, clears once the orphan sweep runs)",
+      new CreateosSandboxValidationError("already exists", new Response(null, { status: 409 })),
+    ],
     ["connection error", new CreateosSandboxConnectionError("connect ECONNREFUSED")],
     ["timeout", new CreateosSandboxTimeoutError("deadline")],
     ["a non-SDK error (GitHub mint failure, DO blip)", new Error("boom")],

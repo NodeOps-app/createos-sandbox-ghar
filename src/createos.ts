@@ -97,24 +97,37 @@ export function isFailoverEligible(err: unknown): boolean {
  *
  * The same reasoning as isFailoverEligible, extended along the time axis instead
  * of the region axis: a CreateOS 4xx is a defect in the request or in account
- * state that no amount of waiting fixes — an unknown shape (400/409/422), a
+ * state that no amount of waiting fixes — an unknown shape (400/422), a
  * rejected key (401), a quota or ACL refusal (403), a resource that does not
  * exist (404), an account out of credit (402, which the SDK documents as
  * returning the same error until topped up). Re-queueing those buys nothing and
  * costs a provision-failure alert per attempt.
  *
- * 429 is the one 4xx that IS worth another go — it says "later", literally — and
- * everything that is not a CreateOS API error at all (a GitHub 5xx while minting
- * the JIT config, an unreachable DO, a `shapeForLabel` throw) is treated as
- * retryable: the transient members of that set are exactly the failures a retry
- * exists for, and the deterministic ones are bounded by MAX_PROVISION_ATTEMPTS.
+ * 429 and 409 are the two 4xx worth another go. 429 says "later", literally.
+ * 409 on createSandbox means "a sandbox named `gha-ci-<jobId>` already exists"
+ * — sandboxNameFor is deliberately per-job, not per-attempt (see sandbox.ts),
+ * so this fires when an earlier attempt's VM booted server-side but the client
+ * never saw the response and leaked it under this job's name. That is a
+ * resource-state conflict, not a request defect: it resolves itself once the
+ * orphaned-sandbox sweep (every cron tick) reclaims the leaked VM, which lands
+ * inside this job's own retry window. Treating it as permanent instead drops
+ * the row and leaves the slow O(installed-repos) reconciler scan as the only
+ * way back — measured 654s-1417s to recover a job that a same-tick retry would
+ * have fixed in one cron period.
+ *
+ * Everything that is not a CreateOS API error at all (a GitHub 5xx while
+ * minting the JIT config, an unreachable DO, a `shapeForLabel` throw) is
+ * treated as retryable: the transient members of that set are exactly the
+ * failures a retry exists for, and the deterministic ones are bounded by
+ * MAX_PROVISION_ATTEMPTS.
  */
 export function isPermanentProvisionFailure(err: unknown): boolean {
   return (
     err instanceof CreateosSandboxApiError &&
     err.statusCode >= 400 &&
     err.statusCode < 500 &&
-    !(err instanceof CreateosSandboxRateLimitError)
+    !(err instanceof CreateosSandboxRateLimitError) &&
+    err.statusCode !== 409
   );
 }
 
