@@ -340,40 +340,30 @@ function logRateLimits(scopes: { tenant: { orgLogin: string }; gh: GitHubClient 
 }
 
 /**
- * Multi-mode recovery cursor: `{installationId, repo}` — which tenant the last
- * tick left off at, and (within it) which repo. Malformed/foreign JSON (a
- * stale cursor from before multi mode, or hand-edited storage) restarts
- * rotation from the top rather than throwing, same fail-open posture as the
- * rest of the reconciler.
+ * Multi-mode recovery cursors: one repo-list cursor PER TENANT, keyed by
+ * installation id (stringified — JSON object keys are always strings). Each
+ * tenant's own scan position survives independently, so a huge tenant's scan
+ * can never block a small tenant's from advancing (see the budget-split
+ * comment in runMultiTenantReconciler). Malformed/foreign JSON (the old
+ * single-tenant `{installationId, repo}` cursor shape, hand-edited storage)
+ * resets to an empty map rather than throwing — same fail-open posture as the
+ * rest of the reconciler; every tenant just restarts its own scan from the
+ * top of its repo list.
  */
-function parseTenantCursor(
-  raw: string | null,
-): { installationId: number; repo: string | null } | null {
-  if (!raw) return null;
+function parseTenantCursors(raw: string | null): Record<string, string | null> {
+  if (!raw) return {};
   try {
-    const p = JSON.parse(raw) as { installationId?: unknown; repo?: unknown };
-    if (typeof p.installationId !== "number") throw new Error("bad installationId");
-    return { installationId: p.installationId, repo: typeof p.repo === "string" ? p.repo : null };
+    const p: unknown = JSON.parse(raw);
+    if (typeof p !== "object" || p === null || Array.isArray(p)) throw new Error("not a map");
+    const out: Record<string, string | null> = {};
+    for (const [k, v] of Object.entries(p as Record<string, unknown>)) {
+      out[k] = typeof v === "string" ? v : null;
+    }
+    return out;
   } catch {
-    console.warn(`reconcile: malformed tenant cursor ${JSON.stringify(raw)}; restarting rotation`);
-    return null;
+    console.warn(`reconcile: malformed recovery cursor map ${JSON.stringify(raw)}; resetting`);
+    return {};
   }
-}
-
-/**
- * Rotates `scopes` so iteration begins AT the cursor's tenant (not after it) —
- * a tenant whose own repo scan was budget-bound mid-list must be revisited
- * first so its stored repo cursor can resume it, before rotation moves on to
- * the next tenant. An unknown/removed tenant (`startId` undefined, or no
- * longer approved) starts at the top.
- */
-function rotateFrom<T extends { tenant: { installationId: number } }>(
-  scopes: T[],
-  startId: number | undefined,
-): T[] {
-  if (startId === undefined) return scopes;
-  const i = scopes.findIndex((s) => s.tenant.installationId === startId);
-  return i < 0 ? scopes : [...scopes.slice(i), ...scopes.slice(0, i)];
 }
 
 /**
@@ -384,12 +374,12 @@ function rotateFrom<T extends { tenant: { installationId: number } }>(
  *      so a partial union (one tenant's listRunners failed) would read that
  *      tenant's live runners as gone and destroy them mid-job. One failure
  *      skips the step for every tenant, not just the failed one.
- *   B. recovery — tenants rotate through a cursor `{installationId, repo}`
- *      persisted the same way single mode persists its repo-only cursor, all
- *      sharing ONE subrequest budget per tick so N tenants can't multiply the
- *      Free-plan subrequest cap. Each discovered job re-enters through
- *      `admitAndDrive` — the identical gate ladder the webhook uses, so the
- *      cron path can never admit something the webhook would have refused.
+ *   B. recovery — EVERY approved tenant is scanned every tick, each with an
+ *      equal slice of the shared subrequest budget and its OWN persisted repo
+ *      cursor (see the budget-split comment below). Each discovered job
+ *      re-enters through `admitAndDrive` — the identical gate ladder the
+ *      webhook uses, so the cron path can never admit something the webhook
+ *      would have refused.
  *   C. orphaned runner registrations — per tenant, off step A's ALREADY-
  *      FETCHED lists (zero extra GitHub cost); skipped under the same
  *      fail-safe as step A.
@@ -439,26 +429,33 @@ async function runMultiTenantReconciler(
     ]);
   }
 
-  // B. Recovery: rotate tenants starting AT the cursor's tenant, one shared
-  //    subrequest budget per tick; within a tenant, discoverQueuedJobs' own
-  //    repo cursor rotates as before. Recovered jobs re-enter through
-  //    admitAndDrive — the SAME gate ladder as the webhook, by construction.
-  const rawCursor = await co.recoveryCursor();
-  const parsed = parseTenantCursor(rawCursor);
-  const order = rotateFrom(scopes, parsed?.installationId);
-  let budget = config.recoverySubrequestBudget;
-  // The budget stays first-come-takes-all, and the loop still breaks when a
-  // tenant exhausts it. That does mean a large installation (300+ repos against
-  // a 200-read budget) can spend several consecutive ticks entirely on itself
-  // while the tenants behind it wait — observed 2026-08-10. It is deliberately
-  // NOT split per tenant: only ONE repo cursor is persisted, so scanning every
-  // tenant every tick would leave all but the cursor's tenant restarting at the
-  // head of its repo list forever, never reaching its tail. Fixing that properly
-  // means a cursor per tenant, and the thing it would buy — faster recovery of a
-  // LOST WEBHOOK for a small tenant — is now the scan's only remaining job:
-  // provision failures re-queue in the Coordinator (#requeueForRetry) instead of
-  // waiting to be rediscovered here. Revisit if a second large tenant appears.
-  let nextCursor: string | null = rawCursor;
+  // B. Recovery: every approved tenant is scanned EVERY tick, each with an
+  //    EQUAL slice of the shared subrequest budget (no rotation, no
+  //    first-come-takes-all) and its own persisted repo cursor.
+  //
+  //    The previous design shared ONE cursor across all tenants in a fixed
+  //    rotation order, and the whole loop broke the instant any one tenant's
+  //    own scan exhausted the shared budget. A large installation (NodeOps-app:
+  //    306 repos, ~600 reads for one full pass against a 200-read budget) can
+  //    spend several consecutive ticks entirely on itself — every tenant
+  //    listed after it in rotation then waits however many ticks that takes.
+  //    Observed 2026-08-14: maximem-ai jobs waited up to ~21 hours for the
+  //    scan to reach them, because NodeOps-app never stopped being
+  //    budget-bound long enough for rotation to move past it.
+  //
+  //    An equal per-tenant slice fixes this structurally: no tenant's scan can
+  //    ever consume another tenant's budget, so every approved tenant is
+  //    attempted every tick regardless of how large any other tenant is. A
+  //    huge tenant still takes many ticks to complete its OWN lap of its OWN
+  //    repo list — that part is unchanged — but it no longer costs anyone else
+  //    anything. Static equal split, not proportional and no rollover of
+  //    unused budget: this scan's only remaining job is rediscovering a lost
+  //    webhook (a provision failure re-queues through the Coordinator's own
+  //    fast retry, #requeueForRetry, not through this scan), so raw throughput
+  //    on the largest tenant does not need maximizing.
+  const rawCursors = await co.recoveryCursor();
+  const cursors = parseTenantCursors(rawCursors);
+  const perTenantBudget = Math.max(1, Math.floor(config.recoverySubrequestBudget / scopes.length));
   // Provisions started during recovery must complete within THIS invocation —
   // the synthetic ctx below has no real ExecutionContext behind it, so unlike
   // the webhook path, nothing else keeps them alive once `scheduled` returns.
@@ -469,23 +466,19 @@ async function runMultiTenantReconciler(
       recoveryProvisions.push(p.catch((e) => console.error(String(e))));
     },
   };
-  for (const s of order) {
-    if (budget <= 0) break;
-    const start = s.gh.subrequests;
+  for (const s of scopes) {
+    const cursorKey = String(s.tenant.installationId);
     // A tenant's own discovery reads (installationRepos/activeRunIds/queuedJobs)
-    // can throw — must not skip this tenant's slot in rotation, and must never
-    // escape the function: steps C/D below are never GitHub-gated (AGENTS.md).
+    // can throw — must not skip any OTHER tenant's turn, and must never escape
+    // the function: steps C/D below are never GitHub-gated (AGENTS.md).
     try {
       const { jobs, coverage } = await discoverQueuedJobs(s.gh, {
-        budget,
-        cursor: s.tenant.installationId === parsed?.installationId ? parsed.repo : null,
+        budget: perTenantBudget,
+        cursor: cursors[cursorKey] ?? null,
         policy: "org-wide", // project gating happens in admitAndDrive, not here
         allowlist: [],
       });
-      nextCursor = JSON.stringify({
-        installationId: s.tenant.installationId,
-        repo: coverage.nextCursor,
-      });
+      cursors[cursorKey] = coverage.nextCursor;
       for (const q of jobs) {
         // A single job's admission can throw (fork-check GitHub call failing,
         // malformed JSON) — must not abort the tenant loop or the tick. Skip
@@ -519,20 +512,15 @@ async function runMultiTenantReconciler(
           `reconcile: budget bound at tenant ${s.tenant.orgLogin} — ` +
             `covered ${coverage.covered}, deferred ${coverage.deferred}`,
         );
-        break;
       }
     } catch (err) {
       console.error(
         `reconcile: recovery discovery failed for tenant ${s.tenant.orgLogin}: ${String(err)}`,
       );
-      continue;
-    } finally {
-      // Deduct what the tenant spent even on a throw/break — a failed or
-      // budget-bound tenant still burned real subrequests against the shared cap.
-      budget -= s.gh.subrequests - start;
     }
   }
-  if (nextCursor !== rawCursor) await co.setRecoveryCursor(nextCursor);
+  const nextCursors = JSON.stringify(cursors);
+  if (nextCursors !== rawCursors) await co.setRecoveryCursor(nextCursors);
   await Promise.allSettled(recoveryProvisions);
   logRateLimits(scopes);
 

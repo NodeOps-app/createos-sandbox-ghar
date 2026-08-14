@@ -866,40 +866,60 @@ describe("runReconciler — multi-tenant mode", () => {
     globalThis.fetch = realFetch;
   });
 
-  it("recovery cursor round-trips across tenants: tick 1 stops mid-tenant-A, tick 2 resumes A then covers B", async () => {
+  it("recovery gives every tenant its own budget slice each tick — a large tenant can't starve a small one", async () => {
     const s = stub("singleton");
     await s.adminUpsertTenant(approvedTenant(40201));
     await s.adminUpsertTenant(approvedTenant(40202));
-    // Tenant A needs MORE repos than one scan batch (8) for the budget to be able
-    // to bind part-way through it — the whole point of this case.
+    await s.adminAddProjects(40202, [{ repoFullName: "mt-org-40202/api", repoId: 1 }]);
+
+    // Tenant A: large — enough repos that its OWN scan alone can eat a whole
+    // shared budget (this is the NodeOps-app shape: 306 real repos, not 9, but
+    // 9 is enough to force a bind mid-list within one 8-repo scan batch).
     const aRepos = Array.from(
       { length: 9 },
       (_, i) => `mt-org-40201/r${String(i).padStart(2, "0")}`,
     );
     patchMultiGitHub({
       40201: { org: "mt-org-40201", repos: aRepos },
-      40202: { org: "mt-org-40202", repos: ["mt-org-40202/r1"] },
+      40202: {
+        org: "mt-org-40202",
+        repos: ["mt-org-40202/api"],
+        jobsByRepo: {
+          "mt-org-40202/api": [{ id: 402021, status: "queued", labels: ["createos"] }],
+        },
+      },
     });
 
-    // Cost per repo here is 2 subrequests (activeRunIds' two status reads; no
-    // jobsByRepo means queuedJobs is never reached) plus 1 for the tenant's own
-    // installationRepos() call. Repos are scanned in batches of 8 with the budget
-    // checked at batch boundaries: budget=3 commits to the first batch (spent 1 <
-    // 3), which covers r00-r07 for 16, then binds at the next boundary (17 >= 3).
-    // Tenant A is left mid-list and tenant B is never reached this tick.
-    await runReconciler(multiEnv({ RECOVERY_SUBREQUEST_BUDGET: "3" }), {});
-    expect(await s.recoveryCursor()).toBe(
-      JSON.stringify({ installationId: 40201, repo: "mt-org-40201/r07" }),
-    );
+    const createSandbox = vi.fn().mockResolvedValue({
+      id: "sb402021",
+      runCommand: vi.fn().mockResolvedValue({ result: { stdout: "started" }, exec_ms: 1 }),
+    });
 
-    // Tick 2: rotation resumes AT tenant A (per its stored repo cursor, so it
-    // picks up where it stopped), a generous budget lets it finish A's remaining
-    // repos AND roll into tenant B, which the persisted cursor now reflects.
-    // A costs 1 + 9*2 = 19, so the budget must clear that with room for B.
-    await runReconciler(multiEnv({ RECOVERY_SUBREQUEST_BUDGET: "40" }), {});
-    expect(await s.recoveryCursor()).toBe(
-      JSON.stringify({ installationId: 40202, repo: "mt-org-40202/r1" }),
-    );
+    // Total budget=20 across 2 tenants -> a 10-read slice each. Tenant A's own
+    // scan costs 1 (installationRepos) + one 8-repo batch (16) = 17, past its
+    // 10-read slice — it binds mid-list exactly as before. Under the OLD
+    // shared-cursor model this would have consumed the ENTIRE budget and left
+    // tenant B unscanned this tick (the maximem-ai starvation bug, observed
+    // 2026-08-14). Under the per-tenant split, B gets its own slice regardless
+    // of how large A is.
+    await runReconciler(multiEnv({ RECOVERY_SUBREQUEST_BUDGET: "20" }), {
+      makeClient: () => ({
+        createSandbox,
+        listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
+    });
+
+    // Tenant B's queued job was discovered and admitted in the SAME tick that
+    // tenant A was still budget-bound partway through its own repo list.
+    expect(createSandbox).toHaveBeenCalledOnce();
+
+    const cursors = JSON.parse((await s.recoveryCursor())!) as Record<string, string>;
+    // Tenant A stopped mid-list — its own cursor, unaffected by tenant B.
+    expect(cursors["40201"]).toBe("mt-org-40201/r07");
+    // Tenant B's single repo was fully covered — its own cursor, independent of A.
+    expect(cursors["40202"]).toBe("mt-org-40202/api");
 
     await s.adminSetTenantStatus(40201, "revoked");
     await s.adminSetTenantStatus(40202, "revoked");
