@@ -177,22 +177,17 @@ describe("multi-mode webhook admission", () => {
     globalThis.fetch = realFetch;
   });
 
-  it("approved tenant + approved repo: provisions with a tenant-scoped JIT client and the community bandwidth quota", async () => {
+  it("approved tenant + approved repo: provisions with a tenant-scoped JIT client", async () => {
     const gh = patchGitHub();
     const s = singleton();
     await s.adminUpsertTenant(approvedTenant(20200));
     await s.adminAddProjects(20200, [{ repoFullName: "acme20200/api", repoId: 1 }]);
 
-    const rechargeBandwidth = vi.fn().mockResolvedValue({});
-    // Fresh VM carries the 5 GiB account default; the community cap tops up the delta.
-    const getBandwidth = vi.fn().mockResolvedValue({ quota_bytes: 5_368_709_120, used_bytes: 0 });
     const createSandbox = vi.fn().mockResolvedValue({
       id: "sb_20200",
       runCommand: vi
         .fn()
         .mockResolvedValue({ result: { stdout: "started", stderr: "", exit_code: 0 }, exec_ms: 1 }),
-      getBandwidth,
-      rechargeBandwidth,
     });
 
     const res = await postQueued(
@@ -210,32 +205,21 @@ describe("multi-mode webhook admission", () => {
 
     expect(gh.jitUrls).toHaveLength(1);
     expect(gh.jitUrls[0]).toContain("/orgs/acme20200/");
-
-    // The control plane rejects bandwidth_quota_bytes at create; the community
-    // cap is topped up post-create via rechargeBandwidth, only the delta over
-    // the fresh VM's 5 GiB default.
     expect(createSandbox).toHaveBeenCalledOnce();
-    const request = createSandbox.mock.calls[0]![0];
-    expect(request.bandwidth_quota_bytes).toBeUndefined();
-    expect(rechargeBandwidth).toHaveBeenCalledWith(10_737_418_240 - 5_368_709_120);
 
     globalThis.fetch = realFetch;
   });
 
-  it("allow_all_repos tenant: still gets the per-VM bandwidth quota", async () => {
+  it("allow_all_repos tenant: provisions without a repo allowlist", async () => {
     patchGitHub();
     const s = singleton();
     await s.adminUpsertTenant(approvedTenant(20300, { allowAllRepos: true }));
 
-    const rechargeBandwidth = vi.fn().mockResolvedValue({});
-    const getBandwidth = vi.fn().mockResolvedValue({ quota_bytes: 5_368_709_120, used_bytes: 0 });
     const createSandbox = vi.fn().mockResolvedValue({
       id: "sb_20300",
       runCommand: vi
         .fn()
         .mockResolvedValue({ result: { stdout: "started", stderr: "", exit_code: 0 }, exec_ms: 1 }),
-      getBandwidth,
-      rechargeBandwidth,
     });
 
     const res = await postQueued(
@@ -250,12 +234,7 @@ describe("multi-mode webhook admission", () => {
     );
     expect(res.status).toBe(202);
     expect(await res.text()).toBe("provision");
-
     expect(createSandbox).toHaveBeenCalledOnce();
-    const request = createSandbox.mock.calls[0]![0];
-    expect(request.bandwidth_quota_bytes).toBeUndefined();
-    // D15: every tenant gets the per-VM egress cap now, allow-all included.
-    expect(rechargeBandwidth).toHaveBeenCalledWith(10_737_418_240 - 5_368_709_120);
 
     globalThis.fetch = realFetch;
   });

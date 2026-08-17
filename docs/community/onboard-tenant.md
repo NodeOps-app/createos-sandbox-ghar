@@ -168,11 +168,6 @@ Then tell the applicant to switch `runs-on:` (Part A, last step).
   ("not approved, apply here"), no VM.
 - **Approved-repo job** → VM boots under their `createos` runner group (org →
   Settings → Actions → Runner groups), runs green, self-deletes.
-- **Egress cap (D15):** every VM, including `allow_all_repos` tenants, is
-  topped up to the 10 GiB quota right after create (the control plane rejects
-  the quota at create; the worker calls `bandwidth/recharge` with the delta
-  over the 5 GiB account default). Confirm on the CreateOS dashboard /
-  `getBandwidth` that the quota reflects the cap.
 
 ---
 

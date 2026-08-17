@@ -52,7 +52,6 @@ export interface Config {
 
   // Multi-tenancy master switch. "single" = the pre-tenant behavior, verbatim.
   tenancyMode: "single" | "multi";
-  communityBandwidthBytes: number; // per-VM egress quota for community tenants (D15)
   applyFormUrl: string; // onboarding form link used in refusal check runs ("" = generic copy)
 }
 

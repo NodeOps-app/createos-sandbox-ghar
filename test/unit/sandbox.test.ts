@@ -273,12 +273,7 @@ describe("launchRunner", () => {
     const runCommand = vi
       .fn()
       .mockResolvedValue({ result: { stdout: "started", stderr: "", exit_code: 0 }, exec_ms: 5 });
-    await launchRunner({
-      id: "sb_1",
-      runCommand,
-      getBandwidth: vi.fn().mockResolvedValue({ quota_bytes: 0, used_bytes: 0 }),
-      rechargeBandwidth: vi.fn().mockResolvedValue({}),
-    });
+    await launchRunner({ id: "sb_1", runCommand });
     expect(runCommand.mock.calls[0]![0]).toBe("bash");
     expect(runCommand.mock.calls[0]![1][1]).toContain("setsid");
     // fully detached in a subshell so the guest agent's exec read EOFs at once

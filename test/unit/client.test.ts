@@ -49,7 +49,6 @@ async function cfg(): Promise<Config> {
     recoverySubrequestBudget: 30,
     slowJobThresholdMs: 60_000,
     tenancyMode: "single",
-    communityBandwidthBytes: 107_374_182_400,
     applyFormUrl: "",
   };
 }

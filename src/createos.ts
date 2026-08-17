@@ -25,10 +25,6 @@ import type { Config, Region } from "./types";
 export interface SandboxHandle {
   readonly id: string;
   runCommand(cmd: string, args?: string[], options?: ExecOptions): Promise<ExecResponse>;
-  /** Reads the VM's current bandwidth quota + usage. */
-  getBandwidth(options?: RequestOptions): Promise<{ quota_bytes: number; used_bytes: number }>;
-  /** Adds bytes to the VM's bandwidth quota (control plane rejects the quota at create). */
-  rechargeBandwidth(addBytes: number, options?: RequestOptions): Promise<unknown>;
 }
 
 /** What teardownSandbox needs from a sandbox looked up by id. */
