@@ -21,16 +21,16 @@
     "build:template": "bun run template/build.ts"
   },
   "dependencies": {
-    "@nodeops-createos/sandbox": "0.7.1",
+    "@nodeops-createos/sandbox": "0.8.1",
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "0.8.71",
-    "@cloudflare/workers-types": "5.20260810.1",
+    "@cloudflare/vitest-pool-workers": "0.21.3",
+    "@cloudflare/workers-types": "5.20260815.1",
     "oxfmt": "0.63.0",
     "oxlint": "1.78.0",
-    "typescript": "6.0.3",
-    "vitest": "3.2.4",
-    "wrangler": "4.120.0"
+    "typescript": "7.0.2",
+    "vitest": "4.1.10",
+    "wrangler": "4.123.0"
   }
 }

@@ -30,17 +30,6 @@ updates:
       minor-and-patch:
         applies-to: version-updates
         update-types: ["minor", "patch"]
-    ignore:
-      # The pin is deliberate — see the AGENTS.md gotcha next to these two
-      # names. vitest 4.x / vitest-pool-workers past 0.8.71 breaks
-      # vitest.config.ts (`defineWorkersConfig` / `./config` export is gone
-      # on that line). Do not let Dependabot "fix" this.
-      - dependency-name: "vitest"
-        update-types:
-          ["version-update:semver-patch", "version-update:semver-minor", "version-update:semver-major"]
-      - dependency-name: "@cloudflare/vitest-pool-workers"
-        update-types:
-          ["version-update:semver-patch", "version-update:semver-minor", "version-update:semver-major"]
     commit-message:
       prefix: "chore(deps)"
 

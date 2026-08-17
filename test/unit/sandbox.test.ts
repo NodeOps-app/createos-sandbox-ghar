@@ -15,6 +15,7 @@ import {
   CreateosSandboxServerError,
   CreateosSandboxValidationError,
 } from "@nodeops-createos/sandbox";
+import type { CreateosClient } from "../../src/createos";
 import type { Config, PendingJob } from "../../src/types";
 
 describe("jobIdFromRunnerName", () => {
@@ -425,14 +426,17 @@ describe("teardownSandbox", () => {
 
 /** deps.makeClient that serves each region its own stub client. */
 function regionRoutedClients(
-  byRegion: Record<string, { createSandbox: ReturnType<typeof vi.fn> }>,
+  byRegion: Record<
+    string,
+    { createSandbox: ReturnType<typeof vi.fn<CreateosClient["createSandbox"]>> }
+  >,
 ) {
   return {
     makeClient: (_cfg: unknown, region?: { name: string }) => ({
       createSandbox: byRegion[region!.name]!.createSandbox,
-      getSandbox: vi.fn(),
-      listShapes: vi.fn(),
-      listSandboxes: vi.fn().mockResolvedValue([]),
+      getSandbox: vi.fn<CreateosClient["getSandbox"]>(),
+      listShapes: vi.fn<CreateosClient["listShapes"]>(),
+      listSandboxes: vi.fn<CreateosClient["listSandboxes"]>().mockResolvedValue([]),
     }),
     attemptId: () => "k3",
     // The post-failover retry's delay, spent instantly — these cases assert the

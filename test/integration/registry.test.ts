@@ -1,5 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
+import type { Coordinator } from "../../src/coordinator";
 import type { TenantRecord } from "../../src/types";
 
 function stub(name: string) {
@@ -136,8 +137,9 @@ describe("tenant registry", () => {
     // crosses the actual DO RPC boundary (a harness quirk, not our code —
     // confirmed by reproducing it with a throw-only probe method too).
     await runInDurableObject(s, (instance) => {
+      const coordinator = instance as unknown as Coordinator;
       expect(() =>
-        instance.adminAddProjects(404, [{ repoFullName: "acme/api", repoId: 11 }]),
+        coordinator.adminAddProjects(404, [{ repoFullName: "acme/api", repoId: 11 }]),
       ).toThrow(/404/);
     });
 
@@ -189,7 +191,7 @@ describe("tenant registry", () => {
     // See the addProjects test above for why this goes through the instance,
     // not the external stub.
     await runInDurableObject(s, (instance) => {
-      expect(() => instance.adminBackfillTenantIds(404)).toThrow(/404/);
+      expect(() => (instance as unknown as Coordinator).adminBackfillTenantIds(404)).toThrow(/404/);
     });
 
     await runInDurableObject(s, async (_i, state) => {
