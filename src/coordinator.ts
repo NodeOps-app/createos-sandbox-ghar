@@ -173,6 +173,11 @@ export class Coordinator extends DurableObject<Env> {
         day             TEXT NOT NULL,
         PRIMARY KEY (installation_id, repo_full_name, day)
       );
+      CREATE TABLE IF NOT EXISTS quota_notices (
+        installation_id INTEGER NOT NULL,
+        day             TEXT NOT NULL,
+        PRIMARY KEY (installation_id, day)
+      );
     `);
     // Migrate DOs created before a column existed: CREATE TABLE IF NOT EXISTS
     // won't add one to a live table. A NULL `label` is a row from before shape
@@ -957,6 +962,21 @@ export class Coordinator extends DurableObject<Env> {
        VALUES (?, ?, ?)`,
       installationId,
       repoFullName,
+      day,
+    );
+    const row = this.#sql.exec(`SELECT changes() AS n`).one() as { n: number };
+    return row.n === 1;
+  }
+
+  /**
+   * One quota-exhausted ops ping per (tenant, UTC day): same INSERT-OR-IGNORE
+   * dedup as shouldNotifyRefusal, so a burst of queued jobs against an
+   * exhausted grant pings Slack once instead of once per job.
+   */
+  shouldNotifyQuotaExhausted(installationId: number, day: string): boolean {
+    this.#sql.exec(
+      `INSERT OR IGNORE INTO quota_notices (installation_id, day) VALUES (?, ?)`,
+      installationId,
       day,
     );
     const row = this.#sql.exec(`SELECT changes() AS n`).one() as { n: number };

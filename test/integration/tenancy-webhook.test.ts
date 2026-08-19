@@ -93,6 +93,7 @@ async function postQueued(
     delivery: string;
   },
   deps: object,
+  targetEnv: Bindings = multiEnv,
 ) {
   const body = workflowJobPayload({
     action: "queued",
@@ -105,13 +106,13 @@ async function postQueued(
   const req = new Request("https://ctrl.local/webhook", {
     method: "POST",
     headers: {
-      "X-Hub-Signature-256": await sign(multiEnv.GITHUB_WEBHOOK_SECRET as string, body),
+      "X-Hub-Signature-256": await sign(targetEnv.GITHUB_WEBHOOK_SECRET as string, body),
       "X-GitHub-Delivery": opts.delivery,
     },
     body,
   });
   const ctx = createExecutionContext();
-  const res = await handleWebhook(req, multiEnv, ctx, deps as any);
+  const res = await handleWebhook(req, targetEnv, ctx, deps as any);
   await waitOnExecutionContext(ctx);
   return res;
 }
@@ -300,6 +301,58 @@ describe("multi-mode webhook admission", () => {
     expect(await res.text()).toBe("quota-exhausted");
     expect(createSandbox).not.toHaveBeenCalled();
     expect(gh.checkRunCalls()).toBe(1);
+
+    globalThis.fetch = realFetch;
+  });
+
+  it("quota exhausted across multiple queued jobs: ops alert fires once per (tenant, day)", async () => {
+    patchGitHub();
+    const ghFetch = globalThis.fetch;
+    let alertCalls = 0;
+    globalThis.fetch = (async (input, init) => {
+      const req = new Request(input, init);
+      if (req.url === "https://hooks.example/quota-alert") {
+        alertCalls++;
+        return new Response("ok", { status: 200 });
+      }
+      return ghFetch(input, init);
+    }) as typeof fetch;
+    const alertEnv = { ...multiEnv, ALERT_WEBHOOK_URL: "https://hooks.example/quota-alert" };
+
+    const s = singleton();
+    await s.adminUpsertTenant(approvedTenant(20600, { minuteGrant: 10 }));
+    await s.adminAddProjects(20600, [{ repoFullName: "acme20600/api", repoId: 1 }]);
+    await runInDurableObject(s, async (_i, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO usage (installation_id, month, repo_full_name, weighted_minutes, egress_bytes)
+         VALUES (20600, ?, '', 10, 0)`,
+        new Date().toISOString().slice(0, 7),
+      );
+    });
+
+    const createSandbox = vi.fn();
+    for (const [jobId, delivery] of [
+      [20601, "dlv-20601"],
+      [20602, "dlv-20602"],
+      [20603, "dlv-20603"],
+    ] as const) {
+      const res = await postQueued(
+        {
+          jobId,
+          repo: "acme20600/api",
+          installationId: 20600,
+          headSha: "deadbeef",
+          delivery,
+        },
+        sandboxDeps(createSandbox),
+        alertEnv,
+      );
+      expect(res.status).toBe(202);
+      expect(await res.text()).toBe("quota-exhausted");
+    }
+
+    expect(createSandbox).not.toHaveBeenCalled();
+    expect(alertCalls).toBe(1);
 
     globalThis.fetch = realFetch;
   });

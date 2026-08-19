@@ -363,12 +363,15 @@ export async function admitAndDrive(
       }),
     );
     ctx.waitUntil(
-      notify(
-        config,
-        `ghar quota exhausted — ${admission.tenant.orgLogin} used ` +
-          `${Math.round(admission.usedMinutes)}/${admission.minuteGrant} weighted minutes\n` +
-          jobRef(job.repoFullName, job.runId, job.jobId),
-      ),
+      co.shouldNotifyQuotaExhausted(job.installationId, dayKey(Date.now())).then((fresh) => {
+        if (!fresh) return;
+        return notify(
+          config,
+          `ghar quota exhausted — ${admission.tenant.orgLogin} used ` +
+            `${Math.round(admission.usedMinutes)}/${admission.minuteGrant} weighted minutes\n` +
+            jobRef(job.repoFullName, job.runId, job.jobId),
+        );
+      }),
     );
     return "quota-exhausted";
   }
