@@ -482,6 +482,18 @@ export async function handleWebhook(
   }
 
   if (job.action === "completed") {
+    // A repo's own `concurrency: cancel-in-progress` (or a manual cancel) can
+    // kill a job before any runner ever claimed it — GitHub sets runner_name
+    // to "" in that case. That job may already have tripped the stale-job
+    // alert (it genuinely hadn't started yet at the time), so log a clear
+    // closing line: nothing was wrong on ghar's side, GitHub just pulled the
+    // job out from under us.
+    if (job.conclusion === "cancelled" && !job.runnerName) {
+      console.log(
+        `ghar: job ${job.jobId} (${job.repoFullName}) cancelled by GitHub before a runner ` +
+          `came online — not a ghar failure (likely a concurrency-group supersede or manual cancel)`,
+      );
+    }
     // runner_name identifies the VM that ACTUALLY ran the job (may differ from
     // the provisioning job under backlog); the DO tears down that one.
     const result = await co.onCompleted(job.jobId, job.runnerName, owner);

@@ -94,6 +94,7 @@ export function parseWorkflowJob(body: string): WorkflowJob | null {
   // source that survives that reassignment.
   const queuedAt = isNonEmptyString(wj.created_at) ? Date.parse(wj.created_at) : Number.NaN;
   const startedAt = isNonEmptyString(wj.started_at) ? Date.parse(wj.started_at) : Number.NaN;
+  const conclusion = isNonEmptyString(wj.conclusion) ? wj.conclusion : undefined;
 
   return {
     action,
@@ -106,5 +107,6 @@ export function parseWorkflowJob(body: string): WorkflowJob | null {
     headSha,
     queuedAt: Number.isFinite(queuedAt) ? queuedAt : undefined,
     startedAt: Number.isFinite(startedAt) ? startedAt : undefined,
+    conclusion,
   };
 }

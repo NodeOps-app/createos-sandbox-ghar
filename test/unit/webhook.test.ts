@@ -43,6 +43,13 @@ describe("parseWorkflowJob", () => {
     );
     expect(job?.runnerName).toBe(runnerName(7));
   });
+  it("carries conclusion from a completed job, e.g. cancelled before a runner ever claimed it", () => {
+    const job = parseWorkflowJob(
+      workflowJobPayload({ action: "completed", jobId: 7, conclusion: "cancelled" }),
+    );
+    expect(job?.conclusion).toBe("cancelled");
+    expect(job?.runnerName).toBeUndefined();
+  });
   it("returns null for non-workflow_job / bad json", () => {
     expect(parseWorkflowJob("{}")).toBeNull();
     expect(parseWorkflowJob("not json")).toBeNull();

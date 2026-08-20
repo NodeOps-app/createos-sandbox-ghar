@@ -131,6 +131,10 @@ export interface WorkflowJob {
    * reassignment — see parseWorkflowJob. */
   queuedAt?: number; // workflow_job.created_at
   startedAt?: number; // workflow_job.started_at
+  /** workflow_job.conclusion — only meaningful on `completed`. Lets the Worker
+   * tell "GitHub cancelled this out from under us" (e.g. a repo's own
+   * `concurrency: cancel-in-progress`) apart from a real ghar failure. */
+  conclusion?: string;
   /** Set by handleWebhook from X-GitHub-Delivery before calling admitAndDrive
    * (multi mode); left unset for a reconciler-recovered job, which mints its
    * own UUID — matching today's reconciler dedup behavior. */
