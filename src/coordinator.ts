@@ -358,6 +358,35 @@ export class Coordinator extends DurableObject<Env> {
    * cron tick until the reaper retires it. Idle-VM waste is a real cost signal
    * but it is a capacity/efficiency question, not a stuck job.
    */
+  /**
+   * Repos this installation has ever run a createos job in (from the usage
+   * ledger, excluding the '' rollup row). The recovery scan is scoped to these
+   * instead of the whole installation: a lost `queued` webhook can only strand a
+   * repo that already uses createos runners — except a repo's very first job (no
+   * usage row yet), which GitHub re-delivers on the next push. Collapses the
+   * O(installed-repos) recovery scan (NodeOps-app: ~306 repos) to O(active-repos)
+   * (~tens), so a lost webhook is rediscovered within one tick instead of over a
+   * multi-tick scan lap. Both this and GitHubClient.installationRepos() use
+   * GitHub's canonical full_name, so discovery's repo-allowlist filter matches by
+   * exact string.
+   */
+  activeRepos(installationId: number): string[] {
+    // usage = repos that have run a createos job; projects = repos explicitly
+    // approved for a repo-allowlist tenant (may not have run one yet). Union so
+    // the recovery scan covers both. allow_all_repos tenants have no projects
+    // rows, so for them this is just the repos that have used createos.
+    return this.#sql
+      .exec<{ repo_full_name: string }>(
+        `SELECT repo_full_name FROM usage WHERE installation_id = ? AND repo_full_name != ''
+         UNION
+         SELECT repo_full_name FROM projects WHERE installation_id = ?`,
+        installationId,
+        installationId,
+      )
+      .toArray()
+      .map((r) => r.repo_full_name);
+  }
+
   async staleJobs(nowMs: number, thresholdMs: number): Promise<StaleJob[]> {
     const cutoff = nowMs - thresholdMs;
     return this.#sql

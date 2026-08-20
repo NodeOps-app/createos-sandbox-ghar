@@ -472,11 +472,22 @@ async function runMultiTenantReconciler(
     // can throw — must not skip any OTHER tenant's turn, and must never escape
     // the function: steps C/D below are never GitHub-gated (AGENTS.md).
     try {
+      // Scope the recovery scan to repos that actually use createos runners
+      // (from the usage ledger) rather than the whole installation. This scan's
+      // only job is rediscovering a *lost* queued webhook (a provision failure
+      // re-queues via #requeueForRetry, not here), and a lost webhook can only
+      // strand a repo that already runs createos jobs — so scanning all ~306 org
+      // repos, almost none of which touch createos, was pure O(installed-repos)
+      // waste that budget-bound the scan for tens of minutes. Full policy gating
+      // still happens in admitAndDrive below. Trade-off: a repo's very FIRST job
+      // whose webhook is lost (no usage row yet) is not scan-recovered until it
+      // has usage — GitHub re-delivers queued on the next push.
+      const allowlist = await co.activeRepos(s.tenant.installationId);
       const { jobs, coverage } = await discoverQueuedJobs(s.gh, {
         budget: perTenantBudget,
         cursor: cursors[cursorKey] ?? null,
-        policy: "org-wide", // project gating happens in admitAndDrive, not here
-        allowlist: [],
+        policy: "repo-allowlist",
+        allowlist,
       });
       cursors[cursorKey] = coverage.nextCursor;
       for (const q of jobs) {
