@@ -24,6 +24,12 @@ export default defineConfig({
           // test/unit/{sandbox,createos,config}.test.ts, which build their own
           // multi-region Config directly.
           CREATEOS_REGIONS: "default=https://api.sb.createos.sh",
+          // Pin the recovery budget: prod raised this to 2000 to cut the
+          // recovery scan's full-pass time, but the reconciler fixtures assert
+          // on budget-bound behaviour (deferral, cursor advance) and a budget
+          // large enough to cover every fixture repo in one pass stops
+          // exercising it. Suites that test a specific bound override per-suite.
+          RECOVERY_SUBREQUEST_BUDGET: "200",
           MAX_CONCURRENT: "2",
           GITHUB_ORG: "nodeops-app",
           RUNNER_LABEL: "createos",
