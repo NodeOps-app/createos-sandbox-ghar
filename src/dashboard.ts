@@ -1,3 +1,100 @@
+import type { DashboardSnapshot } from "./types";
+
+/** One tenant line on the dashboard, with its repos as the breakdown under it. */
+export interface UsageGroup {
+  label: string;
+  status: string;
+  grant: number;
+  current: number;
+  previous: number;
+  egress: number;
+  repos: [string, { current: number; previous: number; egress: number }][];
+}
+
+/**
+ * Turns raw `usage` rows into the tenant/repo tree the page draws.
+ *
+ * A real function, not page-inlined source, because it is a BILLING figure and
+ * has to be testable — it shipped once double-counting every tenant. It is
+ * interpolated into the page with `.toString()`, so this is the single source
+ * of truth for both the unit test and the browser. It therefore uses no
+ * imports, no closures and no TypeScript-only syntax in its body.
+ *
+ * The rule it encodes: `markDestroyed` bills every VM lifetime TWICE on
+ * purpose — once under repo_full_name "" (the tenant TOTAL, and the row the
+ * grant is enforced against) and once under the real repo name (per-project
+ * attribution). Summing all rows together double-counts the tenant and renders
+ * the "" row as a nameless repo. So the "" row is the authority for the tenant
+ * line, and the named rows are the breakdown beneath it.
+ */
+export function aggregateUsage(
+  snap: DashboardSnapshot & { months: { current: string } },
+): UsageGroup[] {
+  const byTenant = new Map<
+    number,
+    UsageGroup & {
+      hasTotal: boolean;
+      byRepo: Map<string, { current: number; previous: number; egress: number }>;
+    }
+  >();
+  for (const u of snap.usage) {
+    let g = byTenant.get(u.installationId);
+    if (!g) {
+      const t = snap.tenants.find((x) => x.installationId === u.installationId);
+      g = {
+        label: t ? t.orgLogin : "installation " + u.installationId,
+        status: t ? t.status : "\u2014",
+        grant: t ? t.minuteGrant : 0,
+        current: 0,
+        previous: 0,
+        egress: 0,
+        repos: [],
+        // Until the "" enforcement row is seen, the tenant line falls back to
+        // summing its repos, so a tenant with attribution rows but no total
+        // still shows a number rather than zero.
+        hasTotal: false,
+        byRepo: new Map(),
+      };
+      byTenant.set(u.installationId, g);
+    }
+    const key = u.month === snap.months.current ? "current" : "previous";
+    const isCurrent = u.month === snap.months.current;
+
+    if (u.repoFullName === "") {
+      if (!g.hasTotal) {
+        g.hasTotal = true;
+        g.current = 0;
+        g.previous = 0;
+        g.egress = 0;
+      }
+      g[key] = u.weightedMinutes;
+      if (isCurrent) g.egress = u.egressBytes;
+      continue;
+    }
+
+    let r = g.byRepo.get(u.repoFullName);
+    if (!r) {
+      r = { current: 0, previous: 0, egress: 0 };
+      g.byRepo.set(u.repoFullName, r);
+    }
+    r[key] += u.weightedMinutes;
+    if (isCurrent) r.egress += u.egressBytes;
+    if (!g.hasTotal) {
+      g[key] += u.weightedMinutes;
+      if (isCurrent) g.egress += u.egressBytes;
+    }
+  }
+
+  const out = [];
+  for (const g of byTenant.values()) {
+    // eslint-disable-next-line unicorn/no-array-sort -- freshly spread array; toSorted is not in this tsconfig's lib
+    g.repos = [...g.byRepo].sort((a, b) => b[1].current - a[1].current);
+    out.push(g);
+  }
+  // eslint-disable-next-line unicorn/no-array-sort -- locally built array; toSorted is not in this tsconfig's lib
+  return out.sort((a, b) => b.current - a.current);
+}
+
 /**
  * The operator dashboard page. One self-contained HTML string — no bundler
  * step, no CDN, no framework: the Worker serves it and the page polls
@@ -98,8 +195,8 @@ a { color: inherit; }
   <h2>Usage</h2>
   <div class="scroll"><table>
     <thead><tr>
-      <th>Tenant / repository</th><th>Status</th><th>This month</th>
-      <th>Of grant</th><th>Last month</th><th>Egress</th>
+      <th>Tenant / repository</th><th>Status</th><th>This month<br>weighted</th>
+      <th>Of grant</th><th>Last month<br>weighted</th><th>Egress</th>
     </tr></thead>
     <tbody id="usage"></tbody>
   </table></div>
@@ -204,37 +301,12 @@ function renderTiles(snap) {
   }
 }
 
-function renderUsage(snap) {
-  // Group by tenant. A usage row can name an installation with no tenant row
-  // (single-tenant mode writes installation_id 0), so the tenant list is a
-  // lookup, never the set of groups — otherwise those minutes vanish.
-  const byTenant = new Map();
-  for (const u of snap.usage) {
-    let g = byTenant.get(u.installationId);
-    if (!g) {
-      const t = snap.tenants.find((x) => x.installationId === u.installationId);
-      g = {
-        label: t ? t.orgLogin : "installation " + u.installationId,
-        status: t ? t.status : "—",
-        grant: t ? t.minuteGrant : 0,
-        current: 0, previous: 0, egress: 0, repos: new Map(),
-      };
-      byTenant.set(u.installationId, g);
-    }
-    const key = u.month === snap.months.current ? "current" : "previous";
-    g[key] += u.weightedMinutes;
-    let r = g.repos.get(u.repoFullName);
-    if (!r) { r = { current: 0, previous: 0, egress: 0 }; g.repos.set(u.repoFullName, r); }
-    r[key] += u.weightedMinutes;
-    if (u.month === snap.months.current) {
-      g.egress += u.egressBytes;
-      r.egress += u.egressBytes;
-    }
-  }
+${aggregateUsage.toString()}
 
+function renderUsage(snap) {
+  const groups = aggregateUsage(snap);
   const tb = $("usage");
   tb.replaceChildren();
-  const groups = [...byTenant.values()].sort((a, b) => b.current - a.current);
   for (const g of groups) {
     const tr = document.createElement("tr");
     tr.append(cell(g.label));
@@ -261,7 +333,7 @@ function renderUsage(snap) {
     tr.append(cell(bytes(g.egress)));
     tb.append(tr);
 
-    for (const [repo, r] of [...g.repos].sort((a, b) => b[1].current - a[1].current)) {
+    for (const [repo, r] of g.repos) {
       const sub = document.createElement("tr");
       sub.className = "sub";
       sub.append(cell(repo));
@@ -275,9 +347,12 @@ function renderUsage(snap) {
   }
   $("usage-empty").hidden = groups.length > 0;
   $("usage-note").textContent =
-    "Weighted minutes per UTC calendar month: " + snap.months.current +
-    " and " + snap.months.previous + ". A finished job leaves no other record, " +
-    "so no day-by-day series exists.";
+    "Weighted minutes, per UTC calendar month: " + snap.months.current +
+    " and " + snap.months.previous + ". A weighted minute is one wall-clock " +
+    "minute x (vCPU / 2), so a 4-vCPU job bills 2 per minute and an 8-vCPU job " +
+    "bills 4. This is the unit the grant is enforced in, so it does NOT match " +
+    "GitHub's own Actions minutes, which count wall-clock only. A finished job " +
+    "leaves no other record, so no day-by-day series exists.";
 }
 
 async function tick() {
