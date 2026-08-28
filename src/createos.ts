@@ -15,6 +15,7 @@ import type {
   ListSandboxesOptions,
   RequestOptions,
   Shape,
+  WaitOptions,
 } from "@nodeops-createos/sandbox";
 import type { Config, Region } from "./types";
 
@@ -42,6 +43,13 @@ export interface ListedSandbox extends DestroyableSandbox {
   readonly id: string;
   readonly name?: string;
   readonly status: string;
+  /**
+   * Needed by the 409 reclaim, not by the sweep. `destroy` is ASYNC — it
+   * returns once the row reaches `destroying`, and the SDK documents
+   * `waitUntilDestroyed` as the separate step to terminal. The reclaim must
+   * retry createSandbox only after the name is actually free.
+   */
+  waitUntilDestroyed(options?: WaitOptions): Promise<unknown>;
 }
 
 /**
@@ -104,12 +112,15 @@ export function isFailoverEligible(err: unknown): boolean {
  * — sandboxNameFor is deliberately per-job, not per-attempt (see sandbox.ts),
  * so this fires when an earlier attempt's VM booted server-side but the client
  * never saw the response and leaked it under this job's name. That is a
- * resource-state conflict, not a request defect: it resolves itself once the
- * orphaned-sandbox sweep (every cron tick) reclaims the leaked VM, which lands
- * inside this job's own retry window. Treating it as permanent instead drops
- * the row and leaves the slow O(installed-repos) reconciler scan as the only
- * way back — measured 654s-1417s to recover a job that a same-tick retry would
- * have fixed in one cron period.
+ * resource-state conflict, not a request defect: createSandboxReclaiming
+ * (sandbox.ts) destroys the leaked VM and retries inline, in the same request —
+ * no ownership check needed, since only this job's own name can collide. This
+ * classification is the fallback for when that reclaim itself throws (the
+ * leaked VM was not found — e.g. already reclaimed by the periodic sweep): it
+ * resolves on the Coordinator's own retry rather than dropping the row and
+ * leaving the slow O(installed-repos) reconciler scan as the only way back —
+ * measured 654s-1417s to recover a job that a same-tick retry would have fixed
+ * in one cron period.
  *
  * Everything that is not a CreateOS API error at all (a GitHub 5xx while
  * minting the JIT config, an unreachable DO, a `shapeForLabel` throw) is

@@ -170,6 +170,164 @@ describe("createRunnerSandbox", () => {
     expect(typeof res.timings.createMs).toBe("number");
   });
 
+  // A 409 on createSandbox means an earlier attempt's VM booted server-side but
+  // the client never saw the response — sandboxName is unique per job, so the
+  // leaked VM can only be this job's own. Reclaiming it inline turns a wait for
+  // the next cron tick's retry + orphan sweep into one extra round trip.
+  it("reclaims a leaked VM inline on a 409 name conflict, instead of waiting for the next retry", async () => {
+    const conflict = new CreateosSandboxValidationError(
+      'a sandbox named "gha-ci-100" already exists',
+      new Response(null, { status: 409 }),
+    );
+    const createSandbox = vi
+      .fn()
+      .mockRejectedValueOnce(conflict)
+      .mockResolvedValueOnce({ id: "sb_new", runCommand: vi.fn() });
+    // The SDK's destroy returns as soon as the row reaches `destroying`, which
+    // is why it answers with that status rather than `destroyed`.
+    const destroy = vi.fn().mockResolvedValue({ id: "sb_leaked", status: "destroying" });
+    const waitUntilDestroyed = vi.fn().mockResolvedValue(undefined);
+    const listSandboxes = vi
+      .fn()
+      .mockResolvedValue([
+        { id: "sb_leaked", name: "gha-ci-100", status: "running", destroy, waitUntilDestroyed },
+      ]);
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+
+    const res = await createRunnerSandbox(config, github, job, {
+      makeClient: () => ({
+        createSandbox,
+        getSandbox: vi.fn(),
+        listShapes: vi.fn(),
+        listSandboxes,
+      }),
+      attemptId: () => "k3",
+    });
+
+    expect(destroy).toHaveBeenCalledOnce();
+    expect(waitUntilDestroyed).toHaveBeenCalledOnce();
+    expect(createSandbox).toHaveBeenCalledTimes(2);
+    expect(res.sandboxId).toBe("sb_new");
+  });
+
+  // The reason the reclaim is worth doing at all. `destroy` only moves the row
+  // to `destroying`, and the NAME STAYS TAKEN until it reaches `destroyed` — so
+  // a retry issued on the strength of the destroy call alone just earns a second
+  // 409 and falls back to the cron-tick retry this function exists to avoid.
+  // Asserted structurally: while the wait is still pending, createSandbox must
+  // not have been called a second time.
+  it("does not retry createSandbox until the leaked VM is actually destroyed", async () => {
+    const conflict = new CreateosSandboxValidationError(
+      'a sandbox named "gha-ci-100" already exists',
+      new Response(null, { status: 409 }),
+    );
+    const createSandbox = vi
+      .fn()
+      .mockRejectedValueOnce(conflict)
+      .mockResolvedValueOnce({ id: "sb_new", runCommand: vi.fn() });
+
+    let reclaimed: () => void;
+    const destroyed = new Promise<void>((resolve) => {
+      reclaimed = resolve;
+    });
+    const destroy = vi.fn().mockResolvedValue({ id: "sb_leaked", status: "destroying" });
+    const waitUntilDestroyed = vi.fn().mockReturnValue(destroyed);
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+
+    const pending = createRunnerSandbox(config, github, job, {
+      makeClient: () => ({
+        createSandbox,
+        getSandbox: vi.fn(),
+        listShapes: vi.fn(),
+        listSandboxes: vi
+          .fn()
+          .mockResolvedValue([
+            { id: "sb_leaked", name: "gha-ci-100", status: "running", destroy, waitUntilDestroyed },
+          ]),
+      }),
+      attemptId: () => "k3",
+    });
+
+    // Let every already-resolved promise in the chain settle. The wait is the
+    // only thing still outstanding, so the retry cannot have happened yet.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(destroy).toHaveBeenCalledOnce();
+    expect(createSandbox).toHaveBeenCalledOnce();
+
+    reclaimed!();
+    expect((await pending).sandboxId).toBe("sb_new");
+    expect(createSandbox).toHaveBeenCalledTimes(2);
+  });
+
+  // A destroy that 404s means the periodic sweep reclaimed the VM between our
+  // list and our destroy. Left to propagate, that 404 classifies as a PERMANENT
+  // provision failure (isPermanentProvisionFailure) and the Coordinator drops
+  // the row — turning a self-healing race into a lost job. Every reclaim failure
+  // must therefore surface as the original 409, which is retryable.
+  it.each([
+    ["destroy fails", "destroy"],
+    ["the wait for terminal fails", "wait"],
+  ])("rethrows the original 409 when %s", async (_name, failing) => {
+    const conflict = new CreateosSandboxValidationError(
+      'a sandbox named "gha-ci-100" already exists',
+      new Response(null, { status: 409 }),
+    );
+    const gone = new CreateosSandboxNotFoundError("gone", new Response(null, { status: 404 }));
+    const createSandbox = vi.fn().mockRejectedValue(conflict);
+    const destroy =
+      failing === "destroy" ? vi.fn().mockRejectedValue(gone) : vi.fn().mockResolvedValue({});
+    const waitUntilDestroyed =
+      failing === "wait" ? vi.fn().mockRejectedValue(new Error("wait budget elapsed")) : vi.fn();
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+
+    await expect(
+      createRunnerSandbox(config, github, job, {
+        makeClient: () => ({
+          createSandbox,
+          getSandbox: vi.fn(),
+          listShapes: vi.fn(),
+          listSandboxes: vi.fn().mockResolvedValue([
+            {
+              id: "sb_leaked",
+              name: "gha-ci-100",
+              status: "running",
+              destroy,
+              waitUntilDestroyed,
+            },
+          ]),
+        }),
+        attemptId: () => "k3",
+      }),
+    ).rejects.toThrow(/already exists/);
+    // Not the 404, and not a second create against a name that is still taken.
+    expect(createSandbox).toHaveBeenCalledOnce();
+  });
+
+  // No other job can mint this name, but the leaked VM may already be gone
+  // (the periodic sweep beat us to it) — the original 409 must still surface
+  // so the normal retry path (region failover / Coordinator requeue) handles it.
+  it("rethrows the 409 when no leaked VM is found under that name", async () => {
+    const conflict = new CreateosSandboxValidationError(
+      'a sandbox named "gha-ci-100" already exists',
+      new Response(null, { status: 409 }),
+    );
+    const createSandbox = vi.fn().mockRejectedValue(conflict);
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+
+    await expect(
+      createRunnerSandbox(config, github, job, {
+        makeClient: () => ({
+          createSandbox,
+          getSandbox: vi.fn(),
+          listShapes: vi.fn(),
+          listSandboxes: vi.fn().mockResolvedValue([]),
+        }),
+        attemptId: () => "k3",
+      }),
+    ).rejects.toThrow(/already exists/);
+    expect(createSandbox).toHaveBeenCalledOnce();
+  });
+
   it("gives each provision attempt of the same job a distinct runner name", async () => {
     const createSandbox = vi.fn().mockResolvedValue({ id: "sb_1", runCommand: vi.fn() });
     const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;

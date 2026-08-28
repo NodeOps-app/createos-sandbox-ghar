@@ -1,10 +1,15 @@
-import { CreateosSandboxNotFoundError } from "@nodeops-createos/sandbox";
+import {
+  CreateosSandboxNotFoundError,
+  CreateosSandboxValidationError,
+} from "@nodeops-createos/sandbox";
+import type { CreateSandboxRequest } from "@nodeops-createos/sandbox";
 import type { Config, PendingJob, Region } from "./types";
 import type { GitHubClient } from "./github/client";
 import {
   isFailoverEligible,
   makeSandboxClient,
   regionByName,
+  type CreateosClient,
   type SandboxDeps,
   type SandboxHandle,
 } from "./createos";
@@ -159,6 +164,65 @@ export function jobIdFromSandboxName(name: string, config: Config): number | nul
 }
 
 /**
+ * How long the 409 reclaim waits for the leaked VM to reach `destroyed`. The
+ * SDK's own default (120s) is a wait budget for a caller with time to spare;
+ * this one is spent inside a provision, so it is bounded well under that. A
+ * destroy the platform is healthy enough to finish takes seconds — if it has
+ * not landed in 30, the Coordinator's own retry (a cron tick) is the right
+ * place to try again, and the catch below logs that the bound was hit.
+ */
+const RECLAIM_WAIT_MS = 30_000;
+
+/**
+ * createSandbox, reclaiming a 409 "name already exists" inline instead of
+ * bubbling it up to the Coordinator's retry, which is a cron tick (5 min) away
+ * (see isPermanentProvisionFailure). sandboxName is `gha-ci-<jobId>` — unique
+ * per job — so a 409 on it can only be THIS job's own earlier attempt: the VM
+ * booted server-side but the response never reached the client. No other job
+ * can mint this name, so — unlike the general orphaned-sandbox sweep — no
+ * ownership check against the Coordinator is needed before destroying it.
+ *
+ * EVERY way the reclaim can fail rethrows the ORIGINAL 409, never its own
+ * error, so the outcome stays the retryable path the 409 already had: the
+ * leaked VM is not found (the periodic sweep beat us, or the list lags it),
+ * `destroy` 404s for the same reason — which classifies as PERMANENT and would
+ * drop the row outright — or the wait to terminal runs out of budget.
+ */
+async function createSandboxReclaiming(
+  c: CreateosClient,
+  sandboxName: string,
+  jobId: number,
+  request: CreateSandboxRequest,
+): Promise<SandboxHandle> {
+  try {
+    return await c.createSandbox(request);
+  } catch (err) {
+    if (!(err instanceof CreateosSandboxValidationError) || err.statusCode !== 409) throw err;
+    const leaked = (await c.listSandboxes()).find((s) => s.name === sandboxName);
+    if (!leaked) throw err;
+    console.warn(
+      `sandbox reclaim: destroying leaked VM id=${leaked.id} name=${sandboxName} job=${jobId}`,
+    );
+    try {
+      await leaked.destroy();
+      // `destroy` returns as soon as the row reaches `destroying`, which is an
+      // INTERMEDIATE state — the name stays taken until `destroyed`. Retrying
+      // createSandbox on the strength of the destroy call alone just earns a
+      // second 409 and falls back to the cron-tick retry this whole function
+      // exists to avoid, so the reclaim is only worth doing if it waits.
+      await leaked.waitUntilDestroyed({ timeoutMs: RECLAIM_WAIT_MS });
+    } catch (reclaimErr) {
+      console.warn(
+        `sandbox reclaim: failed to reclaim id=${leaked.id} name=${sandboxName} ` +
+          `job=${jobId}: ${String(reclaimErr)} — falling back to the 409 retry path`,
+      );
+      throw err;
+    }
+    return await c.createSandbox(request);
+  }
+}
+
+/**
  * Step 1 of provisioning: mint JIT config and create the microVM from the
  * pre-baked runner template. Returns the handle + runner name so the caller can
  * record ownership in the Coordinator BEFORE launching the runner — closing the
@@ -217,7 +281,7 @@ export async function createRunnerSandbox(
   const attempt = async (region: Region) => {
     const c = makeSandboxClient(config, deps, region);
     const createStart = Date.now();
-    const sandbox = await c.createSandbox({
+    const sandbox = await createSandboxReclaiming(c, sandboxName, job.jobId, {
       shape: shapeForLabel(job.label, config),
       rootfs: config.runnerTemplate,
       disk_mib: config.runnerDiskMib,
