@@ -253,6 +253,42 @@ tools/ci-requeue.sh --apply         # cancel + rerun them
 tools/ci-requeue.sh --status failed # list recent failures for triage (no action)
 ```
 
+## Operator dashboard
+
+A read-only page at `/admin/dashboard`. It shows every job in flight and the recorded usage
+per tenant. Open it in a browser. The page asks for the admin token, and you post it once:
+
+```
+https://<worker>.workers.dev/admin/dashboard
+```
+
+The Worker checks the token and sets a session cookie that lasts 8 hours. **The cookie is not
+the admin token.** It is `<expiry>.<HMAC(ADMIN_TOKEN, expiry)>` — a signed, self-expiring
+capability that opens the dashboard and nothing else. A stolen cookie cannot be replayed as a
+`Bearer` credential, and it cannot reach the tenant-registry routes. The token travels in a
+POST body, never in a URL, so it never reaches browser history or an access log.
+
+Sessions cannot be revoked one at a time. To end all of them, rotate `ADMIN_TOKEN`.
+
+The page polls `GET /admin/dashboard.json` every 5 seconds. That endpoint also takes a Bearer
+header, so a script can read the same snapshot:
+
+```bash
+curl https://<worker>.workers.dev/admin/dashboard.json \
+  -H "Authorization: Bearer $GHAR_ADMIN_TOKEN" | jq .
+```
+
+`GET /admin/dashboard` is the one admin path that answers without a credential, because a
+browser cannot send a `Bearer` header on a page load. It gives up nothing: the login form is
+byte-identical whether or not `ADMIN_TOKEN` is set, and it carries no data. Every other admin
+route still 404s.
+
+**The page shows live jobs and monthly usage. It cannot show a day-by-day history.** A job row
+is deleted from the Coordinator when its VM is destroyed, so nothing records a finished job.
+The only durable record is the `usage` table, which bills weighted minutes and egress per
+tenant, per repo, per UTC calendar month. The dashboard therefore reports this month and last
+month. To get daily charts, a new history table must be added first.
+
 ## Tenant registry (admin API)
 
 The Worker keeps a registry of Tenants (approved GitHub orgs) and Projects (approved repos

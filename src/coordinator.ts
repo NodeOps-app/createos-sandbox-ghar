@@ -14,6 +14,7 @@ import type {
   TenantAdmission,
   TenantCtx,
   StaleJob,
+  DashboardSnapshot,
 } from "./types";
 import {
   addProjects,
@@ -376,6 +377,78 @@ export class Coordinator extends DurableObject<Env> {
         attempts: r.attempts,
         label: r.label,
       }));
+  }
+
+  /**
+   * The whole operator dashboard in one RPC. Three plain SELECTs, no writes and
+   * no throw on any input — an admin route may call this without a pre-check
+   * (see admin.ts on why a DO method that throws poisons its stub).
+   *
+   * `jobs` is unfiltered because the table only ever holds LIVE rows: a row is
+   * deleted at teardown, so its size is bounded by the concurrency cap plus the
+   * pending queue, not by traffic. That is also why `usage` is the only history
+   * here — it is the only table a finished job leaves anything in, and its
+   * grain is one UTC calendar month.
+   */
+  async dashboard(nowMs: number, months: string[]): Promise<DashboardSnapshot> {
+    const jobs = this.#sql
+      .exec<Row>(`SELECT * FROM jobs ORDER BY created_at`)
+      .toArray()
+      .map((r) => ({
+        jobId: r.job_id,
+        runId: r.run_id,
+        repoFullName: r.repo,
+        state: r.state,
+        label: r.label,
+        region: r.region,
+        attempts: r.attempts,
+        tenantId: r.tenant_id,
+        sandboxId: r.sandbox_id,
+        runnerName: r.runner_name,
+        createdAt: r.created_at,
+        provisionStartedAt: r.provision_started_at,
+        bootedAt: r.booted_at,
+        jobStartedAt: r.job_started_at,
+      }));
+
+    // months is always operator-built (admin.ts passes two month keys), but the
+    // placeholder list is generated rather than interpolated so a future caller
+    // cannot turn a month string into SQL.
+    const usage = months.length
+      ? this.#sql
+          .exec<{
+            installation_id: number;
+            month: string;
+            repo_full_name: string;
+            weighted_minutes: number;
+            egress_bytes: number;
+          }>(`SELECT * FROM usage WHERE month IN (${months.map(() => "?").join(",")})`, ...months)
+          .toArray()
+          .map((r) => ({
+            installationId: r.installation_id,
+            month: r.month,
+            repoFullName: r.repo_full_name,
+            weightedMinutes: r.weighted_minutes,
+            egressBytes: r.egress_bytes,
+          }))
+      : [];
+
+    const tenants = this.#sql
+      .exec<{
+        installation_id: number;
+        org_login: string;
+        status: string;
+        minute_grant: number;
+      }>(`SELECT installation_id, org_login, status, minute_grant FROM tenants`)
+      .toArray()
+      .map((t) => ({
+        installationId: t.installation_id,
+        orgLogin: t.org_login,
+        status: t.status,
+        minuteGrant: t.minute_grant,
+      }));
+
+    return { nowMs, jobs, usage, tenants };
   }
 
   #rowByJob(jobId: number): Row | undefined {

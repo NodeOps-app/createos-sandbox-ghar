@@ -5,6 +5,8 @@ import { timingSafeEqual } from "./webhook";
 import { GitHubClient } from "./github/client";
 import { listAppInstallations, type AppInstallation } from "./github/auth";
 import type { TenantRecord } from "./types";
+import { DASHBOARD_HTML, loginHtml } from "./dashboard";
+import { monthKey } from "./quota";
 
 /**
  * Operator-only tenant registry API. Manual approval is the design (spec D16):
@@ -16,24 +18,117 @@ import type { TenantRecord } from "./types";
 
 const enc = new TextEncoder();
 
-async function authorized(req: Request, token: string | undefined): Promise<boolean> {
-  const header = req.headers.get("Authorization") ?? "";
-  const bearer = header.startsWith("Bearer ");
-  // Every path — unset ADMIN_TOKEN, missing header, non-Bearer header, and a
-  // well-formed wrong token — must perform the same two SHA-256 digests before
-  // deciding, using fixed fallback strings when there is nothing real to hash.
-  // Otherwise the early-return paths are measurably cheaper than the full
-  // compare, and repeated timing lets a prober infer "ADMIN_TOKEN is set on
-  // this deployment" without ever guessing it (finding 4). Hashing both sides
-  // to equal length so the compare never short-circuits on byteLength.
+/**
+ * The dashboard session cookie. A browser cannot put a Bearer header on a
+ * top-level navigation, so the operator posts the token once to
+ * `/admin/dashboard/login` and every later load — and every JSON poll — carries
+ * this instead. Scoped to `/admin`, HttpOnly, Secure and SameSite=Strict, so no
+ * other origin and no script can make the browser spend it.
+ *
+ * Its VALUE IS NOT THE ADMIN TOKEN. It is `<expiryMs>.<HMAC(ADMIN_TOKEN,
+ * expiryMs)>` — an opaque, self-expiring bearer of one capability: read the
+ * dashboard. Stolen, it cannot be replayed as `Authorization: Bearer` against
+ * the admin WRITE routes, and it dies on its own at SESSION_TTL_MS. Signing it
+ * with the admin token rather than a stored session id keeps the DO out of the
+ * auth path entirely; the cost is that individual sessions cannot be revoked —
+ * rotating ADMIN_TOKEN invalidates every one of them at once, which is the
+ * revocation this single-operator surface actually has.
+ */
+const COOKIE = "ghar_dash";
+
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+function cookieValue(req: Request, name: string): string | null {
+  for (const part of (req.headers.get("Cookie") ?? "").split(";")) {
+    const t = part.trim();
+    if (t.startsWith(`${name}=`)) return decodeURIComponent(t.slice(name.length + 1));
+  }
+  return null;
+}
+
+async function hmac(token: string, message: string): Promise<ArrayBuffer> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(token),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  return crypto.subtle.sign("HMAC", key, enc.encode(message));
+}
+
+const b64url = (buf: ArrayBuffer): string =>
+  btoa(String.fromCharCode(...new Uint8Array(buf)))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+
+/** The `Set-Cookie` value for a fresh dashboard session. */
+async function mintSession(token: string, nowMs: number): Promise<string> {
+  const exp = String(nowMs + SESSION_TTL_MS);
+  const value = `${exp}.${b64url(await hmac(token, exp))}`;
+  return (
+    `${COOKIE}=${encodeURIComponent(value)}; Path=/admin; HttpOnly; Secure; ` +
+    `SameSite=Strict; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`
+  );
+}
+
+async function sessionValid(
+  cookie: string | null,
+  token: string | undefined,
+  nowMs: number,
+): Promise<boolean> {
+  const [expPart = "", sigPart = ""] = (cookie ?? "").split(".");
+  // Same constant-work discipline as secretMatches: the HMAC is computed on
+  // every path, with a fixed fallback key when ADMIN_TOKEN is unset, so timing
+  // never reveals whether this deployment has one.
+  const expected = b64url(await hmac(token ?? "no-token", expPart));
+  const exp = Number(expPart);
+  // A plain === on the digests is deliberate: what it compares is an HMAC
+  // OUTPUT, not a secret. An attacker who can time it learns a prefix of a
+  // digest they still cannot forge without the key.
+  return Boolean(token) && Number.isSafeInteger(exp) && exp > nowMs && expected === sigPart;
+}
+
+async function secretMatches(
+  presented: string | null,
+  token: string | undefined,
+): Promise<boolean> {
+  // Every path — unset ADMIN_TOKEN, no credential at all, and a well-formed
+  // wrong token — must perform the same two SHA-256 digests before deciding,
+  // using fixed fallback strings when there is nothing real to hash. Otherwise
+  // the early-return paths are measurably cheaper than the full compare, and
+  // repeated timing lets a prober infer "ADMIN_TOKEN is set on this
+  // deployment" without ever guessing it (finding 4). Hashing both sides to
+  // equal length so the compare never short-circuits on byteLength.
   const [a, b] = await Promise.all([
-    crypto.subtle.digest(
-      "SHA-256",
-      enc.encode(bearer ? header.slice("Bearer ".length) : "no-header"),
-    ),
+    crypto.subtle.digest("SHA-256", enc.encode(presented ?? "no-header")),
     crypto.subtle.digest("SHA-256", enc.encode(token ?? "no-token")),
   ]);
-  return Boolean(token) && bearer && timingSafeEqual(a, b);
+  return Boolean(token) && presented !== null && timingSafeEqual(a, b);
+}
+
+/**
+ * Two credentials, deliberately unequal in POWER — which is the whole point of
+ * the session, so the caller must branch on which one arrived, never on a bare
+ * boolean. `token` is the admin token itself and opens every route, read and
+ * write. `session` is the signed cookie minted from it and opens the dashboard
+ * reads and nothing else: stolen, it cannot be replayed as a Bearer credential
+ * (it is not the token) and it cannot reach the tenant registry (this
+ * distinction), so it is worth strictly less than the secret behind it.
+ */
+type Credential = "token" | "session" | null;
+
+async function authenticate(
+  req: Request,
+  token: string | undefined,
+  nowMs: number,
+): Promise<Credential> {
+  const header = req.headers.get("Authorization") ?? "";
+  if (header.startsWith("Bearer ")) {
+    return (await secretMatches(header.slice("Bearer ".length), token)) ? "token" : null;
+  }
+  return (await sessionValid(cookieValue(req, COOKIE), token, nowMs)) ? "session" : null;
 }
 
 const Status = z.enum(["pending", "approved", "suspended", "revoked"]);
@@ -97,6 +192,24 @@ const ProjectDeleteBody = z.object({
 
 const BackfillBody = z.object({ installation_id: SafeId });
 
+function htmlResponse(body: string, status = 200): Response {
+  return new Response(body, {
+    status,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      // Both pages are entirely self-contained: no external script, style, font
+      // or image. Say so, so an injected one cannot run.
+      "content-security-policy":
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+        "form-action 'self'; connect-src 'self'",
+      // The login form carries a secret in its body — no URL of ours should
+      // ever travel to a third party, and nothing here should be cached.
+      "referrer-policy": "no-referrer",
+      "cache-control": "no-store",
+    },
+  });
+}
+
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -112,14 +225,70 @@ export async function handleAdmin(
   fetchImpl?: typeof fetch,
 ): Promise<Response> {
   const config = loadConfig(env as Record<string, unknown>);
-  if (!(await authorized(req, config.adminToken)))
+  const url = new URL(req.url);
+
+  const now = Date.now();
+  const credential = await authenticate(req, config.adminToken, now);
+
+  // The login exchange, BEFORE any session exists. A POST body — never a query
+  // string: a URL is written to browser history, to the Referer of anything the
+  // page later loads, and to every access log in front of the Worker, and the
+  // admin token is reusable and opens the WRITE routes. What the browser gets
+  // back is a signed, expiring session, not the token it sent.
+  if (req.method === "POST" && url.pathname === "/admin/dashboard/login") {
+    const form = await req.formData().catch(() => null);
+    const presented = form ? String(form.get("token") ?? "") : "";
+    if (!(await secretMatches(presented, config.adminToken))) {
+      // 401 + the form again, not 404: the page is already public (see below),
+      // so there is nothing left to hide here, and an operator who fat-fingers
+      // the token needs to be told.
+      return htmlResponse(loginHtml(true), 401);
+    }
+    return new Response(null, {
+      status: 303,
+      headers: {
+        location: "/admin/dashboard",
+        "set-cookie": await mintSession(config.adminToken as string, now),
+      },
+    });
+  }
+
+  // The dashboard page is the ONE admin path that answers without a credential
+  // — it has to, since a browser cannot present one on a navigation. It gives
+  // up nothing: the login form is byte-identical whether or not ADMIN_TOKEN is
+  // set, so the "an unconfigured deployment is indistinguishable from a
+  // configured one" property still holds, and the page itself carries no data.
+  // Every other admin route keeps 404-ing below.
+  if (req.method === "GET" && url.pathname === "/admin/dashboard") {
+    return htmlResponse(credential ? DASHBOARD_HTML : loginHtml(false));
+  }
+
+  // The session cookie stops here. `/admin/dashboard.json` is the one read it
+  // is a capability FOR; everything past this line is the tenant registry,
+  // which only the admin token itself opens. Without this line the cookie would
+  // be a full admin credential in a browser jar, and the whole point of not
+  // storing the token would be lost.
+  const sessionMayRead = credential === "session" && url.pathname === "/admin/dashboard.json";
+  if (credential !== "token" && !sessionMayRead) {
     return new Response("not found", { status: 404 });
+  }
 
   const co = env.COORDINATOR.get(env.COORDINATOR.idFromName("singleton"));
-  const url = new URL(req.url);
   const route = `${req.method} ${url.pathname}`;
 
   try {
+    if (route === "GET /admin/dashboard.json") {
+      // Live rows plus the only history the DO keeps: this UTC month and the
+      // one before it. Date.UTC normalises month -1 back into December.
+      const d = new Date(now);
+      const months = {
+        current: monthKey(now),
+        previous: monthKey(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1)),
+      };
+      const snapshot = await co.dashboard(now, [months.current, months.previous]);
+      return json({ ...snapshot, months });
+    }
+
     if (route === "GET /admin/installations") {
       // The onboarding lookup: which orgs have installed our App, and under
       // which installation id. Read-only, and the ONLY way an operator can

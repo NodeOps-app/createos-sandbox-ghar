@@ -98,25 +98,29 @@ describe("admin auth", () => {
     digestSpy.mockRestore();
   });
 
-  it("hashes twice even when the Authorization header is missing", async () => {
-    const digestSpy = vi.spyOn(crypto.subtle, "digest");
-    const res = await handleAdmin(new Request("https://ghar.test/admin/tenants"), B);
-    expect(res.status).toBe(404);
-    expect(digestSpy).toHaveBeenCalledTimes(2);
-    digestSpy.mockRestore();
-  });
-
-  it("hashes twice even when the Authorization header isn't Bearer-prefixed", async () => {
-    const digestSpy = vi.spyOn(crypto.subtle, "digest");
-    const res = await handleAdmin(
-      new Request("https://ghar.test/admin/tenants", {
-        headers: { Authorization: "Basic dGVzdDp0ZXN0" },
-      }),
-      B,
-    );
-    expect(res.status).toBe(404);
-    expect(digestSpy).toHaveBeenCalledTimes(2);
-    digestSpy.mockRestore();
+  // A request with no Bearer header is a SESSION-cookie candidate, so it takes
+  // the HMAC path instead of the two digests. The anti-probe property is the
+  // same and must hold there too: whether ADMIN_TOKEN is set or not, the work
+  // is one signature over a fixed-fallback key, so timing still cannot tell a
+  // configured deployment from an unconfigured one.
+  it.each([
+    ["the Authorization header is missing", {}],
+    ["the Authorization header isn't Bearer-prefixed", { Authorization: "Basic dGVzdDp0ZXN0" }],
+    ["the cookie is garbage", { Cookie: "ghar_dash=nonsense" }],
+  ])("signs once, set or unset, when %s", async (_name, headers) => {
+    const noAdminToken = { ...B, ADMIN_TOKEN: undefined } as unknown as Bindings;
+    const counts: number[] = [];
+    for (const bindings of [B, noAdminToken]) {
+      const signSpy = vi.spyOn(crypto.subtle, "sign");
+      const res = await handleAdmin(
+        new Request("https://ghar.test/admin/tenants", { headers }),
+        bindings,
+      );
+      expect(res.status).toBe(404);
+      counts.push(signSpy.mock.calls.length);
+      signSpy.mockRestore();
+    }
+    expect(counts).toEqual([1, 1]);
   });
 });
 

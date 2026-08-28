@@ -268,3 +268,44 @@ export interface StaleJob {
   attempts: number;
   label: string | null;
 }
+
+/** One live `jobs` row, flattened for the operator dashboard. Read-only. */
+export interface DashboardJob {
+  jobId: number;
+  runId: number;
+  repoFullName: string;
+  state: string;
+  label: string | null;
+  region: string | null;
+  attempts: number;
+  tenantId: number | null;
+  sandboxId: string | null;
+  runnerName: string | null;
+  createdAt: number;
+  provisionStartedAt: number | null;
+  bootedAt: number | null;
+  jobStartedAt: number | null;
+}
+
+/** One `usage` row: the billed total for a repo in one UTC calendar month. */
+export interface DashboardUsage {
+  installationId: number;
+  month: string;
+  repoFullName: string;
+  weightedMinutes: number;
+  egressBytes: number;
+}
+
+/**
+ * Everything the operator dashboard draws, in one DO read. The `jobs` table
+ * holds ONLY live rows (a row is deleted at teardown), so `jobs` is the live
+ * view and `usage` is the entire history we keep — per tenant, per repo, per
+ * UTC calendar MONTH. There is no daily series to draw and none can be
+ * recovered: nothing persists a finished job.
+ */
+export interface DashboardSnapshot {
+  nowMs: number;
+  jobs: DashboardJob[];
+  usage: DashboardUsage[];
+  tenants: { installationId: number; orgLogin: string; status: string; minuteGrant: number }[];
+}
