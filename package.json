@@ -25,12 +25,12 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "0.21.3",
-    "@cloudflare/workers-types": "5.20260815.1",
-    "oxfmt": "0.63.0",
-    "oxlint": "1.78.0",
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@cloudflare/workers-types": "5.20260828.1",
+    "oxfmt": "0.65.0",
+    "oxlint": "1.80.0",
     "typescript": "7.0.2",
-    "vitest": "4.1.10",
-    "wrangler": "4.123.0"
+    "vitest": "4.1.11",
+    "wrangler": "4.127.1"
   }
 }
