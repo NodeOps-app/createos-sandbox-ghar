@@ -879,6 +879,12 @@ describe("runReconciler — multi-tenant mode", () => {
       { length: 9 },
       (_, i) => `mt-org-40201/r${String(i).padStart(2, "0")}`,
     );
+    // Scoped recovery scans only createos-active repos (usage ∪ projects), so
+    // seed A's repos as projects to make it genuinely large in that model.
+    await s.adminAddProjects(
+      40201,
+      aRepos.map((r, i) => ({ repoFullName: r, repoId: 100 + i })),
+    );
     patchMultiGitHub({
       40201: { org: "mt-org-40201", repos: aRepos },
       40202: {
