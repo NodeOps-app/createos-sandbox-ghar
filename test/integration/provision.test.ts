@@ -1,4 +1,10 @@
-import { env, SELF, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import {
+  env,
+  SELF,
+  createExecutionContext,
+  runInDurableObject,
+  waitOnExecutionContext,
+} from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CreateosSandboxServerError } from "@nodeops-createos/sandbox";
 import { handleWebhook } from "../../src/handler";
@@ -165,6 +171,44 @@ describe("full provision flow", () => {
     const res = await worker.fetch(req, env as any, createExecutionContext());
     expect(res.status).toBe(401);
   });
+
+  // HMAC needs the exact bytes, so the body has to be buffered BEFORE any
+  // credential is checked — on an endpoint anyone who learns the URL can POST
+  // to, against a 128 MB isolate shared with whatever else it is serving.
+  it("refuses an oversize body before buffering it, credential or not", async () => {
+    const req = new Request("https://ctrl.local/webhook", {
+      method: "POST",
+      headers: { "X-GitHub-Delivery": "huge" },
+      body: "x".repeat(1_048_577),
+    });
+    const res = await worker.fetch(req, env as any, createExecutionContext());
+    expect(res.status).toBe(413);
+  });
+
+  it("enforces the cap while READING, not just on Content-Length", async () => {
+    // A chunked request declares no length, which is exactly how the declared
+    // size would be omitted. The read itself is the bound: an endless body is
+    // cancelled once it passes the cap.
+    let chunks = 0;
+    const body = new ReadableStream({
+      pull(c) {
+        chunks++;
+        c.enqueue(new Uint8Array(256 * 1024));
+      },
+    });
+    const req = new Request("https://ctrl.local/webhook", {
+      method: "POST",
+      headers: { "X-GitHub-Delivery": "chunked" },
+      body,
+      duplex: "half",
+    } as RequestInit);
+    const res = await worker.fetch(req, env as any, createExecutionContext());
+    expect(res.status).toBe(413);
+    expect(req.headers.get("content-length")).toBeNull();
+    // Cancelled, not drained: the cap binds after ~1 MiB, not at the end of an
+    // endless stream.
+    expect(chunks).toBeLessThan(16);
+  });
 });
 
 /**
@@ -197,6 +241,81 @@ describe("a provision that fails after the VM exists never leaks it", () => {
     expect(createSandbox).toHaveBeenCalledOnce();
     expect(destroy).toHaveBeenCalledOnce(); // the VM is gone, not orphaned
     expect(await singleton().liveJobIds()).not.toContain(510); // teardown confirmed → row cleared
+    globalThis.fetch = realFetch;
+  });
+
+  // The alert used to be awaited BEFORE markProvisionFailed, which put a
+  // third-party webhook in front of capacity release, the compensating destroy,
+  // and the next pending job — inside a 30s execution budget. A Slack URL that
+  // accepts the connection and never answers is not a caught failure, so the
+  // catch in notify() could not save it.
+  it("frees the slot and persists the failure before the alert webhook answers", async () => {
+    patchGitHub();
+    let releaseAlert!: () => void;
+    let alertSeen!: () => void;
+    const alertInFlight = new Promise<void>((resolve) => {
+      alertSeen = resolve;
+    });
+    const inner = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      if (new Request(input, init).url.includes("hooks.example")) {
+        alertSeen();
+        return new Promise<Response>((resolve) => {
+          releaseAlert = () => resolve(new Response("ok"));
+        });
+      }
+      return inner(input, init);
+    }) as typeof fetch;
+
+    const createSandbox = vi.fn().mockRejectedValue(new Error("createos refused"));
+    const body = workflowJobPayload({ action: "queued", jobId: 513 });
+    const req = new Request("https://ctrl.local/webhook", {
+      method: "POST",
+      headers: {
+        "X-Hub-Signature-256": await sign(env.GITHUB_WEBHOOK_SECRET as string, body),
+        "X-GitHub-Delivery": "dlv-513",
+      },
+      body,
+    });
+    // A hand-rolled ctx: the real one cannot be drained here, because the
+    // provisioning promise is deliberately still holding the pending alert.
+    const background: Promise<unknown>[] = [];
+    const res = await handleWebhook(
+      req,
+      { ...env, ALERT_WEBHOOK_URL: "https://hooks.example/x" } as any,
+      { waitUntil: (p: Promise<unknown>) => background.push(p) } as any,
+      {
+        makeClient: () => ({
+          createSandbox,
+          getSandbox: vi.fn(),
+          listShapes: vi.fn(),
+          listSandboxes: vi.fn().mockResolvedValue([]),
+        }),
+      } as any,
+    );
+    expect(res.status).toBe(202);
+    await alertInFlight; // the alert is in flight and will not answer on its own
+
+    const row = async () =>
+      (
+        await runInDurableObject(singleton(), (_i, state) =>
+          state.storage.sql
+            .exec<{ state: string; attempts: number }>(
+              `SELECT state, attempts FROM jobs WHERE job_id = ?`,
+              513,
+            )
+            .toArray(),
+        )
+      )[0];
+    // Re-queued for retry with its slot released, all while Slack hangs.
+    await vi.waitFor(async () => expect((await row())?.state).toBe("pending"));
+    expect(createSandbox).toHaveBeenCalledOnce();
+    expect((await row())!.attempts).toBe(1);
+
+    // And the alert is still TRACKED — an untracked promise in waitUntil is
+    // killed without a trace, so the alert must be awaited, just not first.
+    releaseAlert();
+    await Promise.all(background);
     globalThis.fetch = realFetch;
   });
 

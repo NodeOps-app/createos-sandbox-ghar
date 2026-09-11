@@ -365,7 +365,10 @@ describe("runReconciler", () => {
     });
 
     expect(createSandbox).toHaveBeenCalledTimes(2);
-    expect(createSandbox).toHaveBeenCalledWith(expect.objectContaining({ shape: "s-2vcpu-2gb" }));
+    expect(createSandbox).toHaveBeenCalledWith(
+      expect.objectContaining({ shape: "s-2vcpu-2gb" }),
+      expect.anything(),
+    );
     expect(listShapes).toHaveBeenCalledTimes(1);
     globalThis.fetch = realFetch;
   });
@@ -434,7 +437,10 @@ describe("runReconciler", () => {
 
     expect(listShapes).toHaveBeenCalledTimes(1);
     expect(createSandbox).toHaveBeenCalledTimes(1);
-    expect(createSandbox).toHaveBeenCalledWith(expect.objectContaining({ shape: "s-2vcpu-2gb" }));
+    expect(createSandbox).toHaveBeenCalledWith(
+      expect.objectContaining({ shape: "s-2vcpu-2gb" }),
+      expect.anything(),
+    );
     globalThis.fetch = realFetch;
   });
 });
@@ -842,6 +848,59 @@ describe("runReconciler — multi-tenant mode", () => {
     globalThis.fetch = realFetch;
   });
 
+  // The refusal above is correct but was paid for: the scan read every repo of
+  // the installation (2 reads each, before pagination and job lookups) to find
+  // jobs gate 3 then threw away. A restricted tenant's scan is now scoped to the
+  // repos that gate could admit — an optimization only, so the refusal path
+  // above must keep working exactly as it does.
+  it("never even reads a restricted tenant's unapproved repos", async () => {
+    const s = stub("singleton");
+    await s.adminUpsertTenant(approvedTenant(40401));
+    await s.adminAddProjects(40401, [{ repoFullName: "mt-org-40401/api", repoId: 1 }]);
+
+    patchMultiGitHub({
+      40401: {
+        org: "mt-org-40401",
+        repos: ["mt-org-40401/api", "mt-org-40401/other"],
+        jobsByRepo: {
+          "mt-org-40401/api": [{ id: 404011, status: "queued", labels: ["createos"] }],
+          "mt-org-40401/other": [{ id: 404022, status: "queued", labels: ["createos"] }],
+        },
+      },
+    });
+    // Wrap the mock to record what the scan actually asked GitHub for. Called
+    // through a local var, never as a method — see the `fetch` gotcha.
+    const mocked = globalThis.fetch;
+    const seen: string[] = [];
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(new Request(input, init).url);
+      return mocked(input, init);
+    }) as typeof fetch;
+
+    const createSandbox = vi.fn().mockResolvedValue({
+      id: "sb404011",
+      runCommand: vi.fn().mockResolvedValue({ result: { stdout: "started" }, exec_ms: 1 }),
+    });
+    await runReconciler(multiEnv(), {
+      makeClient: () => ({
+        createSandbox,
+        listShapes: vi.fn().mockResolvedValue(shapeCatalog()),
+        getSandbox: vi.fn(),
+        listSandboxes: vi.fn().mockResolvedValue([]),
+      }),
+    });
+
+    // The approved project is still scanned and still provisions.
+    expect(seen.some((u) => u.includes("/repos/mt-org-40401/api/"))).toBe(true);
+    expect(createSandbox).toHaveBeenCalledOnce();
+    // The unapproved repo costs nothing at all now — not the two run-status
+    // reads, not the job read behind them.
+    expect(seen.some((u) => u.includes("/repos/mt-org-40401/other/"))).toBe(false);
+
+    await s.adminSetTenantStatus(40401, "revoked");
+    globalThis.fetch = realFetch;
+  });
+
   it("step A is all-or-nothing: one tenant's listRunners failure spares every tenant's stale row", async () => {
     const s = stub("singleton");
     await s.adminUpsertTenant(approvedTenant(40101));
@@ -878,6 +937,13 @@ describe("runReconciler — multi-tenant mode", () => {
     const aRepos = Array.from(
       { length: 9 },
       (_, i) => `mt-org-40201/r${String(i).padStart(2, "0")}`,
+    );
+    // All nine are approved Projects: recovery scans only what gate 3 could
+    // admit, so a large tenant is large in its PROJECT list, not merely in what
+    // it installed the App on.
+    await s.adminAddProjects(
+      40201,
+      aRepos.map((repoFullName, i) => ({ repoFullName, repoId: 100 + i })),
     );
     patchMultiGitHub({
       40201: { org: "mt-org-40201", repos: aRepos },

@@ -261,8 +261,14 @@ describe("shape labels end-to-end", () => {
     // caught it → failProvision ran: logged + alerted, freed the slot, and
     // promoted the job behind it with ITS OWN shape — never falling back to a
     // default-size VM for the job whose shape vanished.
-    expect(promoteCreate).toHaveBeenCalledWith(expect.objectContaining({ shape: "s-2vcpu-2gb" }));
-    expect(promoteCreate).toHaveBeenCalledWith(expect.objectContaining({ shape: "s-4vcpu-4gb" }));
+    expect(promoteCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ shape: "s-2vcpu-2gb" }),
+      expect.anything(),
+    );
+    expect(promoteCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ shape: "s-4vcpu-4gb" }),
+      expect.anything(),
+    );
     expect(
       error.mock.calls.some((c) => String(c[0]).includes(`provision failed job=${shapedJobId}`)),
     ).toBe(true);

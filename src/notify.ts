@@ -44,6 +44,19 @@ export function alertContext(
 }
 
 /**
+ * How long an alert POST may take before it is abandoned.
+ *
+ * Every caller runs inside a provisioning/teardown path, and those paths run in
+ * `ctx.waitUntil`, which Cloudflare bounds at 30s after the response — so a
+ * webhook sink that accepts the connection and then never answers does not just
+ * lose the alert, it eats the whole remaining budget of the work that alert was
+ * reporting on. A request that hangs is not yet a caught failure: the catch
+ * below only fires once something settles, which is why the deadline is the fix
+ * and not the log. 3s is generous for Slack's ingest and far inside the budget.
+ */
+const ALERT_TIMEOUT_MS = 3_000;
+
+/**
  * Posts a failure alert to the configured webhook (Slack-compatible `{ text }`
  * payload). A no-op when ALERT_WEBHOOK_URL is unset. Never throws — alerting
  * must not break the provisioning/teardown path it reports on.
@@ -55,6 +68,7 @@ export async function notify(config: Config, text: string): Promise<void> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
+      signal: AbortSignal.timeout(ALERT_TIMEOUT_MS),
     });
     // A non-2xx (a dead/rotated Slack URL 404s, a throttled one 429s) resolves
     // without throwing, so an unchecked response silently swallows the alert —

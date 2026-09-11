@@ -76,6 +76,10 @@ export interface SandboxDeps {
   /** Injection seam for tests. Defaults to a real timer — lets a test assert the
    * post-failover retry without spending its delay in wall-clock. */
   sleep?: (ms: number) => Promise<void>;
+  /** Injection seam for tests. The one deadline shared by every create attempt
+   * of a provision (see `CREATE_BUDGET_MS`) — lets a test present an already
+   * spent budget instead of waiting one out in wall-clock. */
+  createBudget?: () => AbortSignal;
 }
 
 /**

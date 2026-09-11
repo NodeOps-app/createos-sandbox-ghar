@@ -22,6 +22,19 @@ describe("notify", () => {
     spy.mockRestore();
   });
 
+  it("carries a request deadline — a sink that never answers must not hold the caller", async () => {
+    // Every caller is on a provisioning/teardown path running inside the 30s
+    // post-response budget, and a request that hangs is not yet a caught
+    // failure: the catch fires only once something settles. The deadline, not
+    // the catch, is what bounds it.
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok"));
+    await notify({ ...base, alertWebhookUrl: "https://hooks.example/x" }, "boom");
+    const { signal } = spy.mock.calls[0]![1] as RequestInit;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect((signal as AbortSignal).aborted).toBe(false);
+    spy.mockRestore();
+  });
+
   it("logs, and does not throw, when the webhook returns non-2xx", async () => {
     // A dead/rotated Slack URL 404s: fetch resolves, so an unchecked response
     // reports the alert as delivered. It must be logged instead of swallowed.

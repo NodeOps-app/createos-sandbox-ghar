@@ -270,7 +270,10 @@ POST body, never in a URL, so it never reaches browser history or an access log.
 
 Sessions cannot be revoked one at a time. To end all of them, rotate `ADMIN_TOKEN`.
 
-The page polls `GET /admin/dashboard.json` every 5 seconds. That endpoint also takes a Bearer
+The page polls `GET /admin/dashboard.json` every 5 seconds while its tab is visible, and pauses
+while it is hidden (the status line says `paused — tab hidden`); switching back to the tab
+refreshes it immediately. A tab left open in the background otherwise polls forever, and every
+poll is both a Worker request and a Coordinator request. That endpoint also takes a Bearer
 header, so a script can read the same snapshot:
 
 ```bash

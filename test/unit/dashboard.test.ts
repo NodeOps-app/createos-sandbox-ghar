@@ -131,6 +131,20 @@ describe("dashboard page", () => {
     expect(DASHBOARD_HTML).toContain('u.repoFullName === ""');
   });
 
+  // An operator tab left open on a second monitor used to poll forever: at 5s
+  // that is ~518k requests over 30 days, and each one is BOTH a Worker request
+  // and a Coordinator RPC — over half the 1M included DO requests, spent drawing
+  // a board nobody is looking at. The page must pause itself while hidden, and
+  // must not use a fixed interval (tick() is async, so overlapping polls render
+  // into the same board out of order).
+  it("polls on a self-scheduling timeout that pauses while the tab is hidden", () => {
+    // The call, not the word — the page's own comment explains why it is gone.
+    expect(DASHBOARD_HTML).not.toContain("setInterval(");
+    expect(DASHBOARD_HTML).toContain('addEventListener("visibilitychange"');
+    expect(DASHBOARD_HTML).toContain("document.hidden");
+    expect(DASHBOARD_HTML).toContain("setTimeout(poll, 5000)");
+  });
+
   // The numbers are weighted minutes (wall-clock x vCPU/2), not GitHub's
   // Actions minutes. A reader who compares the two without being told will
   // report a bug that is not one — createos-studio read 20,948 here against

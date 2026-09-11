@@ -153,7 +153,14 @@ export async function failProvision(
   // all, so it is computed once, reported, and then passed to the DO.
   const retryable = !isPermanentProvisionFailure(err);
   console.error(`provision failed job=${job.jobId}: ${String(err)}`);
-  await notify(
+  // Started here but deliberately NOT awaited until the end: the slot this job
+  // holds is not freed until markProvisionFailed returns, and neither is the
+  // compensating destroy or the next pending job — so awaiting an alert first
+  // put a third-party webhook in front of capacity release and VM cleanup.
+  // Still tracked (awaited below) rather than fire-and-forgotten, because an
+  // untracked promise inside `ctx.waitUntil` is killed without a trace; notify
+  // never throws, so nothing here can reject.
+  const alert = notify(
     config,
     `ghar provision failed: ${String(err)}\n` +
       jobRef(job.repoFullName, job.runId, job.jobId) +
@@ -173,11 +180,13 @@ export async function failProvision(
   } catch (doErr) {
     console.error(`markProvisionFailed unreachable job=${job.jobId}: ${String(doErr)}`);
     if (sandboxId) await destroyUnrecorded(config, job.jobId, sandboxId, region, deps);
+    await alert;
     return;
   }
 
   if (result.toDestroy) await destroyAndConfirm(env, config, result.toDestroy, deps);
   if (result.nextPending) await provisionAndRecord(env, result.nextPending, deps);
+  await alert;
 }
 
 /**
@@ -410,6 +419,48 @@ export async function admitAndDrive(
   return decision.action;
 }
 
+/**
+ * Byte cap on a webhook body. `workflow_job` deliveries measure a few KB; the
+ * largest thing GitHub will send on any event is ~25 MB, and 1 MiB covers every
+ * shape of this one with three orders of magnitude of slack.
+ */
+const MAX_WEBHOOK_BYTES = 1_048_576;
+
+/**
+ * Reads the body as text, refusing (null) anything over `max`.
+ *
+ * HMAC verification needs the EXACT bytes, so the body cannot be streamed past
+ * us — it has to be buffered, and `/webhook` is reachable by anyone who learns
+ * the URL, before any credential is checked. Cloudflare accepts request bodies
+ * up to the zone's limit (100 MB on the current plan) against a 128 MB isolate
+ * that is shared with whatever else it is serving, so the cap is what keeps an
+ * unauthenticated POST from being a memory attack.
+ *
+ * The declared length is only the fast path: `Content-Length` is absent on a
+ * chunked request, which is exactly how an attacker would omit it, so the read
+ * itself is what enforces the bound.
+ */
+async function readBoundedText(req: Request, max: number): Promise<string | null> {
+  const declared = Number(req.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > max) return null;
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel();
+      return null;
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
 export async function handleWebhook(
   req: Request,
   env: Bindings,
@@ -417,7 +468,14 @@ export async function handleWebhook(
   deps: SandboxDeps = {},
 ): Promise<Response> {
   const config = loadConfig(env as Record<string, unknown>);
-  const body = await req.text();
+  const body = await readBoundedText(req, MAX_WEBHOOK_BYTES);
+  if (body === null) {
+    console.warn(
+      `webhook rejected: body over ${MAX_WEBHOOK_BYTES} bytes ` +
+        `(content-length=${req.headers.get("content-length") ?? "absent"})`,
+    );
+    return new Response("payload too large", { status: 413 });
+  }
   const sig = req.headers.get("X-Hub-Signature-256");
   if (!(await verifySignature(config.githubWebhookSecret, body, sig))) {
     return new Response("bad signature", { status: 401 });

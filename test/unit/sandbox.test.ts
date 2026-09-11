@@ -160,6 +160,9 @@ describe("createRunnerSandbox", () => {
         egress: ["*"], // CI needs unrestricted egress
         envs: { JIT_CONFIG: "BLOB" },
       }),
+      // Every create carries the provision's shared deadline (CREATE_BUDGET_MS)
+      // so the whole ladder fits inside the 30s post-response execution budget.
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     // Does NOT launch the runner — that is a separate step, after ownership is recorded.
     expect(runCommand).not.toHaveBeenCalled();
@@ -637,6 +640,41 @@ describe("createRunnerSandbox region failover", () => {
     expect(github.generateJitConfig).toHaveBeenCalledOnce();
     expect(res.region).toBe("eu");
     expect(res.sandboxId).toBe("sb_eu");
+  });
+
+  it("stops the ladder once the shared create budget is spent, instead of overrunning waitUntil", async () => {
+    // Provisioning runs in ctx.waitUntil, which Cloudflare terminates 30s after
+    // the response — and termination runs no catch/finally, so an overrun does
+    // not fail, it vanishes: the row stays `provisioning` and the slot stays
+    // held until the reconciler notices minutes later. Once the budget is gone,
+    // failing NOW is what re-queues the row for a tick that can still finish.
+    const us = {
+      createSandbox: vi
+        .fn()
+        .mockRejectedValue(
+          new CreateosSandboxServerError("us down", new Response(null, { status: 503 })),
+        ),
+    };
+    const eu = { createSandbox: vi.fn().mockResolvedValue({ id: "sb_eu", runCommand: vi.fn() }) };
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+    const deps = regionRoutedClients({ us, eu });
+    const sleep = vi.fn(async () => {});
+
+    await expect(
+      createRunnerSandbox(twoRegions, github, job, {
+        ...deps,
+        sleep,
+        // A budget that was already spent by the time the first region answered.
+        createBudget: () => AbortSignal.abort(),
+      }),
+    ).rejects.toThrow(/us down/);
+
+    // eu is a HEALTHY region that would have booted the VM — it is skipped
+    // anyway, because there is no budget left to boot it in.
+    expect(us.createSandbox).toHaveBeenCalledOnce();
+    expect(eu.createSandbox).not.toHaveBeenCalled();
+    // And the post-failover retry's 1.5s pause is never spent either.
+    expect(sleep).not.toHaveBeenCalled();
   });
 
   it("does NOT fail over on a 4xx — a request defect fails identically in every region", async () => {

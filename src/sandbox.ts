@@ -168,10 +168,35 @@ export function jobIdFromSandboxName(name: string, config: Config): number | nul
  * SDK's own default (120s) is a wait budget for a caller with time to spare;
  * this one is spent inside a provision, so it is bounded well under that. A
  * destroy the platform is healthy enough to finish takes seconds — if it has
- * not landed in 30, the Coordinator's own retry (a cron tick) is the right
- * place to try again, and the catch below logs that the bound was hit.
+ * not landed in 8, it is not landing inside this invocation at all, and the
+ * Coordinator's own retry (a cron tick) is the right place to try again. The
+ * catch below logs that the bound was hit.
+ *
+ * Was 30s, which on its own consumed the entire post-response execution budget
+ * (see CREATE_BUDGET_MS) and left the reclaim's whole reason for existing — a
+ * successful inline re-create — unreachable.
  */
-const RECLAIM_WAIT_MS = 30_000;
+const RECLAIM_WAIT_MS = 8_000;
+
+/**
+ * Wall-clock budget for ALL create attempts of one provision: every region on
+ * the ladder, the 409 reclaim, and the post-failover retry, together.
+ *
+ * Provisioning runs in `ctx.waitUntil`, which Cloudflare terminates 30s after
+ * the webhook response — and termination runs no `catch`/`finally`, so an
+ * overrun does not fail, it VANISHES: the row stays `provisioning`, the slot
+ * stays held, and only the reconciler notices, minutes later. Nothing in the
+ * SDK's own budgets fits inside that: `createSandbox` resolves when the VM is
+ * `running` under a 60s per-request timeout, retried twice, so one region alone
+ * can spend ~180s. This deadline is what makes an overrun LOUD instead —
+ * markProvisionFailed re-queues the row and the next tick retries it.
+ *
+ * 22s leaves the mint (~1s) and the launch + DO calls that follow room inside
+ * the 30s ceiling. It is a ceiling, not a target: a healthy create is seconds,
+ * so it binds only on the pathological paths it exists to bound — and says so
+ * in the log when it does.
+ */
+const CREATE_BUDGET_MS = 22_000;
 
 /**
  * createSandbox, reclaiming a 409 "name already exists" inline instead of
@@ -192,10 +217,11 @@ async function createSandboxReclaiming(
   c: CreateosClient,
   sandboxName: string,
   jobId: number,
+  signal: AbortSignal,
   request: CreateSandboxRequest,
 ): Promise<SandboxHandle> {
   try {
-    return await c.createSandbox(request);
+    return await c.createSandbox(request, { signal });
   } catch (err) {
     if (!(err instanceof CreateosSandboxValidationError) || err.statusCode !== 409) throw err;
     const leaked = (await c.listSandboxes()).find((s) => s.name === sandboxName);
@@ -204,13 +230,13 @@ async function createSandboxReclaiming(
       `sandbox reclaim: destroying leaked VM id=${leaked.id} name=${sandboxName} job=${jobId}`,
     );
     try {
-      await leaked.destroy();
+      await leaked.destroy({ signal });
       // `destroy` returns as soon as the row reaches `destroying`, which is an
       // INTERMEDIATE state — the name stays taken until `destroyed`. Retrying
       // createSandbox on the strength of the destroy call alone just earns a
       // second 409 and falls back to the cron-tick retry this whole function
       // exists to avoid, so the reclaim is only worth doing if it waits.
-      await leaked.waitUntilDestroyed({ timeoutMs: RECLAIM_WAIT_MS });
+      await leaked.waitUntilDestroyed({ timeoutMs: RECLAIM_WAIT_MS, signal });
     } catch (reclaimErr) {
       console.warn(
         `sandbox reclaim: failed to reclaim id=${leaked.id} name=${sandboxName} ` +
@@ -218,7 +244,7 @@ async function createSandboxReclaiming(
       );
       throw err;
     }
-    return await c.createSandbox(request);
+    return await c.createSandbox(request, { signal });
   }
 }
 
@@ -278,10 +304,17 @@ export async function createRunnerSandbox(
   // our own VMs.
   const sandboxName = sandboxNameFor(job.jobId, runnerName, config);
 
+  // ONE signal for every attempt below, so the ladder + reclaim + post-failover
+  // retry share a single deadline instead of each getting a fresh one (see
+  // CREATE_BUDGET_MS). Aborting a create that the control plane already accepted
+  // leaks the VM under this job's stable name — the same window a lost response
+  // already opens, and sweepOrphanedSandboxes reclaims both.
+  const budget = deps.createBudget?.() ?? AbortSignal.timeout(CREATE_BUDGET_MS);
+
   const attempt = async (region: Region) => {
     const c = makeSandboxClient(config, deps, region);
     const createStart = Date.now();
-    const sandbox = await createSandboxReclaiming(c, sandboxName, job.jobId, {
+    const sandbox = await createSandboxReclaiming(c, sandboxName, job.jobId, budget, {
       shape: shapeForLabel(job.label, config),
       rootfs: config.runnerTemplate,
       disk_mib: config.runnerDiskMib,
@@ -318,6 +351,19 @@ export async function createRunnerSandbox(
       return await attempt(region);
     } catch (err) {
       if (!isFailoverEligible(err)) throw err;
+      // The shared deadline is spent: every remaining attempt would abort the
+      // instant it was issued, and the post-failover sleep would burn 1.5s of a
+      // budget that no longer exists. Hand the job back to the Coordinator now —
+      // it re-queues the row and the next cron tick retries it with a fresh
+      // budget, which is the only retry that can still succeed.
+      if (budget.aborted) {
+        console.warn(
+          `createSandbox budget spent after ${CREATE_BUDGET_MS}ms at region ` +
+            `${region.name} (attempt ${i + 1}/${ladder.length}) job=${job.jobId}: ` +
+            `${String(err)} — giving the row back to the Coordinator to retry`,
+        );
+        throw err;
+      }
       if (i < ladder.length - 1) {
         console.warn(
           `createSandbox failed in region ${region.name} job=${job.jobId}: ${String(err)} — ` +

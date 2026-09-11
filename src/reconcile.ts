@@ -472,11 +472,23 @@ async function runMultiTenantReconciler(
     // can throw — must not skip any OTHER tenant's turn, and must never escape
     // the function: steps C/D below are never GitHub-gated (AGENTS.md).
     try {
+      // A tenant approved for specific Projects can only ever admit jobs from
+      // those repos (gate 3 in admitAndDrive), so scanning the rest of what it
+      // installed the App on spends ~2 GitHub reads per repo per tick to find
+      // jobs that are then refused. Narrow the scan to the same set the gate
+      // will accept — an OPTIMIZATION ONLY: admitAndDrive below stays the sole
+      // authority on admission, and an allow-all tenant still scans org-wide.
+      // One extra DO read per restricted tenant per tick, off the hot path.
+      const allowlist = s.tenant.allowAllRepos
+        ? []
+        : ((await co.adminGetTenant(s.tenant.installationId))?.projects ?? []).map(
+            (p) => p.repoFullName,
+          );
       const { jobs, coverage } = await discoverQueuedJobs(s.gh, {
         budget: perTenantBudget,
         cursor: cursors[cursorKey] ?? null,
-        policy: "org-wide", // project gating happens in admitAndDrive, not here
-        allowlist: [],
+        policy: s.tenant.allowAllRepos ? "org-wide" : "repo-allowlist",
+        allowlist,
       });
       cursors[cursorKey] = coverage.nextCursor;
       for (const q of jobs) {

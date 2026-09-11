@@ -381,8 +381,43 @@ async function tick() {
   }
 }
 
-tick();
-setInterval(tick, 5000);
+// A self-scheduling timeout, not setInterval: tick() is async, so a fixed
+// interval starts a second poll while the first is still in flight (both then
+// render into the same board, out of order). The next poll is scheduled only
+// after the current one settles.
+//
+// Paused while the tab is hidden, and refreshed the moment it comes back. An
+// operator tab left open on a second monitor otherwise polls forever: at 5s
+// that is ~518k requests over 30 days, and each one is BOTH a Worker request
+// and a Coordinator RPC — over half the 1M included DO requests, spent drawing
+// a board nobody is looking at.
+let timer = null;
+let inFlight = false;
+
+async function poll() {
+  if (inFlight || document.hidden) return;
+  inFlight = true;
+  try {
+    await tick();
+  } finally {
+    inFlight = false;
+  }
+  // Re-check: the tab may have been hidden while the poll was in flight.
+  if (!document.hidden) timer = setTimeout(poll, 5000);
+}
+
+document.addEventListener("visibilitychange", () => {
+  clearTimeout(timer);
+  if (document.hidden) {
+    // Never leave the board looking live when it has stopped updating.
+    $("status").className = "stale";
+    $("status").textContent = "paused — tab hidden";
+  } else {
+    poll();
+  }
+});
+
+poll();
 </script>
 </body>
 </html>`;
