@@ -1,0 +1,10 @@
+Session: implement guest self-delete teardown + fold in prior coordinator-hardening WIP (one combined commit, user's choice).
+
+Self-delete: fc shipped self-signal (commit a56978b) — guest POST 127.0.0.1:1029/self/{pause,delete}, loopback-only bind = security boundary, sandbox identity host-derived from UDS (_1029 socket path). Chose self-delete only (skip pause: one-shot ephemeral runners). One-line change: curl POST /self/delete added to baked start-runner.sh before the (kept) halt no-op. Additive fast path; webhook + reaper unchanged (destroy NotFound-safe + idempotent). Reclaims host VM only, NOT the DO concurrency slot.
+
+Prerequisite (corrected): the agent is baked into the createos HOST initrd.gz (fc-spawn initrd --agent ./bin/fc-agent), plus host-side UDS service internal/hosts/service/self_signal.go — NOT in the sandbox:debian base rootfs. So self-delete availability = createos host fleet running fc >= a56978b, NOT an image property. skopeo on sandbox:debian is a dead end (ref doesn't exist).
+Non-destructive check (needs createos creds): spawn sandbox, exec 'curl -sS -o /dev/null -w %{http_code} http://127.0.0.1:1029/self/pause' -> 405 present, refused/000 absent.
+
+Still pending (missing creds this env): (1) confirm host fleet fc >= a56978b via 405 probe; (2) bun run build:template (CREATEOS_API_KEY + CREATEOS_BASE_URL) to ship the curl line; (3) live e2e.
+
+Verified: tsc --noEmit clean; vitest 55/55 pass.

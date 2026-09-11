@@ -1,0 +1,10 @@
+Session: implement guest self-delete teardown alongside prior coordinator-hardening WIP (both were uncommitted; user chose one combined commit).
+
+Self-delete: fc shipped self-signal endpoints (commit a56978b, agent.go:120 startSelfSignal) — guest POST 127.0.0.1:1029/self/{pause,delete}, loopback-only bind = security boundary, sandbox identity host-derived from UDS. Chose self-delete only (skip pause: runners are one-shot ephemeral). One-line change: added curl POST /self/delete to the baked start-runner.sh before the (kept) halt no-op fallback. Additive fast path; webhook + reaper unchanged (destroy already NotFound-safe + idempotent). self-delete reclaims host VM only, NOT the DO concurrency slot.
+
+Pending/blocked (missing creds in this env):
+- Template rebuild: bun run build:template needs CREATEOS_API_KEY + CREATEOS_BASE_URL (deletes+rebuilds live ghar-runner template). Daily bump-runner.yml cron also does it.
+- Base-image agent check: reg.nodeops.xyz 401 (keychain token expired/insufficient). Must confirm nodeops/sandbox:debian bakes agent >= a56978b or /self/delete is refused (graceful fallback, no regression).
+- Live e2e: depends on rebuild + deploy.
+
+Verified: tsc --noEmit clean; vitest 55/55 pass.
