@@ -1,0 +1,53 @@
+Origin: a peer agent produced docs/cloudflare-cost-performance-review.md (untracked, 26
+proposed optimizations). This session verified that review against the code and against
+current Cloudflare docs, then implemented the five items judged cheap and independently
+verifiable.
+
+Verification outcome (docs fetched 2026-09-10): every code claim checked out (line refs
+drifted <=5 lines); every platform number checked out verbatim — waitUntil 30s after
+response, cron/queue/alarm 15 min, DO hibernation after 10s idle, DO 1M req/$0.15M and
+400k GB-s/$12.50M, SQLite 25B reads/50M writes/5 GB-month, traces billed from 2026-10-01
+into the 20M/$0.60 logs pool, Builds 6,000 min then $0.005/min.
+
+Three corrections to that review:
+1. Its DO-duration argument is misleading. Current pricing: an object idle and ELIGIBLE
+   for hibernation is not billed for duration even before the runtime hibernates it. The
+   Coordinator has no WebSockets, no timers and no in-flight fetch, so it is always
+   eligible when idle — its duration bill is ~the sum of RPC execution time. The real
+   cost of 5s dashboard polling is DO REQUESTS (~518k/month/tab against 1M included),
+   not duration. That is why the dashboard fix ranked first here, not third.
+2. Its transactionSync item (18) is a non-issue: coordinator.ts contains zero `await`,
+   and the SQLite API documents that a series of writes with no intervening await is
+   submitted atomically.
+3. Its discovery item (12) overstates the defect: scanRepo completes a repo before its
+   batch resolves and the cursor only advances past a COMPLETED batch, so no repo is
+   ever "partially scanned but counted as covered". The real behaviour is an overshoot
+   of at most one batch, already documented and already warned via budgetBound.
+
+Under-called by that review and still OPEN (not fixed here): shapes.ts:17 and
+auth.ts:142 hand an in-flight promise created by one request to another request — the
+pattern behind "Cannot perform I/O on behalf of a different request", which would fire
+during exactly the matrix bursts this serves. Do not build a repro harness first: grep
+production Workers Logs for "different request". The lazy fix is deletion — cache only
+settled values (tokens last an hour, catalogs five minutes) and drop the in-flight
+slots.
+
+Deliberately NOT done: Queues (review item 8). Correctly diagnosed, but a large build
+guarded by "no evidence this has happened". CREATE_BUDGET_MS makes the overrun loud and
+measurable first; Queues (15-min consumer wall time) earns its keep only if measured
+happy-path provisions crowd 22s. Also skipped: launchRunner's own 60s SDK timeout (the
+measured path is sub-second — bounding it on a guess trades a known-good path for a
+false failure), and review items 6, 13-17, 19-26.
+
+Known risk in this commit: 22s is a ceiling chosen from the budget arithmetic, not a
+measured p95. If real creates exceed it, those jobs now re-queue (~5 min) instead of
+finishing at, say, 25s. The new `createSandbox budget spent after 22000ms` warn line is
+the signal; raise the constant if it fires on healthy boots.
+
+One fixture changed meaning: a restricted tenant with ZERO approved Projects now scans
+nothing (previously its whole installation). The admin API already refuses to approve
+such a tenant, so this state is fixture-only.
+
+Rollback point for this deploy: version c59dd553-6182-4de4-b41d-cad685d59d0a, published
+2026-08-28T07:41:34Z (= b3ea85e). No DO schema change, so `wrangler rollback` is safe.
+Post-deploy gate: all ten ghar-test jobs must pass.
