@@ -66,21 +66,20 @@ describe("jobIdFromSandboxName", () => {
   const noPrefix = { ...config, sandboxNamePrefix: "" } as Config;
 
   it("round-trips the name createRunnerSandbox mints (prefixed)", () => {
-    expect(jobIdFromSandboxName(sandboxNameFor(86749416515, "ignored", config), config)).toBe(
+    const runner = runnerNameFor(86749416515, "ow");
+    expect(jobIdFromSandboxName(sandboxNameFor(86749416515, runner, config), config)).toBe(
       86749416515,
     );
   });
 
-  // FORWARD COMPATIBILITY, and the only reason this release exists on its own.
-  // The next release mints `<prefix>-<jobId36>-<xx>` to stop retries colliding
-  // with the VM their timed-out predecessor leaked (60+ 409s/day). Rolling that
-  // back onto a parser that does not know the grammar would orphan every VM it
-  // leaked — a create that succeeds server-side but times out before the id is
-  // recorded is reachable ONLY by the name-based sweep. So this release owns the
-  // future grammar before anything mints it, and these literals are spelled out
-  // rather than built from sandboxNameFor precisely because sandboxNameFor does
-  // not produce them yet.
-  describe("owns the per-attempt grammar the NEXT release mints", () => {
+  // ROLLBACK COMPATIBILITY. The parser learned this grammar one release BEFORE
+  // sandboxNameFor started minting it, so that rolling this release back lands
+  // on a parser that still owns every VM this one leaked — a create that
+  // succeeds server-side but times out before the id is recorded is reachable
+  // ONLY by the name-based sweep. These literals stay spelled out rather than
+  // built from sandboxNameFor: they are the contract with the deployed
+  // PREDECESSOR, so they must not move when the minting function does.
+  describe("owns the per-attempt grammar, independent of what mints it", () => {
     it.each([
       ["gha-ci-1bmysean-k3", 103697457503],
       ["gha-ci-13uod26b-ow", 86749416515],
@@ -89,7 +88,7 @@ describe("jobIdFromSandboxName", () => {
       expect(jobIdFromSandboxName(name, config)).toBe(jobId);
     });
 
-    it("keeps owning the legacy per-job name it mints today", () => {
+    it("keeps owning the legacy per-job name minted before the change", () => {
       expect(jobIdFromSandboxName("gha-ci-86749416515", config)).toBe(86749416515);
     });
 
@@ -99,6 +98,23 @@ describe("jobIdFromSandboxName", () => {
       expect(future.length).toBeLessThanOrEqual(22);
       expect(jobIdFromSandboxName(future, config)).toBe(widest);
     });
+  });
+
+  // The 409 fix itself. createos names are unique per USER, so a per-job name
+  // made every retry collide with the VM its own timed-out predecessor leaked.
+  it("mints a DIFFERENT name per attempt, both owned by the same job", () => {
+    const first = sandboxNameFor(86749416515, runnerNameFor(86749416515, "ow"), config);
+    const second = sandboxNameFor(86749416515, runnerNameFor(86749416515, "k3"), config);
+    expect(first).not.toBe(second);
+    expect(jobIdFromSandboxName(first, config)).toBe(86749416515);
+    expect(jobIdFromSandboxName(second, config)).toBe(86749416515);
+  });
+
+  it("round-trips what it mints at the widest job id we budget for", () => {
+    const widest = 10 ** 13 - 1;
+    const minted = sandboxNameFor(widest, runnerNameFor(widest, "ow"), config);
+    expect(minted.length).toBeLessThanOrEqual(22);
+    expect(jobIdFromSandboxName(minted, config)).toBe(widest);
   });
 
   it("round-trips the name createRunnerSandbox mints (no prefix → the runner name)", () => {
@@ -150,12 +166,12 @@ describe("jobIdFromSandboxName", () => {
     });
 
     it("refuses the truncated name, and the plausible-but-wrong job id it parses as", () => {
-      const minted = sandboxNameFor(86749416515, "ignored", long);
-      expect(minted).toBe("gha-ci-nodeops-app-867"); // truncated: the digits are a lie
+      const minted = sandboxNameFor(86749416515, runnerNameFor(86749416515, "ow"), long);
+      expect(minted).toBe("gha-ci-nodeops-app-13u"); // truncated: the job id is a lie
       expect(jobIdFromSandboxName(minted, long)).toBeNull();
       // Even a name that is genuinely well-formed under this prefix is refused —
       // we cannot tell it apart from a truncated one.
-      expect(jobIdFromSandboxName("gha-ci-nodeops-app-867", long)).toBeNull();
+      expect(jobIdFromSandboxName("gha-ci-nodeops-app-13u-ow", long)).toBeNull();
     });
   });
 });
@@ -189,7 +205,7 @@ describe("createRunnerSandbox", () => {
       expect.objectContaining({
         shape: "s-4vcpu-4gb",
         rootfs: "ghar-runner",
-        name: "gha-ci-100", // cosmetic VM name stays short + suffix-free
+        name: "gha-ci-2s-k3", // per-attempt VM name: <prefix>-<jobId36>-<attempt>
         egress: ["*"], // CI needs unrestricted egress
         envs: { JIT_CONFIG: "BLOB" },
       }),
@@ -212,7 +228,7 @@ describe("createRunnerSandbox", () => {
   // the next cron tick's retry + orphan sweep into one extra round trip.
   it("reclaims a leaked VM inline on a 409 name conflict, instead of waiting for the next retry", async () => {
     const conflict = new CreateosSandboxValidationError(
-      'a sandbox named "gha-ci-100" already exists',
+      'a sandbox named "gha-ci-2s-k3" already exists',
       new Response(null, { status: 409 }),
     );
     const createSandbox = vi
@@ -226,7 +242,7 @@ describe("createRunnerSandbox", () => {
     const listSandboxes = vi
       .fn()
       .mockResolvedValue([
-        { id: "sb_leaked", name: "gha-ci-100", status: "running", destroy, waitUntilDestroyed },
+        { id: "sb_leaked", name: "gha-ci-2s-k3", status: "running", destroy, waitUntilDestroyed },
       ]);
     const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
 
@@ -254,7 +270,7 @@ describe("createRunnerSandbox", () => {
   // not have been called a second time.
   it("does not retry createSandbox until the leaked VM is actually destroyed", async () => {
     const conflict = new CreateosSandboxValidationError(
-      'a sandbox named "gha-ci-100" already exists',
+      'a sandbox named "gha-ci-2s-k3" already exists',
       new Response(null, { status: 409 }),
     );
     const createSandbox = vi
@@ -275,11 +291,15 @@ describe("createRunnerSandbox", () => {
         createSandbox,
         getSandbox: vi.fn(),
         listShapes: vi.fn(),
-        listSandboxes: vi
-          .fn()
-          .mockResolvedValue([
-            { id: "sb_leaked", name: "gha-ci-100", status: "running", destroy, waitUntilDestroyed },
-          ]),
+        listSandboxes: vi.fn().mockResolvedValue([
+          {
+            id: "sb_leaked",
+            name: "gha-ci-2s-k3",
+            status: "running",
+            destroy,
+            waitUntilDestroyed,
+          },
+        ]),
       }),
       attemptId: () => "k3",
     });
@@ -305,7 +325,7 @@ describe("createRunnerSandbox", () => {
     ["the wait for terminal fails", "wait"],
   ])("rethrows the original 409 when %s", async (_name, failing) => {
     const conflict = new CreateosSandboxValidationError(
-      'a sandbox named "gha-ci-100" already exists',
+      'a sandbox named "gha-ci-2s-k3" already exists',
       new Response(null, { status: 409 }),
     );
     const gone = new CreateosSandboxNotFoundError("gone", new Response(null, { status: 404 }));
@@ -325,7 +345,7 @@ describe("createRunnerSandbox", () => {
           listSandboxes: vi.fn().mockResolvedValue([
             {
               id: "sb_leaked",
-              name: "gha-ci-100",
+              name: "gha-ci-2s-k3",
               status: "running",
               destroy,
               waitUntilDestroyed,
@@ -344,7 +364,7 @@ describe("createRunnerSandbox", () => {
   // so the normal retry path (region failover / Coordinator requeue) handles it.
   it("rethrows the 409 when no leaked VM is found under that name", async () => {
     const conflict = new CreateosSandboxValidationError(
-      'a sandbox named "gha-ci-100" already exists',
+      'a sandbox named "gha-ci-2s-k3" already exists',
       new Response(null, { status: 409 }),
     );
     const createSandbox = vi.fn().mockRejectedValue(conflict);
@@ -427,11 +447,15 @@ describe("createRunnerSandbox", () => {
         listShapes: vi.fn(),
         listSandboxes: vi.fn().mockResolvedValue([]),
       }),
+      attemptId: () => "k3",
     });
 
     const name = createSandbox.mock.calls[0]![0].name;
     expect(name.length).toBeLessThanOrEqual(22);
-    expect(name).toBe("gha-ci-nodeops-8555623");
+    // `gha-ci-nodeops-13axz1d1-k3` (26) truncated — and what survives parses as
+    // a different, entirely plausible job id, which is why the sweep refuses to
+    // run at all under a prefix that can get here.
+    expect(name).toBe("gha-ci-nodeops-13axz1d");
   });
 
   it("derives the VM shape from the job's label", async () => {

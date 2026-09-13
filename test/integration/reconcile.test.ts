@@ -143,8 +143,10 @@ function patchGitHub(
   return { deleted };
 }
 
-/** A VM as createos lists it. Named `gha-ci-<jobId>` — see the sandbox-sweep suite. */
-const vmName = (jobId: number) => `gha-ci-${jobId}`;
+/** A VM as createos lists it. Named `gha-ci-<jobId36>-<xx>` — see the sandbox-sweep suite. */
+const vmName = (jobId: number, attempt = "aa") => `gha-ci-${jobId.toString(36)}-${attempt}`;
+/** The pre-2026-09-13 per-job form, still live on VMs minted before the change. */
+const legacyVmName = (jobId: number) => `gha-ci-${jobId}`;
 const vm = (name: string, status = "running") => ({
   id: `sb_${name}`,
   name,
@@ -533,7 +535,9 @@ describe("runReconciler — orphaned runner sweep", () => {
  * as long as it lives.
  *
  * VM names come from SANDBOX_NAME_PREFIX (`gha-ci` in wrangler.toml, which the
- * test env loads), so a VM is named `gha-ci-<jobId>` — NOT after its runner.
+ * test env loads), so a VM is named `gha-ci-<jobId36>-<xx>` — NOT after its
+ * runner. The legacy per-job form (`gha-ci-<jobId>`) is swept too, for as long
+ * as VMs minted before 2026-09-13 are still alive.
  */
 describe("runReconciler — orphaned sandbox sweep", () => {
   it("destroys a VM the DO holds no row for", async () => {
@@ -557,18 +561,20 @@ describe("runReconciler — orphaned sandbox sweep", () => {
     globalThis.fetch = realFetch;
   });
 
-  it("reclaims a leaked VM while a retry of the SAME job runs under the same name", async () => {
-    // VM names carry only a job id (`gha-ci-<jobId>`, stable across attempts to
-    // stay inside the 22-char createos cap), so a provision that 5xx'd AFTER the
-    // control plane created the VM leaves a leaked twin of the retry's VM. Keyed
-    // on job id alone both read as "live" and the leak was shielded for the whole
-    // life of the job — burning capacity during exactly the burst that made it.
+  it("reclaims a leaked VM while a retry of the SAME job runs", async () => {
+    // A provision that 5xx'd AFTER the control plane created the VM leaves a
+    // leaked twin of the retry's VM, and both names parse to the same job id.
+    // Keyed on job id alone both read as "live" and the leak was shielded for
+    // the whole life of the job — burning capacity during exactly the burst that
+    // made it. Per-attempt names make the two distinguishable to a HUMAN; the
+    // oracle still has to be per-VM, because the region ladder and the
+    // post-failover retry inside ONE attempt do share a name.
     const singleton = stub("singleton");
     await singleton.onQueued(job(9808), "sb-sweep-superseded");
     await singleton.recordSandboxCreated(9808, "sb_retry_9808", runnerName(9808), "default");
     patchGitHub();
-    const leaked = { ...vm(vmName(9808)), id: "sb_leaked_9808", destroy: vi.fn() };
-    const retry = { ...vm(vmName(9808)), id: "sb_retry_9808", destroy: vi.fn() };
+    const leaked = { ...vm(vmName(9808, "a1")), id: "sb_leaked_9808", destroy: vi.fn() };
+    const retry = { ...vm(vmName(9808, "b2")), id: "sb_retry_9808", destroy: vi.fn() };
 
     await runReconciler(env as any, depsWith([leaked, retry]));
 
@@ -577,15 +583,14 @@ describe("runReconciler — orphaned sandbox sweep", () => {
     globalThis.fetch = realFetch;
   });
 
-  it("already reclaims a VM named the way the NEXT release will name them", async () => {
-    // The rollback-safety property, end to end. This release still mints
-    // `gha-ci-<jobId>`, so the name below is spelled literally — it is what the
-    // per-attempt release produces. Once this is live, rolling that release back
-    // to here still reclaims whatever it leaked, instead of stranding it.
+  it("reclaims a VM minted under the legacy per-job name", async () => {
+    // VMs created before names became per-attempt are live until they drain. A
+    // parser that only knew the current grammar would read them as a stranger's
+    // box and leave them running forever.
     patchGitHub();
-    const future = vm("gha-ci-2ekp-a1"); // job 112201 under the per-attempt grammar
-    await runReconciler(env as any, depsWith([future]));
-    expect(future.destroy).toHaveBeenCalledOnce();
+    const legacy = vm(legacyVmName(9810));
+    await runReconciler(env as any, depsWith([legacy]));
+    expect(legacy.destroy).toHaveBeenCalledOnce();
     globalThis.fetch = realFetch;
   });
 

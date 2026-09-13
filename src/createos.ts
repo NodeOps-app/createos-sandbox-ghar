@@ -112,13 +112,13 @@ export function isFailoverEligible(err: unknown): boolean {
  * costs a provision-failure alert per attempt.
  *
  * 429 and 409 are the two 4xx worth another go. 429 says "later", literally.
- * 409 on createSandbox means "a sandbox named `gha-ci-<jobId>` already exists"
- * — sandboxNameFor is deliberately per-job, not per-attempt (see sandbox.ts),
- * so this fires when an earlier attempt's VM booted server-side but the client
- * never saw the response and leaked it under this job's name. That is a
- * resource-state conflict, not a request defect: createSandboxReclaiming
- * (sandbox.ts) destroys the leaked VM and retries inline, in the same request —
- * no ownership check needed, since only this job's own name can collide. This
+ * 409 on createSandbox means "a sandbox named `<prefix>-<jobId36>-<xx>` already
+ * exists" — sandboxNameFor is per-ATTEMPT (see sandbox.ts), so this fires only
+ * when a create inside THIS attempt booted a VM server-side and the client
+ * never saw the response. That is a resource-state conflict, not a request
+ * defect: createSandboxReclaiming (sandbox.ts) destroys the leaked VM and
+ * retries inline, in the same request — no ownership check needed, since only
+ * this attempt's own name can collide. This
  * classification is the fallback for when that reclaim itself throws (the
  * leaked VM was not found — e.g. already reclaimed by the periodic sweep): it
  * resolves on the Coordinator's own retry rather than dropping the row and

@@ -106,21 +106,28 @@ function clampSandboxName(name: string): string {
  * Coordinator has no row for, so its name is the only thing tying it back to a
  * job id.
  *
- * STILL PER-JOB, deliberately, for exactly one more deploy. The per-attempt form
- * (`<prefix>-<jobId36>-<xx>`) is what fixes the 60+/day 409 collisions, and
- * `jobIdFromSandboxName` below already owns it — but minting it must come
- * SECOND. A Worker rollback reverts code only, so if minting changed in the same
- * release that taught the parser, rolling back would leave the previous
- * release's parser unable to recognise any VM this one leaked: a create that
- * succeeds server-side but times out before the id is recorded is invisible to
- * every path except the name-based sweep, so those VMs would run until someone
- * deleted them by hand. Teaching the parser first makes this release a rollback
- * target that understands both grammars; the mint flips in the next one.
+ * UNIQUE PER ATTEMPT, and that is the whole point. createos names are unique
+ * per user, so the old per-JOB form (`gha-ci-<jobId>`) meant every retry of a
+ * job whose earlier attempt leaked a VM — which is what a create that times out
+ * server-side always does — collided with its own predecessor and came back
+ * 409. That fired 60+ times a day for months: the inline reclaim
+ * (createSandboxReclaiming) recovers some of them, but it costs a list + a
+ * destroy + a wait out of the provision's budget, and every reclaim that misses
+ * is a provision-failure alert and a retry cycle. A fresh name per attempt
+ * removes the collision instead of recovering from it — the leaked VM stops
+ * being in the retry's way and is reclaimed by the periodic sweep like any
+ * other orphan.
+ *
+ * The job id is base36 to pay for the attempt token inside the 22-char cap:
+ * decimal `gha-ci-<13 digits>-<xx>` is 23 chars and would truncate (see
+ * sandboxNamesAreSweepable for why truncation is unacceptable, not merely
+ * ugly), base36 is 19 with three to spare. The token is the SAME one the runner
+ * name carries, so a VM and the runner inside it name the same attempt.
  */
 export function sandboxNameFor(jobId: number, runnerName: string, config: Config): string {
-  return clampSandboxName(
-    config.sandboxNamePrefix ? `${config.sandboxNamePrefix}-${jobId}` : runnerName,
-  );
+  if (!config.sandboxNamePrefix) return clampSandboxName(runnerName);
+  const attemptId = runnerName.slice(-ATTEMPT_ID_LEN);
+  return clampSandboxName(`${config.sandboxNamePrefix}-${jobId.toString(36)}-${attemptId}`);
 }
 
 /**
