@@ -577,6 +577,18 @@ describe("runReconciler — orphaned sandbox sweep", () => {
     globalThis.fetch = realFetch;
   });
 
+  it("already reclaims a VM named the way the NEXT release will name them", async () => {
+    // The rollback-safety property, end to end. This release still mints
+    // `gha-ci-<jobId>`, so the name below is spelled literally — it is what the
+    // per-attempt release produces. Once this is live, rolling that release back
+    // to here still reclaims whatever it leaked, instead of stranding it.
+    patchGitHub();
+    const future = vm("gha-ci-2ekp-a1"); // job 112201 under the per-attempt grammar
+    await runReconciler(env as any, depsWith([future]));
+    expect(future.destroy).toHaveBeenCalledOnce();
+    globalThis.fetch = realFetch;
+  });
+
   it("spares a VM whose row has not recorded an id yet — the create-to-record window", async () => {
     // A row between createSandbox returning and recordSandboxCreated persisting
     // the id owns a very much alive VM it cannot name. Reading that null as

@@ -71,6 +71,36 @@ describe("jobIdFromSandboxName", () => {
     );
   });
 
+  // FORWARD COMPATIBILITY, and the only reason this release exists on its own.
+  // The next release mints `<prefix>-<jobId36>-<xx>` to stop retries colliding
+  // with the VM their timed-out predecessor leaked (60+ 409s/day). Rolling that
+  // back onto a parser that does not know the grammar would orphan every VM it
+  // leaked — a create that succeeds server-side but times out before the id is
+  // recorded is reachable ONLY by the name-based sweep. So this release owns the
+  // future grammar before anything mints it, and these literals are spelled out
+  // rather than built from sandboxNameFor precisely because sandboxNameFor does
+  // not produce them yet.
+  describe("owns the per-attempt grammar the NEXT release mints", () => {
+    it.each([
+      ["gha-ci-1bmysean-k3", 103697457503],
+      ["gha-ci-13uod26b-ow", 86749416515],
+      ["gha-ci-2s-aa", 100],
+    ])("owns %j", (name, jobId) => {
+      expect(jobIdFromSandboxName(name, config)).toBe(jobId);
+    });
+
+    it("keeps owning the legacy per-job name it mints today", () => {
+      expect(jobIdFromSandboxName("gha-ci-86749416515", config)).toBe(86749416515);
+    });
+
+    it("fits the widest job id we budget for, plus the token, inside the cap", () => {
+      const widest = 10 ** 13 - 1;
+      const future = `gha-ci-${widest.toString(36)}-k3`;
+      expect(future.length).toBeLessThanOrEqual(22);
+      expect(jobIdFromSandboxName(future, config)).toBe(widest);
+    });
+  });
+
   it("round-trips the name createRunnerSandbox mints (no prefix → the runner name)", () => {
     const runner = runnerNameFor(86749416515, "ow");
     expect(jobIdFromSandboxName(sandboxNameFor(86749416515, runner, noPrefix), noPrefix)).toBe(
@@ -84,6 +114,9 @@ describe("jobIdFromSandboxName", () => {
     ["gha-ci-", "empty job id"],
     ["gha-ci-abc", "non-numeric job id"],
     ["gha-ci-123-extra", "trailing junk after the job id"],
+    ["gha-ci-123-AB", "an attempt token that is not lowercase base36"],
+    ["gha-ci--ow", "empty job id with a well-formed token"],
+    ["gha-ci-0ab-ow", "a job id with a leading zero — does not round-trip"],
     ["x-gha-ci-123", "not anchored at the start"],
     ["friendly-heyrovsky", "an unrelated auto-named box"],
     ["", "empty"],

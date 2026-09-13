@@ -73,7 +73,9 @@ const MAX_SANDBOX_NAME = 22;
  * provision. Lengthen this prefix and you re-arm that bomb.
  */
 export const RUNNER_PREFIX = "cos-";
-const RUNNER_NAME_RE = new RegExp(`^${RUNNER_PREFIX}(\\d+)-[a-z0-9]{2}$`);
+/** Width of the base36 attempt token both the runner and the VM name carry. */
+const ATTEMPT_ID_LEN = 2;
+const RUNNER_NAME_RE = new RegExp(`^${RUNNER_PREFIX}(\\d+)-[a-z0-9]{${ATTEMPT_ID_LEN}}$`);
 
 export function runnerNameFor(jobId: number, attemptId: string): string {
   return `${RUNNER_PREFIX}${jobId}-${attemptId}`;
@@ -103,6 +105,17 @@ function clampSandboxName(name: string): string {
  * sweep, which has nothing else to go on: a leaked VM is by definition one the
  * Coordinator has no row for, so its name is the only thing tying it back to a
  * job id.
+ *
+ * STILL PER-JOB, deliberately, for exactly one more deploy. The per-attempt form
+ * (`<prefix>-<jobId36>-<xx>`) is what fixes the 60+/day 409 collisions, and
+ * `jobIdFromSandboxName` below already owns it — but minting it must come
+ * SECOND. A Worker rollback reverts code only, so if minting changed in the same
+ * release that taught the parser, rolling back would leave the previous
+ * release's parser unable to recognise any VM this one leaked: a create that
+ * succeeds server-side but times out before the id is recorded is invisible to
+ * every path except the name-based sweep, so those VMs would run until someone
+ * deleted them by hand. Teaching the parser first makes this release a rollback
+ * target that understands both grammars; the mint flips in the next one.
  */
 export function sandboxNameFor(jobId: number, runnerName: string, config: Config): string {
   return clampSandboxName(
@@ -111,10 +124,13 @@ export function sandboxNameFor(jobId: number, runnerName: string, config: Config
 }
 
 /**
- * The widest job id we assume GitHub will ever mint. It is at 11 digits today;
+ * The widest job id we assume GitHub will ever mint. It is at 12 digits today;
  * 13 is the same headroom the runner-name budget is sized against.
  */
 const MAX_JOB_ID_DIGITS = 13;
+
+/** Base36 width of the widest job id — what sandboxNameFor actually spends. */
+const MAX_JOB_ID_B36 = (10 ** MAX_JOB_ID_DIGITS - 1).toString(36).length;
 
 /**
  * Whether a VM's name can prove which job it belongs to under this config — the
@@ -134,7 +150,13 @@ export function sandboxNamesAreSweepable(config: Config): boolean {
   // No prefix → the VM name IS the runner name, whose grammar is self-describing
   // and length-budgeted already.
   if (!config.sandboxNamePrefix) return true;
-  return `${config.sandboxNamePrefix}-`.length + MAX_JOB_ID_DIGITS <= MAX_SANDBOX_NAME;
+  const prefix = `${config.sandboxNamePrefix}-`.length;
+  // BOTH grammars must be un-truncatable, not just the one we mint today: the
+  // legacy decimal form is still on live VMs until they drain, and the sweep
+  // reads those names too.
+  const current = prefix + MAX_JOB_ID_B36 + 1 + ATTEMPT_ID_LEN;
+  const legacy = prefix + MAX_JOB_ID_DIGITS;
+  return Math.max(current, legacy) <= MAX_SANDBOX_NAME;
 }
 
 /**
@@ -144,8 +166,16 @@ export function sandboxNamesAreSweepable(config: Config): boolean {
  *
  * With no prefix the VM name IS the runner name, so ownership is the runner-name
  * grammar and nothing else. With a prefix the name must be exactly
- * `<prefix>-<digits>` — a loose `/(\d+)/` search would be catastrophic here,
- * happily reading `123` out of a stranger's `staging-db-123`.
+ * `<prefix>-<base36>-<xx>` — a loose `/(\d+)/` search would be catastrophic
+ * here, happily reading `123` out of a stranger's `staging-db-123`.
+ *
+ * The legacy per-job form (`<prefix>-<decimal>`, no attempt token) is still
+ * accepted: VMs minted before sandboxNameFor grew the token are live until they
+ * drain, and a parser that stopped recognising them would strand every one of
+ * them as unreclaimable. The two grammars cannot be confused — the current one
+ * always ends in `-<xx>`, the legacy one never does. Delete the legacy branch
+ * once no VM older than the deploy is left (a `gha-ci-<digits>` with no token in
+ * `sandbox list` is the check).
  */
 export function jobIdFromSandboxName(name: string, config: Config): number | null {
   if (!config.sandboxNamePrefix) return jobIdFromRunnerName(name);
@@ -154,13 +184,23 @@ export function jobIdFromSandboxName(name: string, config: Config): number | nul
   const prefix = `${config.sandboxNamePrefix}-`;
   if (!name.startsWith(prefix)) return null;
   const rest = name.slice(prefix.length);
-  if (!/^\d+$/.test(rest)) return null;
-  const jobId = Number(rest);
-  if (!Number.isSafeInteger(jobId)) return null;
 
-  // Re-mint and compare, so a name that only *looks* like ours (leading zeros,
-  // stray padding) cannot slip through.
-  return `${prefix}${jobId}` === name ? jobId : null;
+  const current = new RegExp(`^([0-9a-z]+)-[a-z0-9]{${ATTEMPT_ID_LEN}}$`).exec(rest);
+  if (current) return safeJobId(current[1]!, 36);
+  if (/^\d+$/.test(rest)) return safeJobId(rest, 10);
+  return null;
+}
+
+/**
+ * Parse a job id out of a name segment, rejecting anything that does not
+ * round-trip back to the exact segment — a name that only *looks* like ours
+ * (leading zeros, stray padding, mixed case) must not prove ownership, because
+ * whatever this returns gets fed to a destroy call.
+ */
+function safeJobId(segment: string, radix: number): number | null {
+  const jobId = Number.parseInt(segment, radix);
+  if (!Number.isSafeInteger(jobId) || jobId < 0) return null;
+  return jobId.toString(radix) === segment ? jobId : null;
 }
 
 /**
@@ -201,11 +241,17 @@ const CREATE_BUDGET_MS = 22_000;
 /**
  * createSandbox, reclaiming a 409 "name already exists" inline instead of
  * bubbling it up to the Coordinator's retry, which is a cron tick (5 min) away
- * (see isPermanentProvisionFailure). sandboxName is `gha-ci-<jobId>` — unique
- * per job — so a 409 on it can only be THIS job's own earlier attempt: the VM
- * booted server-side but the response never reached the client. No other job
- * can mint this name, so — unlike the general orphaned-sandbox sweep — no
- * ownership check against the Coordinator is needed before destroying it.
+ * (see isPermanentProvisionFailure). sandboxName is unique per ATTEMPT, so a
+ * 409 can only be this same attempt's own earlier create — the ladder reuses
+ * one name across regions and the post-failover retry, so a create whose VM
+ * booted server-side but whose response never reached the client collides with
+ * itself. No other job or attempt can mint this name, so — unlike the general
+ * orphaned-sandbox sweep — no ownership check against the Coordinator is needed
+ * before destroying it.
+ *
+ * Since sandboxNameFor became per-attempt this is a NARROW path: a retry of the
+ * job no longer collides with the previous attempt's leak (that was the 60+/day
+ * 409 source), only a lost response inside one attempt does.
  *
  * EVERY way the reclaim can fail rethrows the ORIGINAL 409, never its own
  * error, so the outcome stays the retryable path the 409 already had: the
