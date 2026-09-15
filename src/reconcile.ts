@@ -143,6 +143,22 @@ async function sweepOrphanedSandboxes(
   // bucket: a fixed order plus an earlier region that always has candidates
   // (or whose destroys keep failing — attempts consume budget too, they cost
   // the same subrequests) would starve every later region's cleanup forever.
+  // Every VM id acted on this tick, so no VM is destroyed twice however many
+  // plane listings return it. This is the ONLY thing that makes region entries
+  // safe to overlap, and it has to key on the VM id rather than on the baseUrl:
+  // measured 2026-09-15, `api.sb`, `api-eu` and `api-us` are three DISTINCT URLs
+  // over ONE sandbox namespace — identical id sets from all three, every VM
+  // reporting `region: eu`. URL equality therefore does not tell you whether two
+  // entries are the same fleet, so deduping the listing cannot be trusted to.
+  // Without this, each orphan draws a destroy per plane, the second 404s, and
+  // the shared per-tick budget reclaims a fraction of the leaks it accounts for
+  // — worst exactly during the burst that produced them.
+  //
+  // Every plane is still LISTED, deliberately: one wasted subrequest per tick
+  // buys the property that a VM leaked in a genuinely disjoint fleet is still
+  // found, which is the state wrangler.toml says these regions are meant to
+  // reach.
+  const actedOn = new Set<string>();
   let remaining = MAX_SANDBOX_DESTROYS_PER_TICK;
   const start = listed.length === 0 ? 0 : Math.floor(Date.now() / 300_000) % listed.length;
   const ordered = [...listed.slice(start), ...listed.slice(0, start)];
@@ -157,6 +173,7 @@ async function sweepOrphanedSandboxes(
     }
 
     const orphans = sandboxes.filter((s) => {
+      if (actedOn.has(s.id)) return false; // already handled via another plane's list
       if (s.status === "destroyed" || s.status === "failed") return false;
       if (!s.name) return false;
       const jobId = jobIdFromSandboxName(s.name, config);
@@ -178,6 +195,11 @@ async function sweepOrphanedSandboxes(
           `shared across regions); the rest follow next cron`,
       );
     }
+
+    // Marked BEFORE the destroys resolve: a later plane listing the same VM must
+    // skip it whether this destroy succeeds or fails. A failure is retried next
+    // tick, not re-attempted against a different URL for the same backend row.
+    for (const s of batch) actedOn.add(s.id);
 
     const results = await Promise.allSettled(batch.map((s) => s.destroy()));
     const failed = results.filter((r) => r.status === "rejected");

@@ -8,9 +8,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { runReconciler, runReaper, MAX_SANDBOX_DESTROYS_PER_TICK } from "../../src/reconcile";
 import { resetShapeCacheForTests } from "../../src/shapes";
 import { resetCredentialSessionsForTests } from "../../src/github/auth";
+import { sandboxNameFor } from "../../src/sandbox";
 import { shapeCatalog, runnerName } from "../helpers/mocks";
 import type { Bindings } from "../../src/index";
-import type { TenantRecord } from "../../src/types";
+import type { Config, TenantRecord } from "../../src/types";
 
 // Both caches are module-level and outlive any single test. The shapes catalog:
 // without the reset, whichever suite runs first decides what every later case
@@ -143,9 +144,15 @@ function patchGitHub(
   return { deleted };
 }
 
-/** A VM as createos lists it. Named `gha-ci-<jobId36>-<xx>` — see the sandbox-sweep suite. */
-const vmName = (jobId: number, attempt = "aa") => `gha-ci-${jobId.toString(36)}-${attempt}`;
-/** The pre-2026-09-13 per-job form, still live on VMs minted before the change. */
+/**
+ * A VM as createos lists it — built by the SAME function production mints with,
+ * so the grammar lives in exactly one place and a change to it cannot pass the
+ * sweep tests by rewriting them too.
+ */
+const vmName = (jobId: number, attempt = "aa") =>
+  sandboxNameFor(jobId, runnerName(jobId, attempt), { sandboxNamePrefix: "gha-ci" } as Config);
+/** The pre-2026-09-13 per-job form. A frozen literal on purpose: nothing mints
+ *  it any more, so it cannot be derived from production code. */
 const legacyVmName = (jobId: number) => `gha-ci-${jobId}`;
 const vm = (name: string, status = "running") => ({
   id: `sb_${name}`,
@@ -665,6 +672,28 @@ describe("runReconciler — orphaned sandbox sweep", () => {
     };
     await runReconciler(env as any, deps);
     expect(booting.destroy).not.toHaveBeenCalled();
+    globalThis.fetch = realFetch;
+  });
+
+  it("destroys an orphan once when two region entries serve one namespace", async () => {
+    // The deployed shape, measured 2026-09-15: api-eu and api-us are DIFFERENT
+    // URLs over the SAME sandbox namespace — identical id sets from both, so
+    // both planes list the same VM and each would draw its own destroy. URL
+    // equality cannot detect that, which is why ownership is keyed on the VM id.
+    // Covers the drained case (two names, one URL) for free: that is strictly
+    // easier than this one.
+    const sharedEnv = {
+      ...env,
+      CREATEOS_REGIONS: "default=https://api-eu.local,eu=https://api-us.local",
+    };
+    const orphan = vm(vmName(9831));
+    patchGitHub();
+
+    // depsWith gives every plane the same client, so both list the same object —
+    // which is exactly what the live API does here.
+    await runReconciler(sharedEnv as any, depsWith([orphan]));
+
+    expect(orphan.destroy).toHaveBeenCalledOnce(); // not once per plane
     globalThis.fetch = realFetch;
   });
 
