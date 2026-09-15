@@ -76,6 +76,12 @@ export const RUNNER_PREFIX = "cos-";
 /** Width of the base36 attempt token both the runner and the VM name carry. */
 const ATTEMPT_ID_LEN = 2;
 const RUNNER_NAME_RE = new RegExp(`^${RUNNER_PREFIX}(\\d+)-[a-z0-9]{${ATTEMPT_ID_LEN}}$`);
+/**
+ * A VM name with its prefix stripped, in either grammar: `<base36>-<xx>` today,
+ * bare `<decimal>` on VMs minted before the token existed. Module-level for the
+ * same reason as RUNNER_NAME_RE — the sweep runs this once per listed VM.
+ */
+const SANDBOX_NAME_RE = new RegExp(`^([0-9a-z]+)(?:-([a-z0-9]{${ATTEMPT_ID_LEN}}))?$`);
 
 export function runnerNameFor(jobId: number, attemptId: string): string {
   return `${RUNNER_PREFIX}${jobId}-${attemptId}`;
@@ -84,9 +90,22 @@ export function runnerNameFor(jobId: number, attemptId: string): string {
 /** The job id a runner name was minted for, or null if we did not mint it. */
 export function jobIdFromRunnerName(name: string): number | null {
   const m = RUNNER_NAME_RE.exec(name);
-  if (!m) return null;
-  const jobId = Number(m[1]);
-  return Number.isSafeInteger(jobId) ? jobId : null;
+  return m ? safeJobId(m[1]!, 10) : null;
+}
+
+/**
+ * Parse a job id out of a name segment, rejecting anything that does not
+ * round-trip back to the exact segment — a name that only *looks* like ours
+ * (leading zeros, stray padding, mixed case) must not prove ownership, because
+ * what this returns is fed to a destroy or a runner DELETE.
+ *
+ * Shared by both name grammars deliberately: a second hand-rolled parse is how
+ * the two drift, and the weaker one wins the argument by accident.
+ */
+function safeJobId(segment: string, radix: number): number | null {
+  const jobId = Number.parseInt(segment, radix);
+  if (!Number.isSafeInteger(jobId) || jobId < 0) return null;
+  return jobId.toString(radix) === segment ? jobId : null;
 }
 
 /** Clamp the cosmetic VM name to the createos cap; warn when it actually binds. */
@@ -136,9 +155,6 @@ export function sandboxNameFor(jobId: number, runnerName: string, config: Config
  */
 const MAX_JOB_ID_DIGITS = 13;
 
-/** Base36 width of the widest job id — what sandboxNameFor actually spends. */
-const MAX_JOB_ID_B36 = (10 ** MAX_JOB_ID_DIGITS - 1).toString(36).length;
-
 /**
  * Whether a VM's name can prove which job it belongs to under this config — the
  * precondition for the orphaned-sandbox sweep being safe to run at all.
@@ -157,13 +173,13 @@ export function sandboxNamesAreSweepable(config: Config): boolean {
   // No prefix → the VM name IS the runner name, whose grammar is self-describing
   // and length-budgeted already.
   if (!config.sandboxNamePrefix) return true;
-  const prefix = `${config.sandboxNamePrefix}-`.length;
-  // BOTH grammars must be un-truncatable, not just the one we mint today: the
-  // legacy decimal form is still on live VMs until they drain, and the sweep
-  // reads those names too.
-  const current = prefix + MAX_JOB_ID_B36 + 1 + ATTEMPT_ID_LEN;
-  const legacy = prefix + MAX_JOB_ID_DIGITS;
-  return Math.max(current, legacy) <= MAX_SANDBOX_NAME;
+  // Budgeted against the LEGACY decimal form, which is the wider of the two
+  // grammars the sweep reads and therefore the binding one: a 13-digit job id is
+  // 13 chars decimal but only 9 in base36, so what we mint today
+  // (`<prefix>-<9>-<2>`) is a char narrower than what we still parse. When the
+  // legacy branch in jobIdFromSandboxName goes, this can drop to the base36
+  // width + 1 + ATTEMPT_ID_LEN and gets slightly more permissive.
+  return `${config.sandboxNamePrefix}-`.length + MAX_JOB_ID_DIGITS <= MAX_SANDBOX_NAME;
 }
 
 /**
@@ -179,10 +195,14 @@ export function sandboxNamesAreSweepable(config: Config): boolean {
  * The legacy per-job form (`<prefix>-<decimal>`, no attempt token) is still
  * accepted: VMs minted before sandboxNameFor grew the token are live until they
  * drain, and a parser that stopped recognising them would strand every one of
- * them as unreclaimable. The two grammars cannot be confused — the current one
- * always ends in `-<xx>`, the legacy one never does. Delete the legacy branch
- * once no VM older than the deploy is left (a `gha-ci-<digits>` with no token in
- * `sandbox list` is the check).
+ * them as unreclaimable. Both grammars fall out of ONE regex whose token group
+ * is optional — its presence picks the radix, and `[0-9a-z]+` cannot span the
+ * hyphen, so a legacy name can never be read as a base36 one.
+ *
+ * The legacy branch is deletable once no VM predates the 2026-09-13 deploy. It
+ * warns when it fires rather than leaving that to a human's memory: a VM cannot
+ * outlive its job, so once this line stops appearing in the logs the branch is
+ * dead and can go (along with the MAX_JOB_ID_DIGITS budget above).
  */
 export function jobIdFromSandboxName(name: string, config: Config): number | null {
   if (!config.sandboxNamePrefix) return jobIdFromRunnerName(name);
@@ -190,24 +210,11 @@ export function jobIdFromSandboxName(name: string, config: Config): number | nul
 
   const prefix = `${config.sandboxNamePrefix}-`;
   if (!name.startsWith(prefix)) return null;
-  const rest = name.slice(prefix.length);
 
-  const current = new RegExp(`^([0-9a-z]+)-[a-z0-9]{${ATTEMPT_ID_LEN}}$`).exec(rest);
-  if (current) return safeJobId(current[1]!, 36);
-  if (/^\d+$/.test(rest)) return safeJobId(rest, 10);
-  return null;
-}
-
-/**
- * Parse a job id out of a name segment, rejecting anything that does not
- * round-trip back to the exact segment — a name that only *looks* like ours
- * (leading zeros, stray padding, mixed case) must not prove ownership, because
- * whatever this returns gets fed to a destroy call.
- */
-function safeJobId(segment: string, radix: number): number | null {
-  const jobId = Number.parseInt(segment, radix);
-  if (!Number.isSafeInteger(jobId) || jobId < 0) return null;
-  return jobId.toString(radix) === segment ? jobId : null;
+  const m = SANDBOX_NAME_RE.exec(name.slice(prefix.length));
+  if (!m) return null;
+  if (!m[2]) console.warn(`sandbox name "${name}" uses the legacy per-job grammar`);
+  return safeJobId(m[1]!, m[2] ? 36 : 10);
 }
 
 /**
@@ -350,11 +357,10 @@ export async function createRunnerSandbox(
   const jitConfig = await github.generateJitConfig(runnerName, job.label);
   const mintMs = Date.now() - mintStart;
 
-  // Short + stable per job (`gha-ci-<jobId>`, no per-attempt suffix): collisions
-  // are harmless, and dropping the runner's `cos-`/attempt token keeps it under
-  // the createos name cap for dashboard use. Minted through the same function
-  // the orphan sweep parses with — drift here and the sweep stops recognising
-  // our own VMs.
+  // Unique per attempt (`gha-ci-<jobId36>-<xx>`), which is what stops a retry
+  // colliding with the VM its timed-out predecessor leaked. Minted through the
+  // same function the orphan sweep parses with — drift here and the sweep stops
+  // recognising our own VMs.
   const sandboxName = sandboxNameFor(job.jobId, runnerName, config);
 
   // ONE signal for every attempt below, so the ladder + reclaim + post-failover
