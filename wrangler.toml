@@ -25,12 +25,29 @@ binding = "CF_VERSION_METADATA"
 
 [vars]
 GITHUB_ORG = "NodeOps-app"
-CREATEOS_BASE_URL = "https://api.sb.createos.sh"
-# Multi-region failover (primary first): api.sb stays primary, EU absorbs
-# 5xx/connection/timeout waves. The primary is named "default" so rows written
-# before this var existed (legacy CREATEOS_BASE_URL fallback name) keep
-# resolving at teardown. Keep names stable — job rows persist them (AGENTS.md).
-CREATEOS_REGIONS = "default=https://api.sb.createos.sh,eu=https://api-eu.sb.createos.sh"
+# Legacy single-region fallback, read ONLY when CREATEOS_REGIONS is blank. Kept
+# rather than deleted because a documented rollback step clears CREATEOS_REGIONS
+# to let non-primary rows drain (AGENTS.md) — with this var gone, `req()` throws
+# and that step becomes a total provisioning outage instead of a fallback. Point
+# it at a plane that is actually in rotation.
+CREATEOS_BASE_URL = "https://api-eu.sb.createos.sh"
+# `default` -> EU, `eu` -> US. api.sb is out of the rotation: it measured 42-57s
+# per create against api-eu's 29-35s in the same window (2026-09-13).
+#
+# The NAMES are misleading on purpose, and must not be "fixed". Job rows persist
+# the region NAME and teardown resolves it (regionByName), which THROWS on an
+# unknown name and parks the row in `destroying` forever — so renaming `eu` to
+# `us` would strand every row already carrying `eu`. Repointing the URL behind a
+# stable name is the only safe move; rename only once no live row names it.
+#
+# Repointing is safe here for a reason worth knowing: measured 2026-09-15,
+# api.sb, api-eu and api-us are three URLs over ONE sandbox namespace —
+# identical id sets from all three, and every VM reports `region: eu` whichever
+# one created it. So a teardown that dials the "wrong" URL still finds its VM,
+# and what these entries really buy is edge path, not fleet isolation. Treat the
+# failover ladder as best-effort until the planes are genuinely disjoint, and do
+# NOT lean on cross-region isolation for capacity.
+CREATEOS_REGIONS = "default=https://api-eu.sb.createos.sh,eu=https://api-us.sb.createos.sh"
 RUNNER_LABEL = "createos"
 RUNNER_TEMPLATE = "ghar-runner"
 SANDBOX_NAME_PREFIX = "gha-ci"

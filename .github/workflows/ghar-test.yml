@@ -319,7 +319,7 @@ jobs:
         id: probe
         env:
           CREATEOS_API_KEY: ${{ secrets.CREATEOS_API_KEY }}
-          BASE: https://api.sb.createos.sh
+          BASE: https://api-eu.sb.createos.sh
         run: |
           set -uo pipefail
           api() { curl -s -m 45 -H "X-Api-Key: $CREATEOS_API_KEY" "$@"; }
