@@ -873,3 +873,57 @@ describe("createRunnerSandbox region failover", () => {
     expect(res.region).toBe("default");
   });
 });
+
+describe("createRunnerSandbox with a tenant Dagger engine", () => {
+  const twoRegions = {
+    ...config,
+    createosRegions: [
+      { name: "us", baseUrl: "https://us" },
+      { name: "eu", baseUrl: "https://eu" },
+    ],
+  } as Config;
+  const tenant = {
+    installationId: 7,
+    orgLogin: "acme",
+    runnerGroupId: 9,
+    allowAllRepos: false,
+    dagger: { region: "eu", networkId: "net-abc", engine: "tcp://10.0.0.5:1234" },
+  };
+
+  it("joins the engine's network, exports DAGGER_ENGINE, and boots only in the engine's region", async () => {
+    // jobId 100 % 2 = 0 → the ladder would start at "us"; the engine pins "eu".
+    const us = { createSandbox: vi.fn() };
+    const eu = { createSandbox: vi.fn().mockResolvedValue({ id: "sb_eu", runCommand: vi.fn() }) };
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+
+    const res = await createRunnerSandbox(
+      twoRegions,
+      github,
+      { ...job, tenant },
+      regionRoutedClients({ us, eu }),
+    );
+
+    expect(us.createSandbox).not.toHaveBeenCalled();
+    expect(res.region).toBe("eu");
+    expect(eu.createSandbox.mock.calls[0]![0]).toMatchObject({
+      networks: [{ id: "net-abc" }],
+      envs: { JIT_CONFIG: "BLOB", DAGGER_ENGINE: "tcp://10.0.0.5:1234" },
+    });
+  });
+
+  it("leaves a tenant without an engine on no network and the normal env", async () => {
+    const us = { createSandbox: vi.fn().mockResolvedValue({ id: "sb_us", runCommand: vi.fn() }) };
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+
+    await createRunnerSandbox(
+      twoRegions,
+      github,
+      { ...job, tenant: { ...tenant, dagger: null } },
+      regionRoutedClients({ us, eu: { createSandbox: vi.fn() } }),
+    );
+
+    const body = us.createSandbox.mock.calls[0]![0];
+    expect(body).not.toHaveProperty("networks");
+    expect(body.envs).toEqual({ JIT_CONFIG: "BLOB" });
+  });
+});

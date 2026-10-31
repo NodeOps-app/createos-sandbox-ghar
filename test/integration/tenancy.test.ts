@@ -20,6 +20,7 @@ const approved = (id: number, over: Partial<TenantRecord> = {}): TenantRecord =>
   notes: null,
   approvedAt: 1,
   approvedBy: "op",
+  dagger: null,
   ...over,
 });
 const job = (id: number, tenant: number) => ({

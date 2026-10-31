@@ -192,6 +192,20 @@ const ProjectDeleteBody = z.object({
 
 const BackfillBody = z.object({ installation_id: SafeId });
 
+// Operator-entered values that land in every runner's env and createSandbox
+// body, so shapes are pinned: an overlay IP (never a hostname a tenant could
+// point elsewhere) and a CreateOS network id. null removes the engine.
+const DaggerBody = z.object({
+  installation_id: SafeId,
+  dagger: z
+    .object({
+      region: z.string().min(1),
+      network_id: z.string().regex(/^net-[0-9a-z]+$/),
+      engine: z.string().regex(/^tcp:\/\/(\d{1,3}\.){3}\d{1,3}:\d{1,5}$/),
+    })
+    .nullable(),
+});
+
 function htmlResponse(body: string, status = 200): Response {
   return new Response(body, {
     status,
@@ -422,6 +436,7 @@ export async function handleAdmin(
         notes: b.notes,
         approvedAt,
         approvedBy,
+        dagger: existing?.tenant.dagger ?? null,
       };
       await co.adminUpsertTenant(record);
       return json(record, 201);
@@ -438,6 +453,25 @@ export async function handleAdmin(
       }
       await co.adminSetTenantStatus(b.installation_id, b.status);
       return json({ ok: true });
+    }
+
+    if (route === "POST /admin/tenants/dagger") {
+      const b = DaggerBody.parse(await req.json());
+      // An unknown region would pin every runner of this tenant to a control
+      // plane the Worker cannot dial — every provision would fail.
+      if (b.dagger && !config.createosRegions.some((r) => r.name === b.dagger!.region)) {
+        return json({ error: `unknown region: ${b.dagger.region}` }, 400);
+      }
+      if (!(await co.adminGetTenant(b.installation_id))) {
+        return json({ error: "tenant not found", installation_id: b.installation_id }, 404);
+      }
+      const dagger = b.dagger && {
+        region: b.dagger.region,
+        networkId: b.dagger.network_id,
+        engine: b.dagger.engine,
+      };
+      await co.adminSetTenantDagger(b.installation_id, dagger);
+      return json({ ok: true, dagger });
     }
 
     if (route === "POST /admin/projects") {

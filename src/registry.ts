@@ -1,4 +1,4 @@
-import type { ProjectRecord, TenantRecord, TenantStatus } from "./types";
+import type { DaggerEngine, ProjectRecord, TenantRecord, TenantStatus } from "./types";
 
 /**
  * Tenant/Project persistence over the Coordinator's SQLite. Plain functions on
@@ -21,6 +21,9 @@ type TenantRow = {
   notes: string | null;
   approved_at: number | null;
   approved_by: string | null;
+  dagger_region: string | null;
+  dagger_network_id: string | null;
+  dagger_engine: string | null;
 };
 
 function toRecord(r: TenantRow): TenantRecord {
@@ -38,6 +41,10 @@ function toRecord(r: TenantRow): TenantRecord {
     notes: r.notes,
     approvedAt: r.approved_at,
     approvedBy: r.approved_by,
+    dagger:
+      r.dagger_region && r.dagger_network_id && r.dagger_engine
+        ? { region: r.dagger_region, networkId: r.dagger_network_id, engine: r.dagger_engine }
+        : null,
   };
 }
 
@@ -91,6 +98,23 @@ export function getTenant(sql: SqlStorage, installationId: number): TenantRecord
 export function listTenants(sql: SqlStorage): TenantRecord[] {
   const rows = sql.exec(`SELECT * FROM tenants ORDER BY installation_id`).toArray() as TenantRow[];
   return rows.map(toRecord);
+}
+
+// Separate from upsertTenant (whose ON CONFLICT never names these columns) so the
+// full-record upsert neither requires nor clobbers a tenant's engine.
+export function setTenantDagger(
+  sql: SqlStorage,
+  installationId: number,
+  d: DaggerEngine | null,
+): void {
+  sql.exec(
+    `UPDATE tenants SET dagger_region = ?, dagger_network_id = ?, dagger_engine = ?
+      WHERE installation_id = ?`,
+    d?.region ?? null,
+    d?.networkId ?? null,
+    d?.engine ?? null,
+    installationId,
+  );
 }
 
 export function setTenantStatus(

@@ -996,3 +996,37 @@ describe("GET /admin/stale-jobs", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("POST /admin/tenants/dagger", () => {
+  const daggerReq = (dagger: unknown, installation_id = 540) =>
+    req("POST", "/admin/tenants/dagger", { installation_id, dagger });
+  const good = { region: "default", network_id: "net-01abc", engine: "tcp://10.0.17.112:1234" };
+
+  it("sets and clears a tenant's engine", async () => {
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 540 })), B);
+    expect((await handleAdmin(daggerReq(good), B)).status).toBe(200);
+    const get = async () =>
+      ((await (await handleAdmin(req("GET", "/admin/tenants"), B)).json()) as TenantRecord[]).find(
+        (t) => t.installationId === 540,
+      )!.dagger;
+    expect(await get()).toEqual({
+      region: "default",
+      networkId: "net-01abc",
+      engine: "tcp://10.0.17.112:1234",
+    });
+    expect((await handleAdmin(daggerReq(null), B)).status).toBe(200);
+    expect(await get()).toBeNull();
+  });
+
+  it("400s a hostname engine, a bad network id, or an unknown region; 404s an unknown tenant", async () => {
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 541 })), B);
+    for (const bad of [
+      { ...good, engine: "tcp://evil.example.com:1234" },
+      { ...good, network_id: "net_x; rm" },
+      { ...good, region: "mars" },
+    ]) {
+      expect((await handleAdmin(daggerReq(bad, 541), B)).status).toBe(400);
+    }
+    expect((await handleAdmin(daggerReq(good, 999_999), B)).status).toBe(404);
+  });
+});

@@ -21,6 +21,7 @@ const tenant = (over: Partial<TenantRecord> = {}): TenantRecord => ({
   notes: null,
   approvedAt: null,
   approvedBy: null,
+  dagger: null,
   ...over,
 });
 
@@ -198,5 +199,22 @@ describe("tenant registry", () => {
       const rows = state.storage.sql.exec(`SELECT tenant_id FROM jobs WHERE job_id = 1`).toArray();
       expect(rows).toEqual([{ tenant_id: null }]); // untouched, not claimed by 404
     });
+  });
+});
+
+describe("tenant dagger engine", () => {
+  it("is set and cleared on its own, and a full upsert never clobbers it", async () => {
+    const s = stub("reg-dagger-" + Math.random());
+    const t = tenant();
+    await s.adminUpsertTenant(t);
+    expect((await s.adminGetTenant(77))!.tenant.dagger).toBeNull();
+
+    const d = { region: "default", networkId: "net-abc", engine: "tcp://10.0.0.5:1234" };
+    await s.adminSetTenantDagger(77, d);
+    await s.adminUpsertTenant({ ...t, minuteGrant: 9000 });
+    expect((await s.adminGetTenant(77))!.tenant.dagger).toEqual(d);
+
+    await s.adminSetTenantDagger(77, null);
+    expect((await s.adminGetTenant(77))!.tenant.dagger).toBeNull();
   });
 });

@@ -369,6 +369,7 @@ export async function createRunnerSandbox(
   // leaks the VM under this job's stable name — the same window a lost response
   // already opens, and sweepOrphanedSandboxes reclaims both.
   const budget = deps.createBudget?.() ?? AbortSignal.timeout(CREATE_BUDGET_MS);
+  const dagger = job.tenant?.dagger ?? null;
 
   const attempt = async (region: Region) => {
     const c = makeSandboxClient(config, deps, region);
@@ -384,7 +385,12 @@ export async function createRunnerSandbox(
       // Do NOT set auto_pause_after_seconds: a paused runner goes offline to
       // GitHub (missed dispatch, 1-day deregistration). Omitting it disables
       // idle auto-pause; these VMs self-delete per job anyway.
-      envs: { JIT_CONFIG: jitConfig },
+      envs: dagger
+        ? { JIT_CONFIG: jitConfig, DAGGER_ENGINE: dagger.engine }
+        : { JIT_CONFIG: jitConfig },
+      // Only this tenant's runners join its engine's network — the engine has
+      // no auth, so network membership IS the access control.
+      ...(dagger ? { networks: [{ id: dagger.networkId }] } : {}),
     });
     return {
       sandboxId: sandbox.id,
@@ -404,7 +410,9 @@ export async function createRunnerSandbox(
   // an attempt throws AFTER the VM booted server-side (response lost), that VM
   // leaks under a stable per-job name the orphaned-sandbox sweep reclaims — same
   // as the pre-failover leak path.
-  const ladder = regionLadder(config, job.jobId);
+  // A network exists in one region only: a runner booted elsewhere could not
+  // join it (a 4xx, so no failover anyway). Pin to the engine's region.
+  const ladder = dagger ? [regionByName(config, dagger.region)] : regionLadder(config, job.jobId);
   for (const [i, region] of ladder.entries()) {
     try {
       return await attempt(region);

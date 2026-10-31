@@ -769,6 +769,7 @@ describe("runReconciler — multi-tenant mode", () => {
     notes: null,
     approvedAt: 1,
     approvedBy: "op",
+    dagger: null,
     ...over,
   });
 

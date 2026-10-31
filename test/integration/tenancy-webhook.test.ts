@@ -33,6 +33,7 @@ const approvedTenant = (id: number, over: Partial<TenantRecord> = {}): TenantRec
   notes: null,
   approvedAt: 1,
   approvedBy: "op",
+  dagger: null,
   ...over,
 });
 

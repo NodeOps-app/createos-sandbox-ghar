@@ -77,6 +77,21 @@ export interface TenantRecord {
   notes: string | null;
   approvedAt: number | null;
   approvedBy: string | null;
+  /** NULL = no Dagger engine; set only via POST /admin/tenants/dagger, never the upsert. */
+  dagger: DaggerEngine | null;
+}
+
+/**
+ * A Tenant's own Dagger engine: a long-lived sandbox on a private network that
+ * only this Tenant's runners join. Per-Tenant because the engine has no auth —
+ * anything that can reach the port can run containers on it and read its cache.
+ */
+export interface DaggerEngine {
+  /** Region whose control plane owns the network; runners boot only there. */
+  region: string;
+  networkId: string;
+  /** Exported to every runner as DAGGER_ENGINE, e.g. "tcp://10.0.17.112:1234". */
+  engine: string;
 }
 
 export interface ProjectRecord {
@@ -92,6 +107,7 @@ export interface PendingTenant {
   orgLogin: string;
   runnerGroupId: number | null;
   allowAllRepos: boolean;
+  dagger: DaggerEngine | null;
 }
 
 /** DO → Worker: one-read tenant admission (gates 1, 2, and the quota balance). */

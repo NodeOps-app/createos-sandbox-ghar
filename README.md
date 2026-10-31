@@ -365,6 +365,33 @@ curl -X POST https://<worker>.workers.dev/admin/backfill \
   -d '{"installation_id": 12345678}'
 ```
 
+## Dagger engines (per tenant)
+
+A tenant can get its own long-lived [Dagger](https://docs.dagger.io/self-hosting) engine. Every runner of that tenant then joins the engine's private network and gets `DAGGER_ENGINE` set, so `dagger check` in a workflow runs on the shared engine and reuses its cache — no workflow change beyond installing the matching `dagger` CLI.
+
+```
+ghar runner (ephemeral) ──private network──▶ engine sandbox (long-lived, cache kept)
+DAGGER_ENGINE=tcp://10.x.x.x:1234            dagger-<org>, joined only by this tenant
+```
+
+Measured live: a 30s step took 34s on the first fresh runner and 0.6s on the next fresh runner.
+
+```bash
+# 1. Create the network + engine sandbox; prints the exact admin call for step 2
+CREATEOS_API_KEY=… CREATEOS_REGIONS=… bun scripts/dagger-engine.ts <installation_id> <org> <region> [shape] [disk_mib]
+
+# 2. Point the tenant's runners at it (dagger: null removes it)
+curl -X POST https://<worker>.workers.dev/admin/tenants/dagger \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "content-type: application/json" \
+  -d '{"installation_id": 12345678, "dagger": {"region": "default", "network_id": "net-…", "engine": "tcp://10.0.17.112:1234"}}'
+```
+
+- **One engine per tenant, never shared.** The engine has no authentication; anything that can reach its port can run containers on it and read its cache. Network membership is the only access control.
+- Runners of a tenant with an engine boot **only in the engine's region** (a network lives in one region), so they lose cross-region failover.
+- The tenant's workflows must use the dagger CLI version the script pins (`DAGGER_VERSION`).
+- Fork-PR jobs of that tenant reach the engine too and could poison its cache — suggest `fork-gated` or a scoped runner group to such tenants.
+- The guest has no init: an engine sandbox that reboots comes back without its engine. Recreate it (step 1 + 2).
+
 ## Onboarding a community tenant
 
 `TENANCY_MODE=multi`, one public App (`createos-runners`), install-gated admission

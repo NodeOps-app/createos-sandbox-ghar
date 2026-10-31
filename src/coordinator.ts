@@ -11,6 +11,7 @@ import type {
   ProjectRecord,
   TenantRecord,
   TenantStatus,
+  DaggerEngine,
   TenantAdmission,
   TenantCtx,
   StaleJob,
@@ -24,6 +25,7 @@ import {
   listTenants,
   removeProject,
   setTenantStatus,
+  setTenantDagger,
   upsertTenant,
 } from "./registry";
 import { monthKey, weightForLabel } from "./quota";
@@ -217,6 +219,13 @@ export class Coordinator extends DurableObject<Env> {
     if (!has("attempts")) {
       this.#sql.exec(`ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`);
     }
+    // NULL dagger_* = no engine, which is every tenant before this column existed.
+    const tcols = this.#sql.exec(`PRAGMA table_info(tenants)`).toArray() as { name: string }[];
+    for (const c of ["dagger_region", "dagger_network_id", "dagger_engine"]) {
+      if (!tcols.some((col) => col.name === c)) {
+        this.#sql.exec(`ALTER TABLE tenants ADD COLUMN ${c} TEXT`);
+      }
+    }
   }
 
   /**
@@ -272,6 +281,7 @@ export class Coordinator extends DurableObject<Env> {
             orgLogin: t.orgLogin,
             runnerGroupId: t.runnerGroupId,
             allowAllRepos: t.allowAllRepos,
+            dagger: t.dagger,
           }
         : null,
     };
@@ -1015,6 +1025,7 @@ export class Coordinator extends DurableObject<Env> {
         orgLogin: t.orgLogin,
         runnerGroupId: t.runnerGroupId,
         allowAllRepos: t.allowAllRepos,
+        dagger: t.dagger,
       },
       concurrencyCap: t.concurrencyCap,
       maxShape: t.maxShape,
@@ -1076,6 +1087,10 @@ export class Coordinator extends DurableObject<Env> {
 
   adminSetTenantStatus(installationId: number, status: TenantStatus): void {
     setTenantStatus(this.#sql, installationId, status);
+  }
+
+  adminSetTenantDagger(installationId: number, dagger: DaggerEngine | null): void {
+    setTenantDagger(this.#sql, installationId, dagger);
   }
 
   adminAddProjects(
