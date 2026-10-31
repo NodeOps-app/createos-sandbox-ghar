@@ -2,6 +2,7 @@ import {
   CreateosSandboxApiError,
   CreateosSandboxClient,
   CreateosSandboxConnectionError,
+  CreateosSandboxNotFoundError,
   CreateosSandboxRateLimitError,
   CreateosSandboxServerError,
   CreateosSandboxTimeoutError,
@@ -165,6 +166,32 @@ export function regionByName(config: Config, name: string | null | undefined): R
     );
   }
   return region;
+}
+
+/**
+ * The overlay IPs of an existing network's members, or null when the control
+ * plane has no such network. createSandbox silently boots a VM on NO network
+ * for an unknown id (measured live), so nothing at provision time can notice a
+ * typo or a deleted network — the admin route has to check at assignment.
+ */
+export async function networkMemberIps(
+  config: Config,
+  region: Region,
+  networkId: string,
+  fetchImpl?: typeof fetch,
+): Promise<string[] | null> {
+  const client = new CreateosSandboxClient({
+    baseUrl: region.baseUrl,
+    apiKey: config.createosApiKey,
+    fetch: (fetchImpl ?? globalThis.fetch).bind(globalThis),
+  });
+  try {
+    const net = await client.networks.get(networkId);
+    return (net.members ?? []).flatMap((m) => (m.ip ? [m.ip] : []));
+  } catch (err) {
+    if (err instanceof CreateosSandboxNotFoundError) return null;
+    throw err;
+  }
 }
 
 /**

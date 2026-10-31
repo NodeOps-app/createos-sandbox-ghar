@@ -998,13 +998,32 @@ describe("GET /admin/stale-jobs", () => {
 });
 
 describe("POST /admin/tenants/dagger", () => {
+  const good = { region: "default", network_id: "net-01abc", engine: "tcp://10.0.17.112:1234" };
+  // The control plane as the Worker sees it: JSend over the SDK. `members` is
+  // what GET /v1/networks/:id reports; null = no such network (404).
+  const network = (members: { ip?: string }[] | null) =>
+    mockFetch({
+      "GET /v1/networks/": () =>
+        members
+          ? new Response(
+              JSON.stringify({
+                status: "success",
+                data: { id: "net-x", name: "n", created_at: "2026-01-01T00:00:00Z", members },
+              }),
+              { headers: { "content-type": "application/json" } },
+            )
+          : new Response(JSON.stringify({ status: "error", message: "not found", code: 404 }), {
+              status: 404,
+              headers: { "content-type": "application/json" },
+            }),
+    });
+  const withEngine = network([{ ip: "10.0.17.112" }]);
   const daggerReq = (dagger: unknown, installation_id = 540) =>
     req("POST", "/admin/tenants/dagger", { installation_id, dagger });
-  const good = { region: "default", network_id: "net-01abc", engine: "tcp://10.0.17.112:1234" };
 
   it("sets and clears a tenant's engine", async () => {
     await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 540 })), B);
-    expect((await handleAdmin(daggerReq(good), B)).status).toBe(200);
+    expect((await handleAdmin(daggerReq(good), B, withEngine)).status).toBe(200);
     const get = async () =>
       ((await (await handleAdmin(req("GET", "/admin/tenants"), B)).json()) as TenantRecord[]).find(
         (t) => t.installationId === 540,
@@ -1014,11 +1033,12 @@ describe("POST /admin/tenants/dagger", () => {
       networkId: "net-01abc",
       engine: "tcp://10.0.17.112:1234",
     });
-    expect((await handleAdmin(daggerReq(null), B)).status).toBe(200);
+    // Clearing never calls the control plane.
+    expect((await handleAdmin(daggerReq(null), B, network(null))).status).toBe(200);
     expect(await get()).toBeNull();
   });
 
-  it("400s a hostname engine, a bad network id, or an unknown region; 404s an unknown tenant", async () => {
+  it("400s a malformed engine, bad network id or unknown region; 404s an unknown tenant", async () => {
     await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 541 })), B);
     for (const bad of [
       { ...good, engine: "tcp://evil.example.com:1234" },
@@ -1028,9 +1048,45 @@ describe("POST /admin/tenants/dagger", () => {
       { ...good, engine: "tcp://10.0.0.1:99999" },
       { ...good, engine: "tcp://10.0.0.1:0" },
     ]) {
-      expect((await handleAdmin(daggerReq(bad, 541), B)).status).toBe(400);
+      expect((await handleAdmin(daggerReq(bad, 541), B, withEngine)).status).toBe(400);
     }
-    expect((await handleAdmin(daggerReq(good, 999_999), B)).status).toBe(404);
+    expect((await handleAdmin(daggerReq(good, 999_999), B, withEngine)).status).toBe(404);
+  });
+
+  // createSandbox silently boots a VM on no network for an unknown id, so this
+  // is the only place a typo or a deleted network can be caught.
+  it("400s a network that does not exist, and an engine that is not on it", async () => {
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 544 })), B);
+    const missing = await handleAdmin(daggerReq(good, 544), B, network(null));
+    expect(missing.status).toBe(400);
+    expect(await missing.json()).toEqual({ error: "network not found in default: net-01abc" });
+
+    const wrongEngine = await handleAdmin(daggerReq(good, 544), B, network([{ ip: "10.9.9.9" }]));
+    expect(wrongEngine.status).toBe(400);
+    expect(JSON.stringify(await wrongEngine.json())).toContain("is not a member");
+
+    const noIpYet = await handleAdmin(daggerReq(good, 544), B, network([{}]));
+    expect(noIpYet.status).toBe(400);
+    const list = (await (
+      await handleAdmin(req("GET", "/admin/tenants"), B)
+    ).json()) as TenantRecord[];
+    expect(list.find((t) => t.installationId === 544)!.dagger).toBeNull();
+  });
+
+  it("502s (and writes nothing) when the network cannot be verified", async () => {
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 545 })), B);
+    const down = mockFetch({
+      "GET /v1/networks/": () =>
+        new Response(JSON.stringify({ status: "error", message: "bad key", code: 401 }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    expect((await handleAdmin(daggerReq(good, 545), B, down)).status).toBe(502);
+    const list = (await (
+      await handleAdmin(req("GET", "/admin/tenants"), B)
+    ).json()) as TenantRecord[];
+    expect(list.find((t) => t.installationId === 545)!.dagger).toBeNull();
   });
 
   it("409s a network already assigned to another tenant", async () => {
@@ -1038,7 +1094,7 @@ describe("POST /admin/tenants/dagger", () => {
       await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: id })), B);
     }
     const shared = { ...good, network_id: "net-shared" };
-    expect((await handleAdmin(daggerReq(shared, 542), B)).status).toBe(200);
-    expect((await handleAdmin(daggerReq(shared, 543), B)).status).toBe(409);
+    expect((await handleAdmin(daggerReq(shared, 542), B, withEngine)).status).toBe(200);
+    expect((await handleAdmin(daggerReq(shared, 543), B, withEngine)).status).toBe(409);
   });
 });

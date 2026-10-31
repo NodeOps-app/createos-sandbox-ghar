@@ -6,8 +6,8 @@
 //
 // The engine sandbox is not a job row, and its name (`<org>-dagger`) never
 // parses as a runner name, so the reconciler and orphan sweep leave it alone.
-// shortcut: no init in the guest, so an engine sandbox that reboots comes back
-// without dockerd/engine — rerun the two start commands below (or recreate).
+// shortcut: no init in the guest — if the engine sandbox is recreated, rerun this
+// script. Pause/resume changes its overlay IP, so re-assign after a resume.
 import { CreateosSandboxClient } from "@nodeops-createos/sandbox";
 import { regions } from "../src/config";
 import { daggerEngineName } from "../src/sandbox";

@@ -374,7 +374,7 @@ ghar runner (ephemeral) ──private network──▶ engine sandbox (long-live
 DAGGER_ENGINE=tcp://10.x.x.x:1234            <org>-dagger, joined only by this tenant
 ```
 
-Measured live: a 30s step took 34s on the first fresh runner and 0.6s on the next fresh runner.
+Measured live (Dagger v1.0.0-beta.23): a 30s step took 53.5s per job with a throwaway local engine, 30.4s on a cold shared engine, and a median 1.6s on the next fresh runners (same cached result). A `golang` image pull went from 34.9s to 0.45s.
 
 ```bash
 # 1. Create the network + engine sandbox; prints the exact admin call for step 2
@@ -390,7 +390,18 @@ curl -X POST https://<worker>.workers.dev/admin/tenants/dagger \
 - Runners of a tenant with an engine boot **only in the engine's region** (a network lives in one region), so they lose cross-region failover.
 - The tenant's workflows must use the dagger CLI version the script pins (`DAGGER_VERSION`).
 - Fork-PR jobs of that tenant reach the engine too and could poison its cache — suggest `fork-gated` or a scoped runner group to such tenants.
-- The guest has no init: an engine sandbox that reboots comes back without its engine. Recreate it (step 1 + 2).
+- **The assignment is checked.** `POST /admin/tenants/dagger` asks the control plane for the network and requires the engine's IP to be a member of it. The control plane itself silently boots a runner on *no* network for an unknown network id, so without this check a typo would hang jobs instead of failing them.
+- **Don't pause the engine sandbox.** Pausing took ~160s, and on resume the overlay IP **changed** (`10.0.4.16` → `10.0.5.126`) even though the engine process survived — every runner's `DAGGER_ENGINE` would point at a dead address. If you do pause it, re-run the step-2 call with the new IP. Restarting only the engine container keeps both the IP and the cache.
+- **A dead engine hangs `dagger`, it does not fail it** — the CLI retried for the whole 100s we gave it. Add a fail-fast preflight (a stopped engine is reported in ~0.2s) and a job `timeout-minutes`:
+
+  ```yaml
+  - name: Dagger engine reachable?
+    run: |
+      hp=${DAGGER_ENGINE#tcp://}
+      timeout 3 bash -c "</dev/tcp/${hp%:*}/${hp#*:}" || { echo "::error::engine $DAGGER_ENGINE unreachable"; exit 1; }
+  ```
+- Size the engine for your peak concurrency: 8 CPU-heavy jobs at once on the default 4 vCPU engine pinned it at ~400% CPU and ran 3.7x slower than one job (no failures).
+- If the engine sandbox is ever recreated, run step 1 and 2 again.
 
 ## Onboarding a community tenant
 

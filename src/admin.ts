@@ -4,6 +4,7 @@ import { loadConfig } from "./config";
 import { timingSafeEqual } from "./webhook";
 import { GitHubClient } from "./github/client";
 import { listAppInstallations, type AppInstallation } from "./github/auth";
+import { networkMemberIps, regionByName } from "./createos";
 import type { TenantRecord } from "./types";
 import { DASHBOARD_HTML, loginHtml } from "./dashboard";
 import { monthKey } from "./quota";
@@ -466,6 +467,24 @@ export async function handleAdmin(
       const d = b.dagger;
       if (d && !config.createosRegions.some((r) => r.name === d.region)) {
         return json({ error: `unknown region: ${d.region}` }, 400);
+      }
+      if (d) {
+        let ips: string[] | null;
+        try {
+          ips = await networkMemberIps(
+            config,
+            regionByName(config, d.region),
+            d.network_id,
+            fetchImpl,
+          );
+        } catch (err) {
+          return json({ error: `cannot verify network: ${String(err)}` }, 502);
+        }
+        if (!ips) return json({ error: `network not found in ${d.region}: ${d.network_id}` }, 400);
+        const engineIp = d.engine.slice("tcp://".length).split(":")[0]!;
+        if (!ips.includes(engineIp)) {
+          return json({ error: `engine ${engineIp} is not a member of ${d.network_id}` }, 400);
+        }
       }
       if (!(await co.adminGetTenant(b.installation_id))) {
         return json({ error: "tenant not found", installation_id: b.installation_id }, 404);
