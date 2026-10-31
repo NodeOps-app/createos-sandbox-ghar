@@ -424,7 +424,7 @@ curl -X POST https://<worker>.workers.dev/admin/tenants/dagger \
 
 - **One engine per tenant, never shared.** The engine has no authentication; anything that can reach its port can run containers on it and read its cache. Network membership is the only access control.
 - Runners of a tenant with an engine boot **only in the engine's region** (a network lives in one region), so they lose cross-region failover.
-- The tenant's workflows must use the dagger CLI version the script pins (`DAGGER_VERSION`).
+- The runner image ships the matching `dagger` CLI (`DAGGER_VERSION` in `template/Dockerfile`, which must equal the one in `scripts/dagger-engine.ts`), so workflows just call `dagger`. Bump both together, then rebuild the template and recreate engines.
 - Fork-PR jobs of that tenant reach the engine too and could poison its cache — suggest `fork-gated` or a scoped runner group to such tenants.
 - **The assignment is checked.** `POST /admin/tenants/dagger` asks the control plane for the network and requires the engine's IP to be a member of it. The control plane itself silently boots a runner on *no* network for an unknown network id, so without this check a typo would hang jobs instead of failing them.
 - **Don't pause the engine sandbox.** Pausing took ~160s, and on resume the overlay IP **changed** (`10.0.4.16` → `10.0.5.126`) even though the engine process survived — every runner's `DAGGER_ENGINE` would point at a dead address. If you do pause it, re-run the step-2 call with the new IP. Restarting only the engine container keeps both the IP and the cache.

@@ -12,6 +12,7 @@ import { CreateosSandboxClient } from "@nodeops-createos/sandbox";
 import { regions } from "../src/config";
 import { daggerEngineName } from "../src/sandbox";
 
+// Must equal DAGGER_VERSION in template/Dockerfile (the CLI baked into runners).
 const DAGGER_VERSION = "1.0.0-beta.23";
 const [installationId, org, regionName, shape = "s-4vcpu-8gb", diskMib = "51200"] =
   process.argv.slice(2);
