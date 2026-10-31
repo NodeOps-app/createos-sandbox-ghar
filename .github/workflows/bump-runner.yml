@@ -39,6 +39,7 @@ jobs:
       contents: read
     outputs:
       latest: ${{ steps.v.outputs.latest }}
+      sha256: ${{ steps.v.outputs.sha256 }}
       changed: ${{ steps.v.outputs.latest != steps.v.outputs.current }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,7 +52,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          latest=$(gh api repos/actions/runner/releases/latest --jq .tag_name | sed 's/^v//')
+          rel=$(gh api repos/actions/runner/releases/latest)
+          latest=$(jq -r .tag_name <<<"$rel" | sed 's/^v//')
           current=$(sed -n 's/^ARG RUNNER_VERSION=//p' template/Dockerfile)
           # Strictly numeric: this value is interpolated into a sed expression
           # and a commit message downstream. The old glob (`[0-9]*.[0-9]*.[0-9]*`)
@@ -61,8 +63,23 @@ jobs:
             echo "unexpected runner version: '$latest'" >&2
             exit 1
           }
-          echo "latest=$latest"   >> "$GITHUB_OUTPUT"
-          echo "current=$current" >> "$GITHUB_OUTPUT"
+          # The tarball's sha256 from two independent places that must agree:
+          # the asset's `digest` field and the SHA block in the release notes.
+          # Pinned into the Dockerfile and checked with sha256sum -c at build,
+          # so a release asset replaced under a tag fails the build.
+          asset_sha=$(jq -r --arg n "actions-runner-linux-x64-${latest}.tar.gz" \
+            '.assets[] | select(.name == $n) | .digest // ""' <<<"$rel" | sed 's/^sha256://')
+          notes_sha=$(jq -r '.body' <<<"$rel" \
+            | sed -n 's/.*<!-- BEGIN SHA linux-x64 -->\([0-9a-f]\{64\}\)<!-- END SHA linux-x64 -->.*/\1/p' | head -1)
+          printf '%s' "$asset_sha" | grep -Eq '^[0-9a-f]{64}$' && [ "$asset_sha" = "$notes_sha" ] || {
+            echo "runner ${latest} digest unconfirmed: asset='${asset_sha}' notes='${notes_sha}'" >&2
+            exit 1
+          }
+          {
+            echo "sha256=$asset_sha"
+            echo "latest=$latest"
+            echo "current=$current"
+          } >> "$GITHUB_OUTPUT"
           echo "runner: current=$current latest=$latest"
 
   template:
@@ -95,9 +112,11 @@ jobs:
         env:
           CREATEOS_API_KEY: ${{ secrets.CREATEOS_API_KEY }}
           LATEST: ${{ needs.resolve.outputs.latest }}
+          SHA256: ${{ needs.resolve.outputs.sha256 }}
         run: |
           set -euo pipefail
           sed -i "s/^ARG RUNNER_VERSION=.*/ARG RUNNER_VERSION=${LATEST}/" template/Dockerfile
+          sed -i "s/^ARG RUNNER_SHA256=.*/ARG RUNNER_SHA256=${SHA256}/" template/Dockerfile
           createos sb template rm ghar-runner --yes || true
           createos sb template submit ghar-runner -f template/Dockerfile
 
@@ -117,11 +136,13 @@ jobs:
       - name: Commit the version bump
         env:
           LATEST: ${{ needs.resolve.outputs.latest }}
+          SHA256: ${{ needs.resolve.outputs.sha256 }}
         run: |
           set -euo pipefail
           sed -i "s/^ARG RUNNER_VERSION=.*/ARG RUNNER_VERSION=${LATEST}/" template/Dockerfile
+          sed -i "s/^ARG RUNNER_SHA256=.*/ARG RUNNER_SHA256=${SHA256}/" template/Dockerfile
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add template/Dockerfile
-          git commit -m "chore: bump actions/runner to ${LATEST}"
+          git commit -m "chore: bump actions/runner to ${LATEST}" -m "sha256 ${SHA256}"
           git push

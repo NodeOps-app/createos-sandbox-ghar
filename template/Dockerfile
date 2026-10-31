@@ -10,6 +10,9 @@ FROM nodeops/sandbox:debian
 # still missing whatever a repo actually asked for — so we ship the *substrate* those
 # actions need (a C toolchain, archivers, a writable tool cache) and let them install.
 ARG RUNNER_VERSION=2.338.0
+# Bumped together with RUNNER_VERSION (bump-runner.yml / build.ts), from two
+# independent sources that must agree — see runnerDigest in build.ts.
+ARG RUNNER_SHA256=af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32
 ARG GH_VERSION=2.96.0
 ARG GH_SHA256=83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60
 
@@ -59,6 +62,7 @@ RUN curl -fsSL -o /tmp/gh.tar.gz "https://github.com/cli/cli/releases/download/v
 RUN mkdir -p /opt/actions-runner /opt/hostedtoolcache && cd /opt/actions-runner \
  && curl -fsSL -o runner.tar.gz \
       "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" \
+ && echo "${RUNNER_SHA256}  runner.tar.gz" | sha256sum -c - \
  && tar xzf runner.tar.gz && rm runner.tar.gz \
  && ./bin/installdependencies.sh \
  && rm -rf /var/lib/apt/lists/*
