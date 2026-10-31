@@ -193,6 +193,11 @@ const ProjectDeleteBody = z.object({
 
 const BackfillBody = z.object({ installation_id: SafeId });
 
+const publicReposError = (repos: string[]) =>
+  `public repos cannot use a scoped runner group: ${repos.join(", ")}. GitHub never ` +
+  `dispatches a public repo's jobs to it, so they would never start. Make them ` +
+  `private, remove them, or use allow_all_repos.`;
+
 // Operator-entered values that land in every runner's env and createSandbox
 // body, so shapes are pinned: an overlay IP (never a hostname a tenant could
 // point elsewhere) and a CreateOS network id. null removes the engine.
@@ -417,6 +422,8 @@ export async function handleAdmin(
             orgLogin: b.org_login,
             installationId: b.installation_id,
           });
+          const pub = await gh.publicRepos(projects.map((p) => p.repoId));
+          if (pub.length > 0) return json({ error: publicReposError(pub) }, 400);
           runnerGroupId = await gh.createRunnerGroup(
             "createos",
             projects.map((p) => p.repoId),
@@ -519,23 +526,33 @@ export async function handleAdmin(
       // the group WIDER than the registry — only the reverse (group
       // narrower, registry ahead) is tolerated: that repo simply can't get a
       // runner until the sync retries and catches up.
+      const groupId = existing.tenant.allowAllRepos ? null : existing.tenant.runnerGroupId;
+      const gh =
+        existing.tenant.status === "approved" && groupId !== null
+          ? new GitHubClient(config, fetchImpl, {
+              orgLogin: existing.tenant.orgLogin,
+              installationId: existing.tenant.installationId,
+            })
+          : null;
+      // Checked before the registry write; a pending tenant is checked at approval.
+      if (gh) {
+        let pub: string[];
+        try {
+          pub = await gh.publicRepos(b.projects.map((p) => p.repo_id));
+        } catch (err) {
+          return json({ error: `repo visibility check failed: ${String(err)}` }, 502);
+        }
+        if (pub.length > 0) return json({ error: publicReposError(pub) }, 400);
+      }
       await co.adminAddProjects(
         b.installation_id,
         b.projects.map((p) => ({ repoFullName: p.repo_full_name, repoId: p.repo_id })),
       );
-      if (
-        existing.tenant.status === "approved" &&
-        !existing.tenant.allowAllRepos &&
-        existing.tenant.runnerGroupId !== null
-      ) {
+      if (gh && groupId !== null) {
         const union = new Set(existing.projects.map((p) => p.repoId));
         for (const p of b.projects) union.add(p.repo_id);
         try {
-          const gh = new GitHubClient(config, fetchImpl, {
-            orgLogin: existing.tenant.orgLogin,
-            installationId: existing.tenant.installationId,
-          });
-          await gh.setRunnerGroupRepos(existing.tenant.runnerGroupId, [...union]);
+          await gh.setRunnerGroupRepos(groupId, [...union]);
         } catch (err) {
           console.error(`runner group sync failed org=${existing.tenant.orgLogin}: ${String(err)}`);
           return json({ error: `runner group sync failed: ${String(err)}` }, 502);

@@ -294,6 +294,21 @@ export class GitHubClient {
     }
   }
 
+  /**
+   * Full names of the repos among `repoIds` that are public. A scoped runner
+   * group is created without `allows_public_repositories`, so GitHub never
+   * dispatches a public repo's jobs to it — they queue forever while we still
+   * boot VMs for them. Admission refuses such repos instead.
+   */
+  async publicRepos(repoIds: number[]): Promise<string[]> {
+    const repos = await Promise.all(
+      repoIds.map((id) =>
+        this.#get<{ full_name: string; private: boolean }>(`/repositories/${id}`),
+      ),
+    );
+    return repos.filter((r) => !r.private).map((r) => r.full_name);
+  }
+
   /** Creates (or idempotently adopts) the org's selected-visibility runner
    * group. Gate 3: the GitHub-side execution boundary. */
   async createRunnerGroup(name: string, repoIds: number[]): Promise<number> {

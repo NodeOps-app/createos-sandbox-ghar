@@ -462,6 +462,8 @@ The operator side of [Get CreateOS runners for your org](#get-createos-runners-f
      [--minute-grant N] [--concurrency-cap N] [--max-shape s-4vcpu-8gb] [--job-ttl-ms N] [--notes "…"]
    ```
 
+   **Scoped tenants must use private repos.** GitHub never dispatches a public repo's jobs to a scoped runner group, so approval (and adding a repo to an approved tenant) refuses public repos with a `400` that names them. Make them private, drop them, or use `--allow-all-repos`.
+
    Approval creates a GitHub runner group scoped to exactly those repos and fails closed: a `502` means fix the problem on GitHub and re-run, and the Tenant stays unapproved. Re-running with more repos adds them. Re-running with a `--minute-grant` or other limit flag changes only that limit. The same steps done by hand with `curl` are in [`docs/community/onboard-tenant.md`](docs/community/onboard-tenant.md) and [Tenant registry (admin API)](#tenant-registry-admin-api).
 5. **Optional: a Dagger engine.** If they asked for one, follow [Dagger engines (per tenant)](#dagger-engines-per-tenant).
 6. **Reply to them** with their limits, the label to use (`createos`, or a shaped label up to their `max_shape`), and the fact that minutes are vCPU-weighted.

@@ -1098,3 +1098,125 @@ describe("POST /admin/tenants/dagger", () => {
     expect((await handleAdmin(daggerReq(shared, 543), B, withEngine)).status).toBe(409);
   });
 });
+
+// GitHub never dispatches a public repo's jobs to a scoped runner group (it is
+// created without allows_public_repositories), so they would queue forever
+// while ghar boots VMs for them. Both write paths refuse instead.
+describe("public repos on a scoped tenant", () => {
+  const visibility = (publicIds: number[], over: Parameters<typeof githubRoutes>[0] = {}) =>
+    mockFetch(
+      githubRoutes({
+        "GET /repositories/": (r) => {
+          const id = Number(r.url.split("/").pop());
+          return new Response(
+            JSON.stringify({ full_name: `acme/r${id}`, private: !publicIds.includes(id) }),
+            { status: 200 },
+          );
+        },
+        ...over,
+      }),
+    );
+
+  it("refuses approval when a project is public, and creates no runner group", async () => {
+    let groupCreated = false;
+    const f = visibility([71], {
+      "POST /actions/runner-groups": () => {
+        groupCreated = true;
+        return new Response(JSON.stringify({ id: 7070 }), { status: 201 });
+      },
+    });
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 560 })), B);
+    await handleAdmin(
+      req("POST", "/admin/projects", {
+        installation_id: 560,
+        projects: [
+          { repo_full_name: "acme/r70", repo_id: 70 },
+          { repo_full_name: "acme/r71", repo_id: 71 },
+        ],
+      }),
+      B,
+    );
+    const res = await handleAdmin(
+      req("POST", "/admin/tenants", tenantBody({ installation_id: 560, status: "approved" })),
+      B,
+      f,
+    );
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(await res.json())).toContain("acme/r71");
+    expect(groupCreated).toBe(false);
+    const list = (await (
+      await handleAdmin(req("GET", "/admin/tenants"), B)
+    ).json()) as TenantRecord[];
+    expect(list.find((t) => t.installationId === 560)!.status).toBe("pending");
+  });
+
+  it("refuses adding a public repo to an approved scoped tenant, writing nothing", async () => {
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 561 })), B);
+    await handleAdmin(
+      req("POST", "/admin/projects", {
+        installation_id: 561,
+        projects: [{ repo_full_name: "acme/r80", repo_id: 80 }],
+      }),
+      B,
+    );
+    await handleAdmin(
+      req("POST", "/admin/tenants", tenantBody({ installation_id: 561, status: "approved" })),
+      B,
+      visibility([], {
+        "POST /actions/runner-groups": () =>
+          new Response(JSON.stringify({ id: 8080 }), { status: 201 }),
+      }),
+    );
+    let synced = false;
+    const add = await handleAdmin(
+      req("POST", "/admin/projects", {
+        installation_id: 561,
+        projects: [{ repo_full_name: "acme/r81", repo_id: 81 }],
+      }),
+      B,
+      visibility([81], {
+        "PUT /actions/runner-groups/8080/repositories": () => {
+          synced = true;
+          return new Response(null, { status: 204 });
+        },
+      }),
+    );
+    expect(add.status).toBe(400);
+    expect(synced).toBe(false);
+    // Never persisted: deleting it 404s.
+    const del = await handleAdmin(
+      req("DELETE", "/admin/projects", { installation_id: 561, repo_full_name: "acme/r81" }),
+      B,
+      visibility([]),
+    );
+    expect(del.status).toBe(404);
+  });
+
+  it("502s (writing nothing) when visibility cannot be checked", async () => {
+    await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: 562 })), B);
+    await handleAdmin(
+      req("POST", "/admin/projects", {
+        installation_id: 562,
+        projects: [{ repo_full_name: "acme/r90", repo_id: 90 }],
+      }),
+      B,
+    );
+    await handleAdmin(
+      req("POST", "/admin/tenants", tenantBody({ installation_id: 562, status: "approved" })),
+      B,
+      visibility([], {
+        "POST /actions/runner-groups": () =>
+          new Response(JSON.stringify({ id: 9090 }), { status: 201 }),
+      }),
+    );
+    const add = await handleAdmin(
+      req("POST", "/admin/projects", {
+        installation_id: 562,
+        projects: [{ repo_full_name: "acme/r91", repo_id: 91 }],
+      }),
+      B,
+      visibility([], { "GET /repositories/": () => new Response("down", { status: 503 }) }),
+    );
+    expect(add.status).toBe(502);
+  });
+});

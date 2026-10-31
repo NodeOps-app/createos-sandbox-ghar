@@ -26,6 +26,11 @@ export function githubRoutes(over: Partial<Record<string, Handler>> = {}): Recor
         }),
         { status: 201 },
       ),
+    // Repo visibility (admission refuses public repos on scoped groups): private by default.
+    "GET /repositories/": (req) =>
+      new Response(JSON.stringify({ full_name: `o/r${req.url.split("/").pop()}`, private: true }), {
+        status: 200,
+      }),
     "POST /generate-jitconfig": () =>
       new Response(JSON.stringify({ encoded_jit_config: "ENCODED_JIT_BLOB", runner: { id: 5 } }), {
         status: 201,
