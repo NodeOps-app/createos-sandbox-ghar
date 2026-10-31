@@ -43,7 +43,7 @@ This repo is both a working autoscaler and a reference example of building on th
 
 1. **Apply.** Email **[business@nodeops.xyz](mailto:business@nodeops.xyz)** with:
    - your GitHub org login
-   - the repos you want runners for (`owner/name`, one per line)
+   - the repos you want runners for (`owner/name`, one per line), and whether each is **public or private**
    - whether the project is open source or commercial
    - a contact name
 2. **Install the GitHub App** [`createos-runners`](https://github.com/apps/createos-runners) on that org. Choose **Only select repositories** and pick the same repos. Installing does not give you runners yet; approval does.
@@ -57,6 +57,8 @@ This repo is both a working autoscaler and a reference example of building on th
    ```
 
    Use exactly one `createos*` label per job. See [Choosing a runner size](#choosing-a-runner-size).
+
+**Public repos need a different setup.** Per-repo approval works for private repos only: GitHub never sends a public repo's jobs to a restricted runner group, so we refuse to approve one rather than leave its jobs waiting forever. If your repos are public, say so in your email and we will set the org up differently.
 
 To add or remove repos later, email us and update the App's repository selection to match.
 
@@ -410,7 +412,7 @@ ghar runner (ephemeral) ──private network──▶ engine sandbox (long-live
 DAGGER_ENGINE=tcp://10.x.x.x:1234            <org>-dagger, joined only by this tenant
 ```
 
-Measured live (Dagger v1.0.0-beta.23): a 30s step took 53.5s per job with a throwaway local engine, 30.4s on a cold shared engine, and a median 1.6s on the next fresh runners (same cached result). A `golang` image pull went from 34.9s to 0.45s.
+Measured live (Dagger v1.0.0-beta.23): a 30s step took 53.5s per job with a throwaway local engine, 30.4s on a cold shared engine, and a median 1.6s on the next fresh runners (same cached result). A `golang` image pull went from 34.9s to 0.45s. On real GitHub jobs (go test + build of a ~3 MB Go project, fresh runner per job) the Dagger step took 42s on the first run, then 0–5s on every later run (8 runs), against 47–87s with a throwaway local engine every time.
 
 ```bash
 # 1. Create the network + engine sandbox; prints the exact admin call for step 2
