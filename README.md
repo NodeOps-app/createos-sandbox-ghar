@@ -121,7 +121,7 @@ CREATEOS_API_KEY=<key> \
 bun run build:template
 ```
 
-The build always pulls the **latest `actions/runner`** release (GitHub refuses jobs from deprecated runners), removes any existing `ghar-runner` template, and rebuilds. Wait for `ready: <id>`. See [Keeping the runner current](#keeping-the-runner-current) for the daily auto-bump.
+The build always pulls the **latest `actions/runner`** release (GitHub refuses jobs from deprecated runners) and its verified sha256, removes any existing `ghar-runner` template, and rebuilds. Wait for `ready: <id>`. See [Keeping the runner current](#keeping-the-runner-current) for the daily auto-bump.
 
 ### 4. Configure
 
@@ -238,6 +238,7 @@ GitHub deprecates old runner versions and **refuses their jobs**, so the baked r
 
 - `bun run build:template` always builds the latest `actions/runner` release.
 - `.github/workflows/bump-runner.yml` runs **daily**: if a newer runner shipped, it rebuilds the `ghar-runner` template via the CreateOS CLI and commits the bump. Needs the repo secret **`CREATEOS_API_KEY`**.
+- **The runner tarball is digest-pinned.** `template/Dockerfile` carries `RUNNER_SHA256` next to `RUNNER_VERSION` and checks it with `sha256sum -c` before unpacking — the runner runs as root in every CI microVM and in each Dagger engine sandbox. Both bump paths take the digest from two independent sources (the release asset's `digest` field and the SHA block in the release notes) and **refuse to bump if they disagree**, so a release asset replaced under a tag fails loudly instead of shipping. If you bump by hand, change both `ARG` lines together.
 
 ## Alerting
 
