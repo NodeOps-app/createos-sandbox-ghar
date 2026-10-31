@@ -201,7 +201,11 @@ const DaggerBody = z.object({
     .object({
       region: z.string().min(1),
       network_id: z.string().regex(/^net-[0-9a-z]+$/),
-      engine: z.string().regex(/^tcp:\/\/(\d{1,3}\.){3}\d{1,3}:\d{1,5}$/),
+      engine: z.string().refine((v) => {
+        const m = /^tcp:\/\/(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/.exec(v);
+        const port = Number(m?.[5]);
+        return !!m && m.slice(1, 5).every((o) => Number(o) <= 255) && port >= 1 && port <= 65535;
+      }, "want tcp://<ipv4>:<port>"),
     })
     .nullable(),
 });
@@ -459,18 +463,17 @@ export async function handleAdmin(
       const b = DaggerBody.parse(await req.json());
       // An unknown region would pin every runner of this tenant to a control
       // plane the Worker cannot dial — every provision would fail.
-      if (b.dagger && !config.createosRegions.some((r) => r.name === b.dagger!.region)) {
-        return json({ error: `unknown region: ${b.dagger.region}` }, 400);
+      const d = b.dagger;
+      if (d && !config.createosRegions.some((r) => r.name === d.region)) {
+        return json({ error: `unknown region: ${d.region}` }, 400);
       }
       if (!(await co.adminGetTenant(b.installation_id))) {
         return json({ error: "tenant not found", installation_id: b.installation_id }, 404);
       }
-      const dagger = b.dagger && {
-        region: b.dagger.region,
-        networkId: b.dagger.network_id,
-        engine: b.dagger.engine,
-      };
-      await co.adminSetTenantDagger(b.installation_id, dagger);
+      const dagger = d && { region: d.region, networkId: d.network_id, engine: d.engine };
+      if (!(await co.adminSetTenantDagger(b.installation_id, dagger))) {
+        return json({ error: "network already assigned to another tenant" }, 409);
+      }
       return json({ ok: true, dagger });
     }
 

@@ -1024,9 +1024,21 @@ describe("POST /admin/tenants/dagger", () => {
       { ...good, engine: "tcp://evil.example.com:1234" },
       { ...good, network_id: "net_x; rm" },
       { ...good, region: "mars" },
+      { ...good, engine: "tcp://999.999.999.999:1234" },
+      { ...good, engine: "tcp://10.0.0.1:99999" },
+      { ...good, engine: "tcp://10.0.0.1:0" },
     ]) {
       expect((await handleAdmin(daggerReq(bad, 541), B)).status).toBe(400);
     }
     expect((await handleAdmin(daggerReq(good, 999_999), B)).status).toBe(404);
+  });
+
+  it("409s a network already assigned to another tenant", async () => {
+    for (const id of [542, 543]) {
+      await handleAdmin(req("POST", "/admin/tenants", tenantBody({ installation_id: id })), B);
+    }
+    const shared = { ...good, network_id: "net-shared" };
+    expect((await handleAdmin(daggerReq(shared, 542), B)).status).toBe(200);
+    expect((await handleAdmin(daggerReq(shared, 543), B)).status).toBe(409);
   });
 });

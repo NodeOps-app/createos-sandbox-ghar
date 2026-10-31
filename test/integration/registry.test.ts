@@ -214,6 +214,11 @@ describe("tenant dagger engine", () => {
     await s.adminUpsertTenant({ ...t, minuteGrant: 9000 });
     expect((await s.adminGetTenant(77))!.tenant.dagger).toEqual(d);
 
+    // One network, one tenant: another tenant cannot be pointed at it.
+    await s.adminUpsertTenant(tenant({ installationId: 78 }));
+    expect(await s.adminSetTenantDagger(78, d)).toBe(false);
+    expect((await s.adminGetTenant(78))!.tenant.dagger).toBeNull();
+
     await s.adminSetTenantDagger(77, null);
     expect((await s.adminGetTenant(77))!.tenant.dagger).toBeNull();
   });

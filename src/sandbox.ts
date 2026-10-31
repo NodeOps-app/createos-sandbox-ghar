@@ -83,6 +83,15 @@ const RUNNER_NAME_RE = new RegExp(`^${RUNNER_PREFIX}(\\d+)-[a-z0-9]{${ATTEMPT_ID
  */
 const SANDBOX_NAME_RE = new RegExp(`^([0-9a-z]+)(?:-([a-z0-9]{${ATTEMPT_ID_LEN}}))?$`);
 
+/**
+ * A Tenant's Dagger engine sandbox name. Ends in `-dagger` so it can never
+ * parse as ours under ANY prefix: the last segment is neither a 2-char attempt
+ * token nor (alone) a decimal job id — else the orphan sweep would destroy it.
+ */
+export function daggerEngineName(org: string): string {
+  return `${org.toLowerCase().slice(0, MAX_SANDBOX_NAME - "-dagger".length)}-dagger`;
+}
+
 export function runnerNameFor(jobId: number, attemptId: string): string {
   return `${RUNNER_PREFIX}${jobId}-${attemptId}`;
 }
@@ -369,7 +378,7 @@ export async function createRunnerSandbox(
   // leaks the VM under this job's stable name — the same window a lost response
   // already opens, and sweepOrphanedSandboxes reclaims both.
   const budget = deps.createBudget?.() ?? AbortSignal.timeout(CREATE_BUDGET_MS);
-  const dagger = job.tenant?.dagger ?? null;
+  const dagger = job.tenant?.dagger;
 
   const attempt = async (region: Region) => {
     const c = makeSandboxClient(config, deps, region);
@@ -385,12 +394,10 @@ export async function createRunnerSandbox(
       // Do NOT set auto_pause_after_seconds: a paused runner goes offline to
       // GitHub (missed dispatch, 1-day deregistration). Omitting it disables
       // idle auto-pause; these VMs self-delete per job anyway.
-      envs: dagger
-        ? { JIT_CONFIG: jitConfig, DAGGER_ENGINE: dagger.engine }
-        : { JIT_CONFIG: jitConfig },
+      envs: { JIT_CONFIG: jitConfig, ...(dagger && { DAGGER_ENGINE: dagger.engine }) },
       // Only this tenant's runners join its engine's network — the engine has
       // no auth, so network membership IS the access control.
-      ...(dagger ? { networks: [{ id: dagger.networkId }] } : {}),
+      ...(dagger && { networks: [{ id: dagger.networkId }] }),
     });
     return {
       sandboxId: sandbox.id,

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   createRunnerSandbox,
+  daggerEngineName,
   jobIdFromRunnerName,
   jobIdFromSandboxName,
   launchRunner,
@@ -925,5 +926,17 @@ describe("createRunnerSandbox with a tenant Dagger engine", () => {
     const body = us.createSandbox.mock.calls[0]![0];
     expect(body).not.toHaveProperty("networks");
     expect(body.envs).toEqual({ JIT_CONFIG: "BLOB" });
+  });
+});
+
+describe("daggerEngineName", () => {
+  it("never parses as a sweepable sandbox, whatever the prefix or org", () => {
+    for (const prefix of ["", "gha-ci", "dagger", "acme"]) {
+      for (const org of ["acme-ab", "ab", "123", "gha-ci-2s", "a-very-long-org-name-indeed"]) {
+        const name = daggerEngineName(org);
+        expect(name.length).toBeLessThanOrEqual(22);
+        expect(jobIdFromSandboxName(name, { ...config, sandboxNamePrefix: prefix })).toBeNull();
+      }
+    }
   });
 });

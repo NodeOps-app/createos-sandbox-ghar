@@ -53,7 +53,7 @@ function mode(env: Record<string, unknown>): "single" | "multi" {
  * read back at teardown, so it must be stable across deploys (like RUNNER_LABEL):
  * renaming a region strands every row the old name owns.
  */
-function regions(env: Record<string, unknown>): Region[] {
+export function regions(env: Record<string, unknown>): Region[] {
   const raw = (env.CREATEOS_REGIONS as string) || "";
   if (!raw.trim()) {
     return [{ name: "default", baseUrl: req(env, "CREATEOS_BASE_URL").replace(/\/+$/, "") }];

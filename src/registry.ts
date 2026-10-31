@@ -106,7 +106,21 @@ export function setTenantDagger(
   sql: SqlStorage,
   installationId: number,
   d: DaggerEngine | null,
-): void {
+): boolean {
+  // The engine is unauthenticated: a network shared by two tenants hands one
+  // tenant's runners the other's engine. Checked in the DO, so it is atomic.
+  if (
+    d &&
+    sql
+      .exec(
+        `SELECT 1 FROM tenants WHERE dagger_network_id = ? AND installation_id != ?`,
+        d.networkId,
+        installationId,
+      )
+      .toArray().length > 0
+  ) {
+    return false;
+  }
   sql.exec(
     `UPDATE tenants SET dagger_region = ?, dagger_network_id = ?, dagger_engine = ?
       WHERE installation_id = ?`,
@@ -115,6 +129,7 @@ export function setTenantDagger(
     d?.engine ?? null,
     installationId,
   );
+  return true;
 }
 
 export function setTenantStatus(

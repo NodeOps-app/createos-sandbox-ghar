@@ -1089,8 +1089,8 @@ export class Coordinator extends DurableObject<Env> {
     setTenantStatus(this.#sql, installationId, status);
   }
 
-  adminSetTenantDagger(installationId: number, dagger: DaggerEngine | null): void {
-    setTenantDagger(this.#sql, installationId, dagger);
+  adminSetTenantDagger(installationId: number, dagger: DaggerEngine | null): boolean {
+    return setTenantDagger(this.#sql, installationId, dagger);
   }
 
   adminAddProjects(

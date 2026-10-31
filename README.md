@@ -371,7 +371,7 @@ A tenant can get its own long-lived [Dagger](https://docs.dagger.io/self-hosting
 
 ```
 ghar runner (ephemeral) ──private network──▶ engine sandbox (long-lived, cache kept)
-DAGGER_ENGINE=tcp://10.x.x.x:1234            dagger-<org>, joined only by this tenant
+DAGGER_ENGINE=tcp://10.x.x.x:1234            <org>-dagger, joined only by this tenant
 ```
 
 Measured live: a 30s step took 34s on the first fresh runner and 0.6s on the next fresh runner.
