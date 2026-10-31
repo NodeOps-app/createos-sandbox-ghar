@@ -37,6 +37,41 @@ jobs:
 
 This repo is both a working autoscaler and a reference example of building on the CreateOS Sandbox SDK.
 
+## Get CreateOS runners for your org
+
+**Using runners, not hosting them?** This is the only section you need. CreateOS Sandbox runners are free for approved projects. Access is approved by a person, org by org and repo by repo.
+
+1. **Apply.** Email **[business@nodeops.xyz](mailto:business@nodeops.xyz)** with:
+   - your GitHub org login
+   - the repos you want runners for (`owner/name`, one per line)
+   - whether the project is open source or commercial
+   - a contact name
+2. **Install the GitHub App** [`createos-runners`](https://github.com/apps/createos-runners) on that org. Choose **Only select repositories** and pick the same repos. Installing does not give you runners yet; approval does.
+3. **Wait for approval.** We reply by email with your limits: monthly minutes, how many jobs can run at once, and the largest runner size you can use.
+4. **Switch your workflows**, one line per job:
+
+   ```yaml
+   runs-on: ubuntu-latest   # before
+   runs-on: createos        # after (4 vCPU / 4 GB)
+   runs-on: createos-8vcpu-16gb   # or a specific size, up to your approved limit
+   ```
+
+   Use exactly one `createos*` label per job. See [Choosing a runner size](#choosing-a-runner-size).
+
+To add or remove repos later, email us and update the App's repository selection to match.
+
+**If a job is not picked up**, look for a neutral **check run** on the commit. It explains why without failing your CI, and it is posted at most once per repo per day:
+
+| Check run title | What it means | What to do |
+| --- | --- | --- |
+| This org is not approved for CreateOS runners | the App is installed but the org isn't approved yet | apply (step 1), or wait for our reply |
+| This repository is not approved for CreateOS runners | the org is approved, this repo isn't | email us the repo name |
+| CreateOS runner access is suspended / revoked | access was paused or ended | email us |
+| Requested runner size exceeds this org's limit | the `runs-on` label is bigger than your ceiling | use a smaller label |
+| CreateOS runner minutes exhausted | this month's minutes are used up | wait for the 1st (UTC), or email us |
+
+Bigger runners use minutes faster: minutes are weighted by vCPU count. Want a shared [Dagger](https://docs.dagger.io/) build cache for your jobs? Ask for a [Dagger engine](#dagger-engines-per-tenant).
+
 ## How it works
 
 ```mermaid
@@ -406,36 +441,37 @@ curl -X POST https://<worker>.workers.dev/admin/tenants/dagger \
 
 ## Onboarding a community tenant
 
-`TENANCY_MODE=multi`, one public App (`createos-runners`), install-gated admission
-(ADR [0006](docs/adr/0006-one-app-public-install-gated.md)). An org **installs**
-the App freely, but only registry-**approved** Tenants get runners; unapproved
-installs get one neutral check run pointing at `APPLY_FORM_URL`.
+The operator side of [Get CreateOS runners for your org](#get-createos-runners-for-your-org). It assumes `TENANCY_MODE=multi` and the single public App `createos-runners`, with install-gated admission (ADR [0006](docs/adr/0006-one-app-public-install-gated.md)). Any org can **install** the App, but only registry-**approved** Tenants get runners. Unapproved installs get one neutral check run pointing at `APPLY_FORM_URL`, which is this README.
 
-1. **Application** arrives via the apply link (fields per
-   [`docs/community/onboarding-form.md`](docs/community/onboarding-form.md)).
-2. **Review** and size the Tenant: `minute_grant`, `concurrency_cap`,
-   `max_shape`, `job_ttl_ms`.
-3. They **install the public App** on their org, selecting the repos. Read their
-   installation id from `GET /admin/installations?org=<login>` — we cannot list
-   an org's installations with an operator token, and the App-JWT route needs a
-   key only the Worker has.
-4. **Create the Tenant** `status: "pending"` (`POST /admin/tenants`, their
-   installation id) **+ approve their repos** (`POST /admin/projects`; repo ids
-   from `GET /repos/<owner>/<repo>` → `.id`).
-5. **Approve**: `POST /admin/tenants` with `status: "approved"` — the runner
-   group is auto-created scoped to their repos (fail-closed: a 502 means fix
-   GitHub-side and retry; the Tenant stays unapproved).
-6. Tell them: swap `runs-on: ubuntu-latest` → `runs-on: createos` (or a shaped
-   label within their ceiling).
+```
+ applicant                         operator (ADMIN_TOKEN)
+ 1 emails business@nodeops.xyz ──▶ 2 review + size the tenant
+ 3 installs the App, picks repos ─▶ 4 scripts/onboard-tenant.sh <org> <repos…>
+                                     pending → add repos → approved (scoped runner group)
+                                   5 optional: Dagger engine
+ 6 switches runs-on ◀────────────── tell them they're live + their limits
+```
 
-`allow_all_repos: true` skips runner-group creation and uses the Tenant's own org
-Default group (group `1` — _theirs_, not ours; the JIT mint targets the Tenant's
-org, so this is never a cross-tenant exposure). Whether a Tenant gets it is a
-per-Tenant call agreed with the org owner, not a fixed rule: enumerating Projects
-is the default and buys a **scoped** runner group, at the cost of curating the
-repo list. Grant `allow_all_repos` when the owner wants every repo covered and
-accepts that one repo then cannot be revoked without migrating them to a scoped
-group. NodeOps is Tenant #1 with the flag; `maximem-ai` also has it.
+1. **Review** the email: who they are, which repos, open source or commercial. The fields we care about are listed in [`docs/community/onboarding-form.md`](docs/community/onboarding-form.md).
+2. **Size the Tenant.** `minute_grant` (weighted minutes per UTC month), `concurrency_cap`, `max_shape` and `job_ttl_ms`. The script defaults are 20000 minutes, 5 concurrent jobs, `s-4vcpu-8gb` and 30 min.
+3. **Wait for the install.** It has happened once `GET /admin/installations?org=<login>` returns their installation id. A `404` means they haven't installed yet; a `502` is a GitHub failure, so retry. Don't use `gh api orgs/<org>/installations`: it needs admin on *their* org and 404s exactly as if they never installed.
+4. **Onboard them with one command.** It is idempotent and safe to re-run. It finds the installation id, looks up the repo ids, creates the Tenant as `pending`, adds the repos, then approves:
+
+   ```bash
+   ADMIN_TOKEN=… scripts/onboard-tenant.sh <org> <repo> [<repo>…] \
+     [--minute-grant N] [--concurrency-cap N] [--max-shape s-4vcpu-8gb] [--job-ttl-ms N] [--notes "…"]
+   ```
+
+   Approval creates a GitHub runner group scoped to exactly those repos and fails closed: a `502` means fix the problem on GitHub and re-run, and the Tenant stays unapproved. Re-running with more repos adds them. Re-running with a `--minute-grant` or other limit flag changes only that limit. The same steps done by hand with `curl` are in [`docs/community/onboard-tenant.md`](docs/community/onboard-tenant.md) and [Tenant registry (admin API)](#tenant-registry-admin-api).
+5. **Optional: a Dagger engine.** If they asked for one, follow [Dagger engines (per tenant)](#dagger-engines-per-tenant).
+6. **Reply to them** with their limits, the label to use (`createos`, or a shaped label up to their `max_shape`), and the fact that minutes are vCPU-weighted.
+
+**Afterwards:**
+- **Remove a repo:** `DELETE /admin/projects`. This also narrows their runner group.
+- **Pause or end access:** `POST /admin/tenants/status` with `suspended` or `revoked`. Their jobs then get the matching check run, and queued jobs stop draining.
+- **Watch usage:** the [operator dashboard](#operator-dashboard).
+
+`allow_all_repos: true` (`--allow-all-repos`) skips runner-group creation and uses the Tenant's own org Default group (group `1`). That group is *theirs*, not ours: the JIT mint targets the Tenant's org, so this is never a cross-tenant exposure. Whether a Tenant gets it is a per-Tenant call agreed with the org owner, not a fixed rule. Enumerating Projects is the default and buys a **scoped** runner group, at the cost of curating the repo list. Grant `allow_all_repos` when the owner wants every repo covered and accepts that one repo then cannot be revoked without moving them to a scoped group. NodeOps is Tenant #1 with the flag; `maximem-ai` also has it.
 
 ## Security notes
 
