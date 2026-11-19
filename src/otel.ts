@@ -76,7 +76,15 @@ export async function otelRunnerEnvs(
   if (!otel || installationId === undefined || !otel.installationIds.includes(installationId)) {
     return {};
   }
-  const token = await mintOtelToken(otel.tokenKey, runnerName, nowMs);
+  // Fail open: telemetry is a beta add-on and must never be the reason a job's VM
+  // does not boot.
+  let token: string;
+  try {
+    token = await mintOtelToken(otel.tokenKey, runnerName, nowMs);
+  } catch (err) {
+    console.warn(`OTEL token mint failed for ${runnerName}; booting without telemetry: ${err}`);
+    return {};
+  }
   return {
     OTEL_EXPORTER_OTLP_ENDPOINT: otel.endpoint,
     OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",

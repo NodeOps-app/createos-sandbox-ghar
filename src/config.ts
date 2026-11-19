@@ -84,10 +84,12 @@ function otel(env: Record<string, unknown>): Config["otel"] {
     .split(",")
     .map((s) => Number(s.trim()))
     .filter((n) => Number.isInteger(n) && n > 0);
-  if (!endpoint && !tokenKey && ids.length === 0) return undefined;
-  if (!/^https:\/\/\S+$/.test(endpoint) || !tokenKey || ids.length === 0) {
+  // No key is the kill switch: `wrangler secret delete OTEL_TOKEN_KEY` turns the beta
+  // off at once, with no code rollback, and stays silent (this runs on every request).
+  if (!tokenKey) return undefined;
+  if (!/^https:\/\/\S+$/.test(endpoint) || ids.length === 0) {
     console.warn(
-      "OTEL beta disabled: OTEL_ENDPOINT (https), OTEL_TOKEN_KEY and OTEL_INSTALLATION_IDS must all be set",
+      "OTEL beta disabled: OTEL_ENDPOINT (https) and OTEL_INSTALLATION_IDS must be set too",
     );
     return undefined;
   }

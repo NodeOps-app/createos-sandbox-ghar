@@ -51,6 +51,15 @@ describe("otelRunnerEnvs", () => {
     expect((await verifyOtelToken(KEY, token, NOW)).ok).toBe(true);
   });
 
+  it("fails open: a mint error yields no env instead of a failed provision", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const spy = vi.spyOn(crypto.subtle, "importKey").mockRejectedValueOnce(new Error("boom"));
+    expect(await otelRunnerEnvs(otel, 7, "cos-abc-1x", NOW)).toEqual({});
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("booting without telemetry"));
+    spy.mockRestore();
+    warn.mockRestore();
+  });
+
   it("injects nothing for other tenants, no tenant, or an unset beta", async () => {
     expect(await otelRunnerEnvs(otel, 8, "cos-abc-1x", NOW)).toEqual({});
     expect(await otelRunnerEnvs(otel, undefined, "cos-abc-1x", NOW)).toEqual({});
@@ -85,9 +94,21 @@ describe("loadConfig otel", () => {
     expect(loadConfig(base).otel).toBeUndefined();
   });
 
-  it("warns and stays off when only part of it is set", () => {
+  it("is off, silently, without the key — the kill switch", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(loadConfig({ ...base, OTEL_ENDPOINT: "https://c.example" }).otel).toBeUndefined();
+    const cfg = loadConfig({
+      ...base,
+      OTEL_ENDPOINT: "https://c.example",
+      OTEL_INSTALLATION_IDS: "7",
+    });
+    expect(cfg.otel).toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("warns and stays off when the key is set but the rest is not", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(loadConfig({ ...base, OTEL_TOKEN_KEY: KEY }).otel).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("OTEL beta disabled"));
     warn.mockRestore();
   });
