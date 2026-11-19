@@ -1,0 +1,52 @@
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+receivers:
+  github:
+    webhook:
+      endpoint: 0.0.0.0:19418
+      path: /events
+      health_path: /health
+      secret: ${env:SPIKE_SECRET}
+      service_name: github-actions
+    scrapers:
+      scraper:
+        github_org: NodeOps-app
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:14318
+        include_metadata: true
+        # Matches the proxy's cap; also bounds a compressed body's decompressed size.
+        max_request_body_size: 1048576
+processors:
+  batch: {}
+  # Stamp the runner name the PROXY verified, overwriting anything the client sent.
+  resource/runner:
+    attributes:
+      - key: ghar.runner_name
+        from_context: x-ghar-runner
+        action: upsert
+exporters:
+  otlp/jaeger:
+    endpoint: 127.0.0.1:4317
+    tls:
+      insecure: true
+  debug:
+    verbosity: basic
+  file:
+    path: /root/otel/traces.jsonl
+    rotation:
+      max_megabytes: 50
+      max_backups: 3
+service:
+  extensions: [health_check]
+  pipelines:
+    traces/github:
+      receivers: [github]
+      processors: [batch]
+      exporters: [debug, file, otlp/jaeger]
+    traces/runner:
+      receivers: [otlp]
+      processors: [resource/runner, batch]
+      exporters: [debug, file, otlp/jaeger]

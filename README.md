@@ -450,6 +450,8 @@ curl -X POST https://<worker>.workers.dev/admin/tenants/dagger \
 
 - **Workflow events** — with `OTEL_WEBHOOK_URL` and the `OTEL_WEBHOOK_SECRET` secret set, the Worker also forwards each finished `workflow_job` / `workflow_run` event of an allowlisted tenant to the collector's webhook receiver (re-signed with the collector's own secret, 3s deadline, never blocks the webhook). The collector turns them into run / job / step / queue spans.
 
+- **Trace UI** — the collector also exports to a Jaeger (in memory) in the same sandbox, behind a Caddy login on its own public port (`:16686`). Setup files live in `scripts/otel-beta/`.
+
 Enable: `bunx wrangler secret put OTEL_TOKEN_KEY` (the same key the proxy runs with), set `OTEL_ENDPOINT` and `OTEL_INSTALLATION_IDS` in `wrangler.toml`.
 
 ## Onboarding a community tenant
