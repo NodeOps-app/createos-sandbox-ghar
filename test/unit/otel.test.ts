@@ -103,6 +103,10 @@ describe("loadConfig otel", () => {
       OTEL_INSTALLATION_IDS: "7",
     };
     expect(loadConfig(on).otel?.webhook).toBeUndefined();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(loadConfig({ ...on, OTEL_WEBHOOK_SECRET: "w" }).otel?.webhook).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("OTEL forwarding disabled"));
+    warn.mockRestore();
     expect(
       loadConfig({ ...on, OTEL_WEBHOOK_URL: "https://c.example/events", OTEL_WEBHOOK_SECRET: "w" })
         .otel?.webhook,

@@ -99,6 +99,9 @@ function otel(env: Record<string, unknown>): Config["otel"] {
     /^https:\/\/\S+$/.test(webhookUrl) && webhookSecret
       ? { url: webhookUrl, secret: webhookSecret }
       : undefined;
+  // The URL alone is just the var that ships in wrangler.toml; a secret with no usable URL is a mistake.
+  if (webhookSecret && !webhook)
+    console.warn("OTEL forwarding disabled: OTEL_WEBHOOK_URL must be an https URL");
   return { endpoint, tokenKey, installationIds: ids, webhook };
 }
 
