@@ -19,3 +19,8 @@ storage:
       path: /root/otel/tempo/wal
     local:
       path: /root/otel/tempo/blocks
+# TraceQL metrics (the dashboard's graphs) are on by default in Tempo 3.x; only their
+# maximum query range needs raising from the default 24h.
+query_frontend:
+  metrics:
+    max_duration: 720h
