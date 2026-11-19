@@ -168,6 +168,15 @@ export function regionByName(config: Config, name: string | null | undefined): R
   return region;
 }
 
+function sdkClient(config: Config, region: Region, fetchImpl: typeof fetch = globalThis.fetch) {
+  return new CreateosSandboxClient({
+    baseUrl: region.baseUrl,
+    apiKey: config.createosApiKey,
+    // Workers rejects an unbound fetch called off the SDK's config object.
+    fetch: fetchImpl.bind(globalThis),
+  });
+}
+
 /**
  * The overlay IPs of an existing network's members, or null when the control
  * plane has no such network. createSandbox silently boots a VM on NO network
@@ -180,11 +189,7 @@ export async function networkMemberIps(
   networkId: string,
   fetchImpl?: typeof fetch,
 ): Promise<string[] | null> {
-  const client = new CreateosSandboxClient({
-    baseUrl: region.baseUrl,
-    apiKey: config.createosApiKey,
-    fetch: (fetchImpl ?? globalThis.fetch).bind(globalThis),
-  });
+  const client = sdkClient(config, region, fetchImpl);
   try {
     const net = await client.networks.get(networkId);
     return (net.members ?? []).flatMap((m) => (m.ip ? [m.ip] : []));
@@ -206,10 +211,5 @@ export function makeSandboxClient(
 ): CreateosClient {
   if (deps.makeClient) return deps.makeClient(config, region);
   // The real client structurally satisfies CreateosClient — no cast needed.
-  return new CreateosSandboxClient({
-    baseUrl: (region ?? primaryRegion(config)).baseUrl,
-    apiKey: config.createosApiKey,
-    // Workers rejects an unbound fetch called off the SDK's config object.
-    fetch: globalThis.fetch.bind(globalThis),
-  });
+  return sdkClient(config, region ?? primaryRegion(config));
 }

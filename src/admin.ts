@@ -4,7 +4,7 @@ import { loadConfig } from "./config";
 import { timingSafeEqual } from "./webhook";
 import { GitHubClient } from "./github/client";
 import { listAppInstallations, type AppInstallation } from "./github/auth";
-import { networkMemberIps, regionByName } from "./createos";
+import { networkMemberIps } from "./createos";
 import type { TenantRecord } from "./types";
 import { DASHBOARD_HTML, loginHtml } from "./dashboard";
 import { monthKey } from "./quota";
@@ -472,18 +472,12 @@ export async function handleAdmin(
       // An unknown region would pin every runner of this tenant to a control
       // plane the Worker cannot dial — every provision would fail.
       const d = b.dagger;
-      if (d && !config.createosRegions.some((r) => r.name === d.region)) {
-        return json({ error: `unknown region: ${d.region}` }, 400);
-      }
       if (d) {
+        const region = config.createosRegions.find((r) => r.name === d.region);
+        if (!region) return json({ error: `unknown region: ${d.region}` }, 400);
         let ips: string[] | null;
         try {
-          ips = await networkMemberIps(
-            config,
-            regionByName(config, d.region),
-            d.network_id,
-            fetchImpl,
-          );
+          ips = await networkMemberIps(config, region, d.network_id, fetchImpl);
         } catch (err) {
           return json({ error: `cannot verify network: ${String(err)}` }, 502);
         }
