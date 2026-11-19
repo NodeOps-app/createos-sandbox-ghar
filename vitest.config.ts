@@ -36,6 +36,7 @@ export default defineConfig({
           // beta's own tests build their Config directly.
           OTEL_ENDPOINT: "",
           OTEL_INSTALLATION_IDS: "",
+          OTEL_WEBHOOK_URL: "",
           GITHUB_ORG: "nodeops-app",
           RUNNER_LABEL: "createos",
           GITHUB_APP_ID: "1",

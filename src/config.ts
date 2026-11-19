@@ -93,7 +93,13 @@ function otel(env: Record<string, unknown>): Config["otel"] {
     );
     return undefined;
   }
-  return { endpoint, tokenKey, installationIds: ids };
+  const webhookUrl = (env.OTEL_WEBHOOK_URL as string) || "";
+  const webhookSecret = (env.OTEL_WEBHOOK_SECRET as string) || "";
+  const webhook =
+    /^https:\/\/\S+$/.test(webhookUrl) && webhookSecret
+      ? { url: webhookUrl, secret: webhookSecret }
+      : undefined;
+  return { endpoint, tokenKey, installationIds: ids, webhook };
 }
 
 export function loadConfig(env: Record<string, unknown>): Config {

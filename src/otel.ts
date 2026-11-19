@@ -25,6 +25,9 @@ const toHex = (buf: ArrayBuffer) =>
 const fromHex = (hex: string) =>
   new Uint8Array((hex.match(/../g) ?? []).map((h) => Number.parseInt(h, 16)));
 
+const hmacHex = async (key: string, msg: string) =>
+  toHex(await crypto.subtle.sign("HMAC", await hmacKey(key, "sign"), enc.encode(msg)));
+
 /** `<runnerName>.<expiryEpochSeconds>.<hmac-sha256 hex>` — no dots in a runner name. */
 export async function mintOtelToken(
   key: string,
@@ -33,8 +36,7 @@ export async function mintOtelToken(
   ttlS = OTEL_TOKEN_TTL_S,
 ): Promise<string> {
   const payload = `${runnerName}.${Math.floor(nowMs / 1000) + ttlS}`;
-  const sig = await crypto.subtle.sign("HMAC", await hmacKey(key, "sign"), enc.encode(payload));
-  return `${payload}.${toHex(sig)}`;
+  return `${payload}.${await hmacHex(key, payload)}`;
 }
 
 export type OtelTokenCheck =
@@ -90,4 +92,42 @@ export async function otelRunnerEnvs(
     OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",
     OTEL_EXPORTER_OTLP_HEADERS: `${OTEL_TOKEN_HEADER}=${token}`,
   };
+}
+
+const FORWARDED_EVENTS = new Set(["workflow_job", "workflow_run"]);
+/** Same reasoning as notify.ts's ALERT_TIMEOUT_MS: this runs in waitUntil, which bounds at 30s. */
+const FORWARD_TIMEOUT_MS = 3_000;
+
+/**
+ * Sends a finished workflow_job / workflow_run event to the beta collector, which
+ * turns it into run / job / step / queue spans. Only for allowlisted tenants and
+ * only `completed` (the receiver builds spans from completed events), re-signed
+ * with the collector's own secret so it never holds the App's. Never throws: a
+ * dead collector must not touch the webhook it rides on.
+ */
+export async function forwardWorkflowEvent(
+  otel: Config["otel"],
+  event: string | null,
+  body: string,
+): Promise<void> {
+  const sink = otel?.webhook;
+  if (!otel || !sink || !event || !FORWARDED_EVENTS.has(event)) return;
+  try {
+    const p = JSON.parse(body) as { action?: string; installation?: { id?: number } };
+    const id = p.installation?.id;
+    if (p.action !== "completed" || id === undefined || !otel.installationIds.includes(id)) return;
+    const res = await fetch(sink.url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-GitHub-Event": event,
+        "X-Hub-Signature-256": `sha256=${await hmacHex(sink.secret, body)}`,
+      },
+      body,
+      signal: AbortSignal.timeout(FORWARD_TIMEOUT_MS),
+    });
+    if (!res.ok) console.warn(`OTEL forward: collector answered ${res.status} for ${event}`);
+  } catch (err) {
+    console.warn(`OTEL forward failed for ${event}: ${err}`);
+  }
 }

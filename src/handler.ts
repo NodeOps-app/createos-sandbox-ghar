@@ -7,6 +7,7 @@ import { GitHubClient } from "./github/client";
 import { createRunnerSandbox, launchRunner, teardownSandbox, type SandboxDeps } from "./sandbox";
 import { isPermanentProvisionFailure } from "./createos";
 import { notify, jobRef, alertContext } from "./notify";
+import { forwardWorkflowEvent } from "./otel";
 import { monthKey, dayKey, weightForLabel } from "./quota";
 import type {
   PendingJob,
@@ -481,6 +482,9 @@ export async function handleWebhook(
     return new Response("bad signature", { status: 401 });
   }
   const delivery = req.headers.get("X-GitHub-Delivery") ?? crypto.randomUUID();
+  if (config.otel?.webhook) {
+    ctx.waitUntil(forwardWorkflowEvent(config.otel, req.headers.get("X-GitHub-Event"), body));
+  }
   const job = parseWorkflowJob(body);
   if (!job) return new Response("ignored", { status: 202 });
 

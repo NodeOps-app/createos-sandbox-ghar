@@ -448,6 +448,8 @@ curl -X POST https://<worker>.workers.dev/admin/tenants/dagger \
 - **Collector** — a long-lived `ghar-otel` sandbox runs the OpenTelemetry Collector (`githubreceiver`, alpha) behind public HTTPS: `:19418/events` takes GitHub `workflow_job`/`workflow_run` webhooks (HMAC-signed) and turns them into run/job/step/queue spans; `:4318/v1/traces` takes spans from runners through `scripts/otel-auth-proxy.ts`, which accepts only a valid, unexpired per-run token. Spans currently go to the collector's debug log and a file; no backend yet.
 - **Runners** — `otel-cli` is baked into the template. For tenants listed in `OTEL_INSTALLATION_IDS`, the Worker sets `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS` (a token unique to that runner) when `OTEL_TOKEN_KEY` is set, so a step can wrap a command: `otel-cli exec --service my-ci --name build -- make`.
 
+- **Workflow events** — with `OTEL_WEBHOOK_URL` and the `OTEL_WEBHOOK_SECRET` secret set, the Worker also forwards each finished `workflow_job` / `workflow_run` event of an allowlisted tenant to the collector's webhook receiver (re-signed with the collector's own secret, 3s deadline, never blocks the webhook). The collector turns them into run / job / step / queue spans.
+
 Enable: `bunx wrangler secret put OTEL_TOKEN_KEY` (the same key the proxy runs with), set `OTEL_ENDPOINT` and `OTEL_INSTALLATION_IDS` in `wrangler.toml`.
 
 ## Onboarding a community tenant

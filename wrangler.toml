@@ -53,6 +53,8 @@ CREATEOS_REGIONS = "default=https://api-eu.sb.createos.sh,eu=https://api-us.sb.c
 # approved NodeOps-app tenant (144593770 is its suspended predecessor).
 OTEL_ENDPOINT = "https://01m7say7btb3aq4c3vcr68ryqk-4318.app.sb.createos.sh"
 OTEL_INSTALLATION_IDS = "170383495"
+# Where the Worker forwards finished workflow events (needs the OTEL_WEBHOOK_SECRET secret).
+OTEL_WEBHOOK_URL = "https://01m7say7btb3aq4c3vcr68ryqk-19418.app.sb.createos.sh/events"
 RUNNER_LABEL = "createos"
 RUNNER_TEMPLATE = "ghar-runner"
 SANDBOX_NAME_PREFIX = "gha-ci"

@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../../src/config";
 import {
   OTEL_TOKEN_HEADER,
   OTEL_TOKEN_TTL_S,
+  forwardWorkflowEvent,
   mintOtelToken,
   otelRunnerEnvs,
   verifyOtelToken,
@@ -94,6 +95,20 @@ describe("loadConfig otel", () => {
     expect(loadConfig(base).otel).toBeUndefined();
   });
 
+  it("enables forwarding only when both the URL and its secret are set", () => {
+    const on = {
+      ...base,
+      OTEL_ENDPOINT: "https://c.example",
+      OTEL_TOKEN_KEY: KEY,
+      OTEL_INSTALLATION_IDS: "7",
+    };
+    expect(loadConfig(on).otel?.webhook).toBeUndefined();
+    expect(
+      loadConfig({ ...on, OTEL_WEBHOOK_URL: "https://c.example/events", OTEL_WEBHOOK_SECRET: "w" })
+        .otel?.webhook,
+    ).toEqual({ url: "https://c.example/events", secret: "w" });
+  });
+
   it("is off, silently, without the key — the kill switch", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const cfg = loadConfig({
@@ -110,6 +125,75 @@ describe("loadConfig otel", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(loadConfig({ ...base, OTEL_TOKEN_KEY: KEY }).otel).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("OTEL beta disabled"));
+    warn.mockRestore();
+  });
+});
+
+const body = (o: object) => JSON.stringify({ installation: { id: 7 }, ...o });
+
+const stub = (impl: () => Promise<Response>) => {
+  const f = vi.fn(impl);
+  globalThis.fetch = f as unknown as typeof fetch;
+  return f;
+};
+
+describe("forwardWorkflowEvent", () => {
+  const sink = { url: "https://collector.example/events", secret: "s".repeat(16) };
+  const cfg = { ...otel, webhook: sink };
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+  it("sends a completed job of an allowlisted tenant, signed with the collector's secret", async () => {
+    const f = stub(async () => new Response("ok"));
+    const b = body({ action: "completed" });
+    await forwardWorkflowEvent(cfg, "workflow_job", b);
+    expect(f).toHaveBeenCalledOnce();
+    const [url, init] = f.mock.calls[0] as unknown as [string, RequestInit];
+    const h = init.headers as Record<string, string>;
+    expect(url).toBe(sink.url);
+    expect(h["X-GitHub-Event"]).toBe("workflow_job");
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(sink.secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const want = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(b));
+    const hex = [...new Uint8Array(want)].map((x) => x.toString(16).padStart(2, "0")).join("");
+    expect(h["X-Hub-Signature-256"]).toBe(`sha256=${hex}`);
+  });
+
+  it.each([
+    ["another tenant", "workflow_job", { action: "completed", installation: { id: 8 } }],
+    ["a queued job", "workflow_job", { action: "queued" }],
+    ["an unrelated event", "push", { action: "completed" }],
+  ])("sends nothing for %s", async (_l, event, payload) => {
+    const f = stub(async () => new Response("ok"));
+    await forwardWorkflowEvent(cfg, event, body(payload));
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing when forwarding is not configured", async () => {
+    const f = stub(async () => new Response("ok"));
+    await forwardWorkflowEvent(otel, "workflow_job", body({ action: "completed" }));
+    await forwardWorkflowEvent(undefined, "workflow_job", body({ action: "completed" }));
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it("never throws: a dead collector, a 500, or a garbage body are all swallowed", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    stub(async () => Promise.reject(new Error("down")));
+    await expect(
+      forwardWorkflowEvent(cfg, "workflow_job", body({ action: "completed" })),
+    ).resolves.toBeUndefined();
+    stub(async () => new Response("no", { status: 500 }));
+    await expect(
+      forwardWorkflowEvent(cfg, "workflow_job", body({ action: "completed" })),
+    ).resolves.toBeUndefined();
+    await expect(forwardWorkflowEvent(cfg, "workflow_job", "not json")).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
 });
