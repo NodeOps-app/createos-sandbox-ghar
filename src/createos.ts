@@ -139,9 +139,19 @@ export function isPermanentProvisionFailure(err: unknown): boolean {
     err.statusCode >= 400 &&
     err.statusCode < 500 &&
     !(err instanceof CreateosSandboxRateLimitError) &&
-    err.statusCode !== 409
+    err.statusCode !== 409 &&
+    !UNKNOWN_ROOTFS.test(err.message)
   );
 }
+
+/**
+ * The 400 CreateOS answers while the runner template is absent: a template is
+ * replaced by delete-then-rebuild (bump-runner.yml), so for a few minutes the name
+ * resolves to nothing. That is a gap, not a verdict on the request — retried, it
+ * clears — so it must not drop the row. A template name that is simply wrong also
+ * matches, but MAX_PROVISION_ATTEMPTS bounds the retries.
+ */
+const UNKNOWN_ROOTFS = /unknown rootfs/i;
 
 /**
  * Resolves the region a row names to its control plane. NULL/absent = a

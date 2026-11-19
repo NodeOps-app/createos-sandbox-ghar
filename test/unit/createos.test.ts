@@ -99,6 +99,13 @@ describe("isPermanentProvisionFailure", () => {
       "name conflict (409 — a leaked prior attempt, clears once the orphan sweep runs)",
       new CreateosSandboxValidationError("already exists", new Response(null, { status: 409 })),
     ],
+    [
+      "template missing mid-rebuild (400 unknown rootfs — gone for minutes, not forever)",
+      new CreateosSandboxValidationError(
+        'createos-sandbox request failed (400): rootfs: unknown rootfs "ghar-runner"; available: [debian:13]',
+        new Response(null, { status: 400 }),
+      ),
+    ],
     ["connection error", new CreateosSandboxConnectionError("connect ECONNREFUSED")],
     ["timeout", new CreateosSandboxTimeoutError("deadline")],
     ["a non-SDK error (GitHub mint failure, DO blip)", new Error("boom")],
