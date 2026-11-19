@@ -482,9 +482,7 @@ export async function handleWebhook(
     return new Response("bad signature", { status: 401 });
   }
   const delivery = req.headers.get("X-GitHub-Delivery") ?? crypto.randomUUID();
-  if (config.otel?.webhook) {
-    ctx.waitUntil(forwardWorkflowEvent(config.otel, req.headers.get("X-GitHub-Event"), body));
-  }
+  ctx.waitUntil(forwardWorkflowEvent(config.otel, req.headers.get("X-GitHub-Event"), body));
   const job = parseWorkflowJob(body);
   if (!job) return new Response("ignored", { status: 202 });
 
