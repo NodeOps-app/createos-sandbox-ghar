@@ -940,3 +940,41 @@ describe("daggerEngineName", () => {
     }
   });
 });
+
+describe("createRunnerSandbox with the OTEL beta", () => {
+  const otelConfig = {
+    ...config,
+    otel: { endpoint: "https://collector.example", tokenKey: "k".repeat(32), installationIds: [7] },
+  } as Config;
+  const tenant = {
+    installationId: 7,
+    orgLogin: "acme",
+    runnerGroupId: 9,
+    allowAllRepos: false,
+    dagger: null,
+  };
+  const boot = async (cfg: Config, t: typeof tenant, attemptId: string) => {
+    const createSandbox = vi.fn().mockResolvedValue({ id: "sb", runCommand: vi.fn() });
+    const github = { generateJitConfig: vi.fn().mockResolvedValue("BLOB") } as any;
+    await createRunnerSandbox(
+      cfg,
+      github,
+      { ...job, tenant: t },
+      { makeClient: () => ({ createSandbox }) as any, attemptId: () => attemptId },
+    );
+    return createSandbox.mock.calls[0]![0].envs as Record<string, string>;
+  };
+
+  it("gives an allowlisted tenant's runner the endpoint and a token unique to that attempt", async () => {
+    const a = await boot(otelConfig, tenant, "aa");
+    const b = await boot(otelConfig, tenant, "ab");
+    expect(a.OTEL_EXPORTER_OTLP_ENDPOINT).toBe("https://collector.example");
+    expect(a.OTEL_EXPORTER_OTLP_HEADERS).toContain("x-ghar-token=cos-");
+    expect(a.OTEL_EXPORTER_OTLP_HEADERS).not.toBe(b.OTEL_EXPORTER_OTLP_HEADERS);
+  });
+
+  it("gives any other tenant the plain env", async () => {
+    const env = await boot(otelConfig, { ...tenant, installationId: 8 }, "aa");
+    expect(env).toEqual({ JIT_CONFIG: "BLOB" });
+  });
+});

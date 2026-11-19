@@ -48,6 +48,11 @@ CREATEOS_BASE_URL = "https://api-eu.sb.createos.sh"
 # failover ladder as best-effort until the planes are genuinely disjoint, and do
 # NOT lean on cross-region isolation for capacity.
 CREATEOS_REGIONS = "default=https://api-eu.sb.createos.sh,eu=https://api-us.sb.createos.sh"
+# OTEL beta (see src/otel.ts): the collector's OTLP URL and which tenants' runners get
+# telemetry env. Inert unless the OTEL_TOKEN_KEY secret is also set. 170383495 = the
+# approved NodeOps-app tenant (144593770 is its suspended predecessor).
+OTEL_ENDPOINT = "https://01m7say7btb3aq4c3vcr68ryqk-4318.app.sb.createos.sh"
+OTEL_INSTALLATION_IDS = "170383495"
 RUNNER_LABEL = "createos"
 RUNNER_TEMPLATE = "ghar-runner"
 SANDBOX_NAME_PREFIX = "gha-ci"

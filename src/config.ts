@@ -76,6 +76,24 @@ export function regions(env: Record<string, unknown>): Region[] {
   return out;
 }
 
+/** OTEL beta settings, or undefined when off. A partial set warns rather than throws: a misconfigured beta must never take provisioning down. */
+function otel(env: Record<string, unknown>): Config["otel"] {
+  const endpoint = ((env.OTEL_ENDPOINT as string) || "").replace(/\/+$/, "");
+  const tokenKey = (env.OTEL_TOKEN_KEY as string) || "";
+  const ids = ((env.OTEL_INSTALLATION_IDS as string) || "")
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  if (!endpoint && !tokenKey && ids.length === 0) return undefined;
+  if (!/^https:\/\/\S+$/.test(endpoint) || !tokenKey || ids.length === 0) {
+    console.warn(
+      "OTEL beta disabled: OTEL_ENDPOINT (https), OTEL_TOKEN_KEY and OTEL_INSTALLATION_IDS must all be set",
+    );
+    return undefined;
+  }
+  return { endpoint, tokenKey, installationIds: ids };
+}
+
 export function loadConfig(env: Record<string, unknown>): Config {
   const policy = (env.PROVISION_POLICY as string) || "org-wide";
   if (!POLICIES.includes(policy as ProvisionPolicy)) {
@@ -113,5 +131,6 @@ export function loadConfig(env: Record<string, unknown>): Config {
     adminToken: (env.ADMIN_TOKEN as string) || undefined,
     tenancyMode: mode(env),
     applyFormUrl: (env.APPLY_FORM_URL as string) || "",
+    otel: otel(env),
   };
 }

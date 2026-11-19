@@ -65,3 +65,5 @@ Glossary for the GitHub Actions runner controller. Terms only, no implementation
 - **Weighted minute** — one wall-clock minute of Sandbox lifetime × shape vCPU ÷ 2.
 
 - **Ledger** — per-Tenant, per-month usage rows; the month is part of the key, so a new month is a new row and there is no reset step. Billed at destroy confirmation (`markDestroyed`), using the weight persisted on the row when it last entered `provisioning` — stamped at enqueue for a Job that booted immediately, or recomputed at promotion for one that queued first — so the bill always reflects the shape the VM actually booted, even if `RUNNER_SHAPE` changed while the Job waited. A NULL weight (a row that predates per-Tenant billing) falls back to parsing it from the row's label.
+
+- **Telemetry token** — OTEL beta only: a per-Runner credential (`<runner name>.<expiry>.<hmac>`) the Worker injects, with the collector's endpoint, into an allowlisted Tenant's Runner so a job can send spans with `otel-cli`. One per Runner attempt, expires, and is useless to any other Runner. Absent for every other Tenant.
