@@ -91,6 +91,12 @@ export async function otelRunnerEnvs(
     OTEL_EXPORTER_OTLP_ENDPOINT: otel.endpoint,
     OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",
     OTEL_EXPORTER_OTLP_HEADERS: `${OTEL_TOKEN_HEADER}=${token}`,
+    // Measured: with the collector unreachable, every `docker build` waits 30s on the
+    // exporter's default timeouts; these three bring it to ~1.2s. A dead collector must
+    // not slow the tenant's CI.
+    OTEL_EXPORTER_OTLP_TIMEOUT: "1000",
+    OTEL_BSP_EXPORT_TIMEOUT: "1000",
+    OTEL_BSP_SCHEDULE_DELAY: "500",
   };
 }
 

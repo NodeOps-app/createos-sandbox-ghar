@@ -52,6 +52,15 @@ describe("otelRunnerEnvs", () => {
     expect((await verifyOtelToken(KEY, token, NOW)).ok).toBe(true);
   });
 
+  it("bounds the exporter timeouts so a dead collector cannot stall the tenant's builds", async () => {
+    const env = await otelRunnerEnvs(otel, 7, "cos-abc-1x", NOW);
+    expect(env).toMatchObject({
+      OTEL_EXPORTER_OTLP_TIMEOUT: "1000",
+      OTEL_BSP_EXPORT_TIMEOUT: "1000",
+      OTEL_BSP_SCHEDULE_DELAY: "500",
+    });
+  });
+
   it("fails open: a mint error yields no env instead of a failed provision", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const spy = vi.spyOn(crypto.subtle, "importKey").mockRejectedValueOnce(new Error("boom"));
