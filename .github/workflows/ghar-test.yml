@@ -150,8 +150,18 @@ jobs:
             test -n "${!v:-}" || { echo "::error::$v is not set"; exit 1; }
           done
           echo "endpoint: $OTEL_EXPORTER_OTLP_ENDPOINT"
-      - name: Send a span (--fail makes a rejected token fail the step)
+      # TRACEPARENT is built the way the collector's githubreceiver derives its own IDs
+      # (trace from run id + attempt, span from check_run id + step name), so this span
+      # nests under this step's span in the run's trace. STEP_NAME must equal `name:`.
+      - name: Send a span
+        env:
+          STEP_NAME: Send a span
+          CHECK_RUN_ID: ${{ job.check_run_id }}
         run: |
+          trace_id=$(printf '%s' "${GITHUB_RUN_ID}${GITHUB_RUN_ATTEMPT}t" | sha256sum | cut -c1-32)
+          span_id=$(printf '%s' "${CHECK_RUN_ID}-${STEP_NAME}-s" | sha256sum | cut -c17-32)
+          export TRACEPARENT="00-${trace_id}-${span_id}-01"
+          # --fail: a rejected token fails the step instead of vanishing.
           otel-cli exec --fail --verbose --timeout 10s --service ghar-smoke \
             --name "smoke-otel-${{ github.run_id }}" -- true
 
