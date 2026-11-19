@@ -9,10 +9,10 @@ FROM nodeops/sandbox:debian
 # Baking Go 1.26.3 into the image means rebuilding the template on every bump and
 # still missing whatever a repo actually asked for — so we ship the *substrate* those
 # actions need (a C toolchain, archivers, a writable tool cache) and let them install.
-ARG RUNNER_VERSION=2.338.0
+ARG RUNNER_VERSION=2.338.2
 # Bumped together with RUNNER_VERSION (bump-runner.yml / build.ts), from two
 # independent sources that must agree — see runnerDigest in build.ts.
-ARG RUNNER_SHA256=af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32
+ARG RUNNER_SHA256=baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40
 ARG GH_VERSION=2.96.0
 ARG GH_SHA256=83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60
 # Must equal DAGGER_VERSION in scripts/dagger-engine.ts: the CLI and a tenant's
