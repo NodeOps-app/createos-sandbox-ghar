@@ -28,8 +28,8 @@ processors:
         from_context: x-ghar-runner
         action: upsert
 exporters:
-  otlp/jaeger:
-    endpoint: 127.0.0.1:4317
+  otlp/tempo:
+    endpoint: 127.0.0.1:4319
     tls:
       insecure: true
   debug:
@@ -45,8 +45,8 @@ service:
     traces/github:
       receivers: [github]
       processors: [batch]
-      exporters: [debug, file, otlp/jaeger]
+      exporters: [debug, file, otlp/tempo]
     traces/runner:
       receivers: [otlp]
       processors: [resource/runner, batch]
-      exporters: [debug, file, otlp/jaeger]
+      exporters: [debug, file, otlp/tempo]
