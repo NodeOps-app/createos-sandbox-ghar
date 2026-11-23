@@ -10,11 +10,6 @@ name: ghar-test
 # so every push is a deploy worth verifying.
 on:
   workflow_dispatch:
-    inputs:
-      otel:
-        description: "Also run smoke-otel (needs OTEL_TOKEN_KEY set and a NodeOps-app runner)"
-        type: boolean
-        default: false
   push:
     branches: [main]
 
@@ -131,39 +126,6 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends redis-tools
           test "$(redis-cli -h 127.0.0.1 -p 6379 ping)" = "PONG"
-
-  # OTEL beta check. Dispatch-only (`gh workflow run ghar-test.yml -f otel=true`): the
-  # telemetry env exists only for allowlisted tenants and only once OTEL_TOKEN_KEY is
-  # set, so on a push it would fail for a reason that says nothing about the deploy.
-  # `verdict` tolerates this job being skipped, by name — see its `bad` count.
-  # The header carries the per-run token: it is never printed.
-  smoke-otel:
-    if: ${{ inputs.otel }}
-    needs: wait-for-deploy
-    runs-on: [createos]
-    timeout-minutes: 15
-    steps:
-      - name: Prove the runner got its telemetry env
-        run: |
-          set -euo pipefail
-          for v in OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_HEADERS; do
-            test -n "${!v:-}" || { echo "::error::$v is not set"; exit 1; }
-          done
-          echo "endpoint: $OTEL_EXPORTER_OTLP_ENDPOINT"
-      # TRACEPARENT is built the way the collector's githubreceiver derives its own IDs
-      # (trace from run id + attempt, span from check_run id + step name), so this span
-      # nests under this step's span in the run's trace. STEP_NAME must equal `name:`.
-      - name: Send a span
-        env:
-          STEP_NAME: Send a span
-          CHECK_RUN_ID: ${{ job.check_run_id }}
-        run: |
-          trace_id=$(printf '%s' "${GITHUB_RUN_ID}${GITHUB_RUN_ATTEMPT}t" | sha256sum | cut -c1-32)
-          span_id=$(printf '%s' "${CHECK_RUN_ID}-${STEP_NAME}-s" | sha256sum | cut -c17-32)
-          export TRACEPARENT="00-${trace_id}-${span_id}-01"
-          # --fail: a rejected token fails the step instead of vanishing.
-          otel-cli exec --fail --verbose --timeout 10s --service ghar-smoke \
-            --name "smoke-otel-${{ github.run_id }}" -- true
 
   # The template ships no language runtimes on purpose — every repo pins its own version,
   # so the toolchains arrive at job time via setup-* / asdf. This job is the contract test
@@ -328,7 +290,7 @@ jobs:
 
           printf '%s\n' "$jobs" | awk -F'\t' '{printf "%-12s %-10s %s\n", $1, $2, $3}'
 
-          bad=$(printf '%s\n' "$jobs" | awk -F'\t' '$2 != "success" && !($2 == "skipped" && $3 == "smoke-otel")' | wc -l | tr -d ' ')
+          bad=$(printf '%s\n' "$jobs" | awk -F'\t' '$2 != "success"' | wc -l | tr -d ' ')
           {
             echo "stuck=$stuck"
             echo "bad=$bad"

@@ -441,19 +441,6 @@ curl -X POST https://<worker>.workers.dev/admin/tenants/dagger \
 - Size the engine for your peak concurrency: 8 CPU-heavy jobs at once on the default 4 vCPU engine pinned it at ~400% CPU and ran 3.7x slower than one job (no failures).
 - If the engine sandbox is ever recreated, run step 1 and 2 again.
 
-## OTEL tracing (beta)
-
-`actions/runner` has no built-in OpenTelemetry. The beta has two halves, both off by default:
-
-- **Collector** — a long-lived `ghar-otel` sandbox runs the OpenTelemetry Collector (`githubreceiver`, alpha) behind public HTTPS: `:19418/events` takes GitHub `workflow_job`/`workflow_run` webhooks (HMAC-signed) and turns them into run/job/step/queue spans; `:4318/v1/traces` takes spans from runners through `scripts/otel-auth-proxy.ts`, which accepts only a valid, unexpired per-run token. Spans currently go to the collector's debug log and a file; no backend yet.
-- **Runners** — `otel-cli` is baked into the template. For tenants listed in `OTEL_INSTALLATION_IDS`, the Worker sets `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS` (a token unique to that runner) plus 1s exporter timeouts (without them a dead collector adds 30s to every `docker build`) when `OTEL_TOKEN_KEY` is set, so a step can wrap a command: `otel-cli exec --service my-ci --name build -- make`.
-
-- **Workflow events** — with `OTEL_WEBHOOK_URL` and the `OTEL_WEBHOOK_SECRET` secret set, the Worker also forwards each finished `workflow_job` / `workflow_run` event of an allowlisted tenant to the collector's webhook receiver (re-signed with the collector's own secret, 3s deadline, never blocks the webhook). The collector turns them into run / job / step / queue spans.
-
-- **Trace UI** — the collector also exports to a Tempo in the same sandbox, browsed through Grafana on its own public port (`:3000`, own login). A provisioned dashboard, "ghar CI tracing (beta)", shows queue wait, step p95 by job, runner-side span rates and the run / slow-step / failure tables. Setup files live in `scripts/otel-beta/`.
-
-Enable: `bunx wrangler secret put OTEL_TOKEN_KEY` (the same key the proxy runs with), set `OTEL_ENDPOINT` and `OTEL_INSTALLATION_IDS` in `wrangler.toml`.
-
 ## Onboarding a community tenant
 
 The operator side of [Get CreateOS runners for your org](#get-createos-runners-for-your-org). It assumes `TENANCY_MODE=multi` and the single public App `createos-runners`, with install-gated admission (ADR [0006](docs/adr/0006-one-app-public-install-gated.md)). Any org can **install** the App, but only registry-**approved** Tenants get runners. Unapproved installs get one neutral check run pointing at `APPLY_FORM_URL`, which is this README.

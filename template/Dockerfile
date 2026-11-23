@@ -20,11 +20,6 @@ ARG GH_SHA256=83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60
 # have no GitHub release assets to cross-check against).
 ARG DAGGER_VERSION=1.0.0-beta.23
 ARG DAGGER_SHA256=ba2588c2e0444c723e19fd43812cd6dbd868c58fc6cfa1c346e86708b1643d51
-# otel-cli, for the OTEL beta (src/otel.ts): lets a job wrap commands in spans sent
-# to the collector named by the OTEL_* env the Worker injects. Digest from the
-# release's checksums.txt, confirmed against a hash of the downloaded tarball.
-ARG OTEL_CLI_VERSION=0.4.5
-ARG OTEL_CLI_SHA256=2f192fadfb2107a92ae617ca93fd7c0b532fa618a5ebc3917e641c6a9fbaeb45
 
 # One transaction for every apt package, so the index is fetched once and one sweep
 # cleans up. Docs, man pages and locales are excluded at the dpkg level — dead weight
@@ -70,11 +65,6 @@ RUN curl -fsSL -o /tmp/dagger.tar.gz "https://dl.dagger.io/dagger/releases/${DAG
  && echo "${DAGGER_SHA256}  /tmp/dagger.tar.gz" | sha256sum -c - \
  && tar xzf /tmp/dagger.tar.gz -C /usr/local/bin dagger \
  && rm /tmp/dagger.tar.gz
-
-RUN curl -fsSL -o /tmp/otel-cli.tar.gz "https://github.com/equinix-labs/otel-cli/releases/download/v${OTEL_CLI_VERSION}/otel-cli_${OTEL_CLI_VERSION}_linux_amd64.tar.gz" \
- && echo "${OTEL_CLI_SHA256}  /tmp/otel-cli.tar.gz" | sha256sum -c - \
- && tar xzf /tmp/otel-cli.tar.gz -C /usr/local/bin otel-cli \
- && rm /tmp/otel-cli.tar.gz
 
 # The runner itself. installdependencies.sh pulls the .NET runtime libs (libicu,
 # libkrb5, liblttng-ust) — do not hand-install libicu-dev, the headers are 40 MiB of

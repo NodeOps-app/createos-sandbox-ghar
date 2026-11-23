@@ -31,12 +31,6 @@ export default defineConfig({
           // exercising it. Suites that test a specific bound override per-suite.
           RECOVERY_SUBREQUEST_BUDGET: "200",
           MAX_CONCURRENT: "2",
-          // Pin the OTEL beta off: prod's wrangler.toml now names an endpoint and
-          // an installation id, which would put telemetry env on fixture VMs. The
-          // beta's own tests build their Config directly.
-          OTEL_ENDPOINT: "",
-          OTEL_INSTALLATION_IDS: "",
-          OTEL_WEBHOOK_URL: "",
           GITHUB_ORG: "nodeops-app",
           RUNNER_LABEL: "createos",
           GITHUB_APP_ID: "1",

@@ -53,16 +53,6 @@ export interface Config {
   // Multi-tenancy master switch. "single" = the pre-tenant behavior, verbatim.
   tenancyMode: "single" | "multi";
   applyFormUrl: string; // onboarding form link used in refusal check runs ("" = generic copy)
-
-  // OTEL beta: unset = no runner gets telemetry env. When set, ONLY the listed
-  // tenants' runners get the endpoint plus a per-run token (src/otel.ts).
-  otel?: {
-    endpoint: string;
-    tokenKey: string;
-    installationIds: number[];
-    /** Where finished workflow events are forwarded; absent = no forwarding. */
-    webhook?: { url: string; secret: string };
-  };
 }
 
 /**

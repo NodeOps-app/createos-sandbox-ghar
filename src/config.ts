@@ -76,35 +76,6 @@ export function regions(env: Record<string, unknown>): Region[] {
   return out;
 }
 
-/** OTEL beta settings, or undefined when off. A partial set warns rather than throws: a misconfigured beta must never take provisioning down. */
-function otel(env: Record<string, unknown>): Config["otel"] {
-  const endpoint = ((env.OTEL_ENDPOINT as string) || "").replace(/\/+$/, "");
-  const tokenKey = (env.OTEL_TOKEN_KEY as string) || "";
-  const ids = ((env.OTEL_INSTALLATION_IDS as string) || "")
-    .split(",")
-    .map((s) => Number(s.trim()))
-    .filter((n) => Number.isInteger(n) && n > 0);
-  // No key is the kill switch: `wrangler secret delete OTEL_TOKEN_KEY` turns the beta
-  // off at once, with no code rollback, and stays silent (this runs on every request).
-  if (!tokenKey) return undefined;
-  if (!/^https:\/\/\S+$/.test(endpoint) || ids.length === 0) {
-    console.warn(
-      "OTEL beta disabled: OTEL_ENDPOINT (https) and OTEL_INSTALLATION_IDS must be set too",
-    );
-    return undefined;
-  }
-  const webhookUrl = (env.OTEL_WEBHOOK_URL as string) || "";
-  const webhookSecret = (env.OTEL_WEBHOOK_SECRET as string) || "";
-  const webhook =
-    /^https:\/\/\S+$/.test(webhookUrl) && webhookSecret
-      ? { url: webhookUrl, secret: webhookSecret }
-      : undefined;
-  // The URL alone is just the var that ships in wrangler.toml; a secret with no usable URL is a mistake.
-  if (webhookSecret && !webhook)
-    console.warn("OTEL forwarding disabled: OTEL_WEBHOOK_URL must be an https URL");
-  return { endpoint, tokenKey, installationIds: ids, webhook };
-}
-
 export function loadConfig(env: Record<string, unknown>): Config {
   const policy = (env.PROVISION_POLICY as string) || "org-wide";
   if (!POLICIES.includes(policy as ProvisionPolicy)) {
@@ -142,6 +113,5 @@ export function loadConfig(env: Record<string, unknown>): Config {
     adminToken: (env.ADMIN_TOKEN as string) || undefined,
     tenancyMode: mode(env),
     applyFormUrl: (env.APPLY_FORM_URL as string) || "",
-    otel: otel(env),
   };
 }

@@ -14,7 +14,6 @@ import {
   type SandboxHandle,
 } from "./createos";
 import { shapeForLabel } from "./shapes";
-import { otelRunnerEnvs } from "./otel";
 
 /**
  * How long createRunnerSandbox waits before its one post-failover retry, when
@@ -380,9 +379,6 @@ export async function createRunnerSandbox(
   // already opens, and sweepOrphanedSandboxes reclaims both.
   const budget = deps.createBudget?.() ?? AbortSignal.timeout(CREATE_BUDGET_MS);
   const dagger = job.tenant?.dagger;
-  // Minted once per provision: the runner name is per attempt, so the token is
-  // per run and cannot be replayed by another job's runner.
-  const otelEnvs = await otelRunnerEnvs(config.otel, job.tenant?.installationId, runnerName);
 
   const attempt = async (region: Region) => {
     const c = makeSandboxClient(config, deps, region);
@@ -398,11 +394,7 @@ export async function createRunnerSandbox(
       // Do NOT set auto_pause_after_seconds: a paused runner goes offline to
       // GitHub (missed dispatch, 1-day deregistration). Omitting it disables
       // idle auto-pause; these VMs self-delete per job anyway.
-      envs: {
-        JIT_CONFIG: jitConfig,
-        ...(dagger && { DAGGER_ENGINE: dagger.engine }),
-        ...otelEnvs,
-      },
+      envs: { JIT_CONFIG: jitConfig, ...(dagger && { DAGGER_ENGINE: dagger.engine }) },
       // Only this tenant's runners join its engine's network — the engine has
       // no auth, so network membership IS the access control.
       ...(dagger && { networks: [{ id: dagger.networkId }] }),
